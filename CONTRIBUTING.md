@@ -1,4 +1,253 @@
-# Branching, commits and releases
+# Contributing to fleet
+
+How fleet is built, and how work reaches `main`. Read all of it before your
+first item, whether you are a person or an agent. The first half is the
+method, adopted 2026-10-12. The second half is branches, commits and
+releases.
+
+## How fleet is built
+
+Four problems decide whether fleet stays buildable for years, and the method
+answers each one:
+
+| Problem | Answer |
+| --- | --- |
+| Saying what fleet does | **Specs**: the source people read and review |
+| Proving it does it | **Scenarios** run against fleet from a separate, blind repository |
+| Knowing how it works | **Learning**: walkthroughs led by the architecture map |
+| Keeping the code sound | **Code health**: guards, scheduled passes, metrics |
+
+**People own intent; agents own code.** People review, and may write, the
+seed PRD, the specs, the architecture map and the scenarios. People never
+write code and never gate on it; they read it only to learn, in
+walkthroughs. Agents draft most of the intent too, but a person
+approves every change to it. Builder agents work from the specs alone and
+never see a scenario. Reviewer agents still read code, against the
+code-health rules; no person gates on it.
+
+**The loop.** The seed PRD names the features. Each feature has a spec made of
+numbered clauses. An item (a bead) declares its kind and cites the clauses it
+touches. A builder writes the code. fleet-dtu runs the scenarios that cite
+those clauses. The item lands. Health passes and map sittings feed internal
+items back in.
+
+**Where each truth lives:**
+
+| Place | Holds | Written by |
+| --- | --- | --- |
+| `brain/specs/seed.md` | the seed PRD, one page: what fleet is, who it is for, its features, the limits it never crosses | agents draft, a person approves |
+| `brain/specs/mod.md` | the map's overview: the crates, the areas, how the areas connect, which may depend on which | agents draft from the code, a person approves |
+| `brain/specs/<area>/mod.md` | the area's part of the map: its feature specs, its modules and how work flows through them | agents draft from the code, a person approves |
+| `brain/specs/<area>/<feature>.md` | what a feature does: the only input a builder implements from | agents draft, a person approves |
+| fleet-dtu (sibling repository) | the scenarios and the twins: the proof | agents draft, a person approves; builders never see it |
+| `docs/` | the user manual, generated from the specs | the docs skill only; never a builder's input |
+| the rest of `brain/` | why fleet is shaped the way it is | Alberto |
+| beads | the work queue | agents and people |
+
+## Specs
+
+**The seed PRD** (`brain/specs/seed.md`) is one page: what fleet is, who it
+is for, the feature list with each feature's spec file, and the limits fleet
+never crosses. It changes only when a feature is added or removed, and links
+to the map rather than holding it.
+
+**The specs folder mirrors the code.** Each area has its own folder, and
+each folder's `mod.md` is its part of the architecture map, the way a Rust
+`mod.rs` is a module's root. The ten `docs/` areas are the starting split.
+
+    brain/specs/
+      seed.md            the seed PRD
+      mod.md             the map's overview
+      <area>/
+        mod.md           the area's map
+        <feature>.md     one feature's spec
+
+**The architecture map** is the `mod.md` files:
+
+- `brain/specs/mod.md` is the overview: the crates, the areas and the folder for
+  each, how a request crosses from one area to the next, and which crate
+  and area may depend on which (the dependency guard reads this).
+- `brain/specs/<area>/mod.md` lists the area's feature specs, and every code
+  module the area owns with one sentence each: what it does and what it
+  depends on. It says how work flows through those modules.
+
+The map changes when the architecture moves. An agent check flags drift: a
+module no area's map names, a module named by two areas, or a name with no
+module.
+
+**A feature spec** (`brain/specs/<area>/<feature>.md`) holds:
+
+- **Behaviour clauses**, `<area>.<feature>.R<n>`: `WHEN … fleet SHALL …`.
+- **Non-functional clauses**, `<area>.<feature>.N<n>`: recovery after a
+  crash or `kill -9`, concurrency, timing, limits.
+- **Interfaces**: what other areas and the adapters rely on.
+- **Definition of Done**: every clause has at least one scenario.
+
+A spec says what a user or a neighbouring component can observe, never how
+the code does it. If a reader could only notice it by reading the code, it is
+not in the spec. That keeps a spec as big as the product's surface, not as
+big as the code.
+
+**Zero clarification.** A builder must be able to implement a spec without
+asking anything. An open question is written `[NEEDS CLARIFICATION: …]` and
+blocks building the clauses it touches.
+
+**Clause ids are never reused.** A removed clause stays in the file, marked
+retired, so old items and scenarios that cite it still resolve.
+
+## Change kinds
+
+Every item declares one kind, as a bead label, and cites its clauses by id.
+The land gate checks the kind:
+
+| Kind | When | The spec | Scenarios |
+| --- | --- | --- | --- |
+| `behaviour` | something observable changes | changes first; the item cites the changed clauses | fleet-dtu adds or updates the scenarios for those clauses |
+| `fix` | the code broke a clause that already exists | does not change; the item cites the broken clause | fleet-dtu adds a scenario that would have caught it |
+| `internal` | comments, refactors, speed, dependencies | does not change | every scenario passes unchanged |
+
+A fix with no clause to cite has found a gap in the spec: it is a
+`behaviour` item. An item mislabelled `internal` is caught when its scenarios
+fail.
+
+## Scenarios and fleet-dtu
+
+fleet-dtu is a sibling repository holding the scenarios
+(`scenarios/<area>/S-<area>-<nnn>.md`), the twins and the runner. **It is
+never mounted into a builder's seat.** Its own agents see fleet's `brain/specs/`
+and the built binary, never fleet's source, so scenarios test the spec and
+not the implementation. Agents draft scenarios from the specs; a person
+approves each one.
+
+**The twins** are fake `claude` and `bd` command-line tools. They sit behind
+the real adapters from fleet-packs, with real git and real tmux on a private
+server, so a scenario runs the whole stack a user runs. A twin is faithful
+when `fleet agent check` or `fleet store check` passes against it exactly as
+it does against the real tool. That check is re-run against the real tool
+whenever its pin moves.
+
+**A scenario** is one Markdown file: a user story with checks.
+
+    # S-items-007: a dispatched item survives a controller kill -9
+    covers: items.dispatch.R3, seats.resume.N2
+
+    ## Given
+    - pack tiny · bd twin: open item t-1
+    - claude twin: idle → on prompt: commit one file, run `fleet deliver`
+
+    ## When
+    $ fleet dispatch t-1
+    ! kill -9 controller
+    $ fleet start
+
+    ## Then
+    - within 30s: t-1 is delivered
+    - the events include seat.resumed for the same session
+    - exactly one commit on the item's branch
+
+`$` lines are fleet commands, `!` lines are faults, and every check under
+`Then` is deterministic: exit codes, item states, events, commits, files. An
+LLM judges only output that is prose.
+
+**Running.** Each scenario gets its own `FLEET_DIR` and tmux server, so
+scenarios run in parallel. Each runs three times and passes only if all three
+pass, to catch races. A `behaviour` or `fix` item runs the scenarios citing
+its clauses. An `internal` item runs every area whose modules it touched; the
+map says which. The full suite runs at least daily and at every release.
+
+**What a builder hears back:** the verdict, the scenario's title, the clauses
+it cites, and fleet's own output and event log from the run. Never the
+scenario's text. A builder who finds the spec contradicting itself says so
+instead of guessing, and that becomes a spec item.
+
+**The holdout reserve.** About one scenario in five never reports to
+builders and runs only at release. A failure there means the builders are
+being fitted to the visible scenarios, and the spec or the suite needs work.
+
+## Unit tests
+
+Unit tests stay in fleet. New ones are written only for pure logic the
+scenarios cannot reach cheaply, such as parsers and the controller's decide
+step. Once an area's scenarios are complete, each of its unit tests is
+triaged. A test stays if it catches a break that no scenario catches (a
+mutant that the scenarios let through) and that break is worth pinning.
+Otherwise it goes.
+
+## Learning
+
+**The bar:** every person on the project knows the architecture map: what
+each area does, where its code lives, and how a request flows through it.
+
+**Walkthroughs.** One sitting covers one area. It starts from the area's
+folder, its `mod.md` and feature specs, and a trace of one real run
+read from fleet's event log. From there it goes into the code itself, module by
+module, as deep as the person wants. Reading code to learn is encouraged;
+what people never do is write it or approve it. The sitting ends with the
+person explaining the flow back, and its findings are filed as beads.
+
+**When:**
+
+- **Onboarding.** A new person walks every area once.
+- **After each release.** A short sitting covers each area whose spec or map
+  moved, so familiarity keeps pace with the code.
+- **Any time,** on request.
+
+## Code health
+
+- **Mechanical guards** are always on and fail the build:
+  - dependency rules from the map, generalising today's
+    core-never-depends-on-controller test;
+  - a pinned clippy lint set, with warnings denied;
+  - size budgets per file and per function, the numbers set in the pilot;
+  - no dead code and no unused dependencies.
+
+  Loosening a guard is a change a person approves, never a builder's call.
+- **Scheduled health passes** run at each release, before the docs pass.
+  Agents look for duplication, dead code and simplification, security
+  problems, and map fidelity. Each finding is an `internal` item.
+- **Map sittings** file what they find (see Learning). A module the map
+  cannot explain in one sentence is a finding.
+- **Metrics in every release's notes:**
+  - lines per crate and module, and the largest files;
+  - duplication and the clippy allow count;
+  - build time, scenario-suite time and the unit test count;
+  - clauses that have no scenario.
+
+  They are read as trends; a jump past a set threshold files a health item.
+
+## Moving to this method
+
+fleet moves to this method one area at a time.
+
+1. **Phase 0.** Write `brain/specs/seed.md`, the overview
+   `brain/specs/mod.md`, and every area's folder with its `mod.md`, so the
+   whole map exists before any spec does. Fix what now points the wrong way
+   (README's links to the archived `brain/fleet-layers.md`, the rules in
+   `docs/README.md`), and measure today's suite as the baseline.
+2. **Pick the pilot area** together, after the seed PRD is written.
+3. **The pilot.** Its feature specs, fleet-dtu with the twins and its
+   scenarios, and the guards, measured against the baseline.
+4. **The rest**, one area at a time.
+
+An area is **converted** when every clause has a scenario, its scenarios pass
+in fleet-dtu, its docs are regenerated from its spec, and its unit tests are
+triaged. Until then the area keeps the old rules: its docs are checked
+against the code, and its unit tests are its proof.
+
+| Area | Status |
+| --- | --- |
+| onboarding | not converted |
+| packs | not converted |
+| items | not converted |
+| runs | not converted |
+| seats | not converted |
+| guards | not converted |
+| status | not converted |
+| conventions | not converted |
+| store | not converted |
+| agent | not converted |
+
+## Branching, commits and releases
 
 Kept simple on purpose. Three kinds of branch, one commit shape, and one way
 work reaches `main`.
@@ -80,13 +329,17 @@ that repository's. git carries no pin.
 
 ## Releasing
 
-1. **The docs pass.** When the branch's work is done, run the docs skill's
+1. **The health pass.** When the branch's work is done, run the scheduled
+   health passes (see Code health), the full scenario suite with the holdout
+   reserve, and record the release's metrics. Each finding is an `internal`
+   item, landed on the branch or filed for the next release.
+2. **The docs pass.** Then run the docs skill's
    release pass (`.claude/skills/docs/SKILL.md` § 8) over the items landed on
    the branch. It lands as the branch's last item, subject
    `<item id>: docs release pass for <x.y.z>`.
-2. **Open the release PR** from `release/<x.y.z>` to `main`.
-3. **Squash-merge it.** The squash commit's subject is `release: v<x.y.z>`.
-4. **The release workflow runs on that push to `main`**
+3. **Open the release PR** from `release/<x.y.z>` to `main`.
+4. **Squash-merge it.** The squash commit's subject is `release: v<x.y.z>`.
+5. **The release workflow runs on that push to `main`**
    (`.github/workflows/release.yml`). It:
    - reads the version from `Cargo.toml` and refuses if the tag `v<x.y.z>`
      already exists or the version does not match the merged branch's name;
@@ -95,7 +348,7 @@ that repository's. git carries no pin.
    - builds the changelog from the release branch's commit subjects, grouped
      by item, and creates the GitHub release with it;
    - publishes `docs/` for that version (the renderer is not chosen yet).
-5. **Delete the release branch**, and cut the next one when work for it
+6. **Delete the release branch**, and cut the next one when work for it
    starts.
 
 ## Hotfixes
