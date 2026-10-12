@@ -34,6 +34,6 @@ that changes.
 | 2026-10-12 | 1a28043 | 23.9s | 1496 · 88.0s · 40 failed | 11 · 26.7s | 707 / 317 / 472 | 32736 / 23716 / 9498 | controller/src/run.rs (1904) | 11 / 0 | n/a (0 clauses) |
 
 The first row is the baseline Phase 0 took before any spec existed (fleet-5qos),
-on an Apple M4 with 10 cores, inside an agent sandbox. Its 40 failures are all
-in fleet-core's `add` and `remove` tests and may come from the sandbox rather
-than the code.
+on an Apple M4 with 10 cores, inside an agent sandbox. Its 40 failures, all in
+fleet-core's `add` and `remove` tests, were real: macOS's nightly temp cleanup
+had hollowed out the tests' cached repositories (fleet-py9n, fixed since).
