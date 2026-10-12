@@ -11,6 +11,27 @@ use fleet_core::add::{self, Refusal, Source, Version};
 use fleet_core::lock;
 use fleet_core::resolve;
 
+/// macOS empties the per-user temp folder of files nobody touched for three
+/// days and keeps the folders, so a template it has been through is a folder
+/// with no `sha` and nothing in its repository. The next run must build it
+/// again rather than panic at the rename (fleet-py9n).
+#[test]
+fn a_template_the_temp_cleaner_hollowed_out_is_built_again() {
+    let pack = manifest("hollowed");
+    let files: &[(&str, &str)] = &[("pack.toml", &pack), ("NOTE", "fleet-py9n\n")];
+    let home = common::template_home(files);
+    std::fs::create_dir_all(home.join("repo").join(".git").join("objects"))
+        .expect("the hollow template is planted");
+
+    let (fixture, sha) = repo("hollowed", files);
+
+    assert_eq!(sha.len(), 40, "a commit is 40 hex: {sha}");
+    assert!(
+        fixture.path("pack.toml").is_file(),
+        "the rebuilt template holds its files"
+    );
+}
+
 fn lines(refusals: &[Refusal]) -> String {
     refusals
         .iter()

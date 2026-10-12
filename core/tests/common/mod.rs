@@ -177,9 +177,46 @@ fn open_store() -> &'static PathBuf {
         let store = templates();
         let _ = std::fs::create_dir_all(&store);
         let _ = std::fs::write(store.join("used"), b"");
+        clear_hollow_templates(&store);
         sweep_cold_templates(&std::env::temp_dir(), &store);
         store
     })
+}
+
+/// Removes every template in `store` that is not whole. A build writes `sha`
+/// into its staging directory before the one rename that makes it visible, so
+/// no process ever leaves a home without it; what stands there without it is
+/// what macOS's daily temp cleaner leaves of a template nobody touched for
+/// three days — the folders, none of the files (fleet-py9n). Left standing, it
+/// makes every rename onto its key fail and every arm that wants it panic.
+///
+/// A hollow home is claimed by renaming it aside, which only one process can
+/// do, and checked again once claimed: a home that turned whole in between was
+/// built by a racing process and goes straight back.
+fn clear_hollow_templates(store: &Path) {
+    let Ok(entries) = std::fs::read_dir(store) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let home = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.')
+            || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            || built_template(&home).is_some()
+        {
+            continue;
+        }
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let aside = store.join(format!(".hollow-{name}-{}-{n}", std::process::id()));
+        if std::fs::rename(&home, &aside).is_err() {
+            continue;
+        }
+        if built_template(&aside).is_some() {
+            let _ = std::fs::rename(&aside, &home);
+        } else {
+            remove_store(&aside);
+        }
+    }
 }
 
 /// Removes every `fleet-repo-templates-<key>` directory beside `keep` whose
@@ -282,9 +319,22 @@ fn mode(path: &Path, bits: u32) {
         .unwrap_or_else(|e| panic!("the template's mode is set on {}: {e}", path.display()));
 }
 
+/// Where the template for `files` stands, without opening the store: an arm can
+/// plant a damaged template there before this process ever looks.
+pub fn template_home(files: &[(&str, &str)]) -> PathBuf {
+    templates().join(template_key(files))
+}
+
+/// A whole template: its recorded commit, and a repository that still holds
+/// one. The second half matters because the temp cleaner may take the
+/// repository's files and leave `sha`.
 fn built_template(home: &Path) -> Option<(PathBuf, String)> {
     let sha = std::fs::read_to_string(home.join("sha")).ok()?;
-    Some((home.join("repo"), sha))
+    let repo = home.join("repo");
+    repo.join(".git")
+        .join("HEAD")
+        .is_file()
+        .then_some((repo, sha))
 }
 
 /// The repository for one file set, built once and left standing for whoever
