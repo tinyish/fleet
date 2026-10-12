@@ -41,6 +41,7 @@ items back in.
 | `brain/specs/<area>/<feature>.md` | what a feature does: the only input a builder implements from | agents draft, a person approves |
 | fleet-dtu (sibling repository) | the scenarios and the twins: the proof | agents draft, a person approves; builders never see it |
 | `docs/` | the user manual, generated from the specs | the docs skill only; never a builder's input |
+| `brain/metrics.md` | the code-health numbers, one row per release | `tools/metrics`, at each release's health pass |
 | the rest of `brain/` | why fleet is shaped the way it is | Alberto |
 | beads | the work queue | agents and people |
 
@@ -209,13 +210,17 @@ person explaining the flow back, and its findings are filed as beads.
   problems, and map fidelity. Each finding is an `internal` item.
 - **Map sittings** file what they find (see Learning). A module the map
   cannot explain in one sentence is a finding.
-- **Metrics in every release's notes:**
-  - lines per crate and module, and the largest files;
-  - duplication and the clippy allow count;
-  - build time, scenario-suite time and the unit test count;
+- **Metrics, one row per release** in `brain/metrics.md`, printed by
+  `python3 tools/metrics`:
+  - build time, each test lane's tests and time, tests per crate;
+  - lines per crate and the largest source file;
+  - clippy allows and warnings;
   - clauses that have no scenario.
 
-  They are read as trends; a jump past a set threshold files a health item.
+  They are read as trends: compare the new row with the ones above it and
+  file a health item for what moved the wrong way. Thresholds that file items
+  on their own are set once three rows exist. Duplication joins the table when
+  the first health pass picks a tool for it.
 
 ## Moving to this method
 
@@ -334,8 +339,9 @@ that repository's. git carries no pin.
 
 1. **The health pass.** When the branch's work is done, run the scheduled
    health passes (see Code health), the full scenario suite with the holdout
-   reserve, and record the release's metrics. Each finding is an `internal`
-   item, landed on the branch or filed for the next release.
+   reserve, and append the row `python3 tools/metrics` prints to
+   `brain/metrics.md`. Each finding is an `internal` item, landed on the
+   branch or filed for the next release.
 2. **The docs pass.** Then run the docs skill's
    release pass (`.claude/skills/docs/SKILL.md` § 8) over the items landed on
    the branch. It lands as the branch's last item, subject
