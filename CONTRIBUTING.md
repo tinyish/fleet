@@ -231,29 +231,35 @@ fleet moves to this method one area at a time.
    whole map exists before any spec does. Fix what now points the wrong way
    (README's links to the archived `brain/fleet-layers.md`, the rules in
    `docs/README.md`), and measure today's suite as the baseline.
-2. **Pick the pilot area** together, after the seed PRD is written.
-3. **The pilot.** Its feature specs, fleet-dtu with the twins and its
-   scenarios, and the guards, measured against the baseline.
-4. **The rest**, one area at a time.
+2. **The pilot is onboarding.** Its feature specs, fleet-dtu with the twins
+   and its scenarios, and the guards, measured against the baseline.
+3. **The rest**, one area at a time, in the order below.
+
+**Areas convert in the order a person meets them** using fleet for the first
+time: setting it up, adding a seat, working an item, watching it, being
+refused by a guard, and only later customising packs, workflows and
+routines or writing adapters. The specs then read as the path a new user
+walks. `shared` is not converted on its own: each of its features is specced
+with the first area that needs it (the exit codes with onboarding).
 
 An area is **converted** when every clause has a scenario, its scenarios pass
 in fleet-dtu, its docs are regenerated from its spec, and its unit tests are
 triaged. Until then the area keeps the old rules: its docs are checked
 against the code, and its unit tests are its proof.
 
-| Area | Status |
-| --- | --- |
-| onboarding | not converted |
-| packs | not converted |
-| items | not converted |
-| runs | not converted |
-| seats | not converted |
-| guards | not converted |
-| status | not converted |
-| store | not converted |
-| agent | not converted |
-| routines | not converted |
-| shared | not converted |
+| Order | Area | Status |
+| --- | --- | --- |
+| 1 | onboarding | not converted (the pilot) |
+| 2 | seats | not converted |
+| 3 | items | not converted |
+| 4 | status | not converted |
+| 5 | guards | not converted |
+| 6 | packs | not converted |
+| 7 | runs | not converted |
+| 8 | routines | not converted |
+| 9 | store | not converted |
+| 10 | agent | not converted |
+| — | shared | specced feature by feature, with the area that first needs each |
 
 ## Branching, commits and releases
 
