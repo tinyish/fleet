@@ -16,7 +16,7 @@ share, the crate roots, and the fakes and stubs the tests drive.
 - `brain/specs/shared/item-ids.md` — naming an item by its full id, and what a
   verb does with a suffix. Not written yet.
 - `brain/specs/shared/locations.md` — the machine directory, and finding the
-  fleet and project a call acts in. Not written yet.
+  fleet and project a call acts in.
 
 ## Modules
 
