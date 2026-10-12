@@ -53,7 +53,9 @@ to the map rather than holding it.
 
 **The specs folder mirrors the code.** Each area has its own folder, and
 each folder's `mod.md` is its part of the architecture map, the way a Rust
-`mod.rs` is a module's root. The ten `docs/` areas are the starting split.
+`mod.rs` is a module's root. The areas started from the `docs/` areas and are
+the folders under `brain/specs/`, listed in the table under § Moving to this
+method.
 
     brain/specs/
       seed.md            the seed PRD
@@ -243,9 +245,10 @@ against the code, and its unit tests are its proof.
 | seats | not converted |
 | guards | not converted |
 | status | not converted |
-| conventions | not converted |
 | store | not converted |
 | agent | not converted |
+| routines | not converted |
+| shared | not converted |
 
 ## Branching, commits and releases
 
