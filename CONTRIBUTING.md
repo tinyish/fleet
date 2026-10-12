@@ -73,9 +73,9 @@ method.
   module the area owns with one sentence each: what it does and what it
   depends on. It says how work flows through those modules.
 
-The map changes when the architecture moves. An agent check flags drift: a
-module no area's map names, a module named by two areas, or a name with no
-module.
+The map changes when the architecture moves. A test, `cli/tests/map.rs`,
+fails the build on drift: a module no area's map names, a module named
+twice, or a name with no module.
 
 **A feature spec** (`brain/specs/<area>/<feature>.md`) holds:
 
