@@ -12,21 +12,29 @@ skill, `.claude/skills/docs/SKILL.md`.
 ## Rules
 
 1. **Behaviour, not implementation.** An area file says what a user observes.
-   How the code does it belongs to the code walkthrough, and why fleet is
-   shaped this way belongs to `brain/`. Shipped behaviour only: design nobody
-   has built is not here.
+   What fleet must do is specified in `brain/specs/`; where the code does it
+   is the map, `brain/specs/mod.md`; why fleet is shaped this
+   way is the rest of `brain/`. Shipped behaviour only: design nobody has
+   built is not here.
 2. **Agent-written only.** A session writes these files through the docs
    skill. A person never edits them.
 3. **Corrections are beads.** Spot an error, file a bead labelled `docs`
    quoting the sentence and naming the file. The session that takes it
-   verifies the claim against the code and fixes the file.
-4. **Every claim verified when written**, against the code or by a command
-   run against a built binary. The citations, `file:line` per claim, go in a
-   review note on the bead that carried the change, never in the file.
+   verifies the claim against the area's feature specs, or against the code
+   while the area is not converted (`CONTRIBUTING.md` § Moving to this
+   method), and fixes the file.
+4. **Every claim verified when written.** In a converted area, against the
+   feature spec's clauses; in one not yet converted, against the code or by
+   a command run against a built binary. The citations, clause ids or
+   `file:line` per claim, go in a review note on the bead that carried the
+   change, never in the file.
 5. **Reconciled at release.** A release pass walks the items landed since the
    last release and updates the areas they touched.
 6. **This directory is canonical.** A published site is a rendering of it,
    built one way from here and never edited. The renderer is not chosen yet.
+7. **A manual, never a source.** These files are generated from the specs
+   for people learning fleet. A builder never takes intended behaviour from
+   them; the specs are the source (`CONTRIBUTING.md` § How fleet is built).
 
 ## Areas
 

@@ -2,6 +2,10 @@
 
 One binary, three crates.
 
+How fleet is built, and what it must do, are written down rather than read
+out of the code: `CONTRIBUTING.md` is the method, `brain/specs/seed.md` the
+one-page PRD, and `brain/specs/mod.md` the map of where each piece lives.
+
 ## Layout
 
 | Crate | Package | Import path | What it is |
@@ -56,12 +60,11 @@ exercise.
 
 ## Flying unattended
 
-Core ships **no routine that composes or flies**.
-Composition is a workflow's — tiny's `preboard` writes a flight's list and its
-`takeoff` opens and flies it, both over core's `fleet run`
-(`brain/fleet-layers.md` § What moves). A fleet with nobody composing flights
-is one file a person writes into their fleet's `orders/` directory, in the
-controller's own routine format:
+Core ships **no routine that composes or flies**. Composition is a workflow's —
+tiny's `preboard` writes a flight's list and its `takeoff` opens and flies it,
+both over core's `fleet run` (`docs/runs.md`). A fleet with nobody
+composing flights is one file a person writes into their fleet's `orders/`
+directory, in the controller's own routine format:
 
 ```toml
 [order]
@@ -85,10 +88,10 @@ this exact block out of this file through the routine loader, so the example
 cannot drift from the format it claims to be in.
 
 The autopilot switch is a machine setting the takeoff routine reads — to be
-filed after the MVP — not a verb: on, the routine opens the oldest plan while the open runs are under the
-cap; off, nothing opens (`brain/fleet-layers.md` § tiny). The three verbs
-`fleet plan`, `fleet fly` and `fleet autopilot on|off` were core's until
-2026-09-17 (workflows-formula-fate).
+filed after the MVP — not a verb: on, the routine opens the oldest plan while
+the open runs are under the cap; off, nothing opens.
+The three verbs `fleet plan`, `fleet fly` and `fleet autopilot on|off` were
+core's until 2026-09-17 (workflows-formula-fate).
 
 ## The plugin
 
