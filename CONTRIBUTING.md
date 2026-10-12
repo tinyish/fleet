@@ -55,8 +55,8 @@ to the map rather than holding it.
 **The specs folder mirrors the code.** Each area has its own folder, and
 each folder's `mod.md` is its part of the architecture map, the way a Rust
 `mod.rs` is a module's root. The areas started from the `docs/` areas and are
-the folders under `brain/specs/`, listed in the table under § Moving to this
-method.
+the folders under `brain/specs/`, listed in the map's overview
+(`brain/specs/mod.md` § Areas).
 
     brain/specs/
       seed.md            the seed PRD
@@ -127,7 +127,34 @@ the real adapters from fleet-packs, with real git and real tmux on a private
 server, so a scenario runs the whole stack a user runs. A twin is faithful
 when `fleet agent check` or `fleet store check` passes against it exactly as
 it does against the real tool. That check is re-run against the real tool
-whenever its pin moves.
+whenever its pin moves. Every answer a twin gives is recorded from the real
+tool at its pin.
+
+**How fleet-dtu is built.** It is a Rust workspace beside fleet
+(`../fleet-dtu`). It has two binaries:
+
+- `dtu`, the runner, which parses scenarios, builds each one's sandbox, runs
+  it and checks it;
+- one twin binary that answers as `claude`, `bd`, tmux or the service
+  manager, depending on the name it is called by.
+
+Scenarios run on the maintainer's Mac for now, and the full suite runs there
+daily as a launchd job. Linux joins when fleet-dtu gets CI.
+
+**The sandbox.** Each run of a scenario gets its own directory holding:
+
+- its own `HOME` and `FLEET_DIR`, and a git project;
+- a private tmux server: the tmux twin runs the real tmux on a socket inside
+  the sandbox;
+- a service-manager twin, named by `FLEET_SERVICE_BIN`. It runs the real
+  `fleet observe` with the scenario's environment when fleet loads the
+  service, and stops it with SIGTERM when fleet unloads it;
+- the claude and bd twins, named by `FLEET_CLAUDE_BIN` and `FLEET_BD_BIN`;
+- fleet-packs from a local checkout at the pinned tag, reached through the
+  sandbox's git config, so nothing touches the network.
+
+Nothing a scenario does reaches the real launchd, systemd, tmux server or
+home directory.
 
 **A scenario** is one Markdown file: a user story with checks.
 
@@ -163,18 +190,47 @@ it cites, and fleet's own output and event log from the run. Never the
 scenario's text. A builder who finds the spec contradicting itself says so
 instead of guessing, and that becomes a spec item.
 
+**The bridge.** `tools/scenarios` is fleet's only way into fleet-dtu. A
+builder runs it with clause ids or an area. It builds fleet, has `dtu` run
+the matching scenarios, and prints only what a builder hears back. With
+`--coverage` it prints instead, for each clause id, how many scenarios cite it
+and the visible ones' titles. The gate and `tools/metrics` read that list.
+
+fleet's Claude Code project settings deny every session in fleet's checkout
+any read of fleet-dtu, and so every builder seat and its subagents. The file
+tools are denied by a `Read` deny rule. The shell is denied by the sandbox's
+`denyRead`, with unsandboxed retries turned off. Only the bridge is excluded
+from the sandbox. fleet-dtu's own settings deny its sessions fleet's source the
+same way, leaving them `brain/specs/` and the built binary.
+
 **The holdout reserve.** About one scenario in five never reports to
-builders and runs only at release. A failure there means the builders are
-being fitted to the visible scenarios, and the spec or the suite needs work.
+builders: it runs only in the daily run and at release, whose results go to
+a person. A failure there means the builders are being fitted to the visible
+scenarios, and the spec or the suite needs work. A holdout says
+`holdout: true` under its `covers:` line, and the bridge never runs it.
+
+**The land gate** is `tools/gate <bead id>`, run by the reviewer before an
+item is squash-landed. It:
+
+- reads the item's kind label and the clauses it cites;
+- refuses an item with no kind, a cited clause that does not exist, or a
+  `behaviour` item whose spec did not change in the item;
+- stops an item that changes the bridge, the gate, the size list or the
+  read-deny settings until a person approves it;
+- runs the guards;
+- runs the scenarios through the bridge. That is the cited clauses'
+  scenarios for `behaviour` and `fix` items, and those of every area whose
+  modules it touched for an `internal` item. It refuses on any failure, and
+  on a cited clause no scenario covers.
+
+`fleet land` may call the same gate once fleet builds itself.
 
 ## Unit tests
 
 Unit tests stay in fleet. New ones are written only for pure logic the
 scenarios cannot reach cheaply, such as parsers and the controller's decide
-step. Once an area's scenarios are complete, each of its unit tests is
-triaged. A test stays if it catches a break that no scenario catches (a
-mutant that the scenarios let through) and that break is worth pinning.
-Otherwise it goes.
+step. A unit test earns its place only by catching a break that no scenario
+catches, and that break must be worth pinning.
 
 ## Learning
 
@@ -199,12 +255,19 @@ person explaining the flow back, and its findings are filed as beads.
 
 - **Mechanical guards** are always on and fail the build:
   - dependency rules from the map, generalising today's
-    core-never-depends-on-controller test;
-  - a pinned clippy lint set, with warnings denied;
-  - size budgets per file and per function, the numbers set in the pilot;
+    core-never-depends-on-controller test: a test reads § Allowed
+    dependencies in `brain/specs/mod.md`, and a crate or area edge the map
+    does not list fails it;
+  - a pinned toolchain and clippy lint set, with warnings denied;
+  - size budgets: at most 100 lines per function and 600 lines per file, not
+    counting a file's inline tests. Code over budget when the guard landed is
+    listed beside the guard at its size. A listed function or file may shrink
+    but never grow, and leaves the list once it is within budget;
   - no dead code and no unused dependencies.
 
   Loosening a guard is a change a person approves, never a builder's call.
+  That includes adding to the size list, and changing the scenario bridge, the
+  land gate or a seat's read-deny (see § Scenarios and fleet-dtu).
 - **Scheduled health passes** run at each release, before the docs pass.
   Agents look for duplication, dead code and simplification, security
   problems, and map fidelity. Each finding is an `internal` item.
@@ -224,15 +287,20 @@ person explaining the flow back, and its findings are filed as beads.
 
 ## Moving to this method
 
-fleet moves to this method one area at a time.
+fleet moves to this method one area at a time. This section holds
+everything that is true only during the move. When the last area converts,
+the whole section is deleted and nothing else in this file changes
+(fleet-ptd9).
 
 1. **Phase 0.** Write `brain/specs/seed.md`, the overview
    `brain/specs/mod.md`, and every area's folder with its `mod.md`, so the
    whole map exists before any spec does. Fix what now points the wrong way
    (README's links to the archived `brain/fleet-layers.md`, the rules in
    `docs/README.md`), and measure today's suite as the baseline.
-2. **The pilot is onboarding.** Its feature specs, fleet-dtu with the twins
-   and its scenarios, and the guards, measured against the baseline.
+2. **The pilot is onboarding.** Its feature specs come first, with `shared`'s
+   exit codes, locations and output. Then come fleet-dtu with the twins, the
+   bridge and the land gate, onboarding's scenarios, and the guards, all
+   measured against the baseline.
 3. **The rest**, one area at a time, in the order below.
 
 **Areas convert in the order a person meets them** using fleet for the first
@@ -240,12 +308,37 @@ time: setting it up, adding a seat, working an item, watching it, being
 refused by a guard, and only later customising packs, workflows and
 routines or writing adapters. The specs then read as the path a new user
 walks. `shared` is not converted on its own: each of its features is specced
-with the first area that needs it (the exit codes with onboarding).
+with the first area that needs it (the exit codes, locations and output with
+onboarding).
+
+**Converting an area starts from what fleet does today.** An agent drafts
+each spec from fleet's observable behaviour: it runs fleet, and reads the
+area's docs and code. It writes only what a user or a neighbouring component
+can observe. Anything that looks accidental or wrong is written
+`[NEEDS CLARIFICATION: …]` for a person to rule on, never kept silently. The
+person reads and edits each spec file before it is committed. The scenarios
+then pass against today's binary, except where a ruling changes behaviour;
+each such ruling is a `behaviour` item.
 
 An area is **converted** when every clause has a scenario, its scenarios pass
 in fleet-dtu, its docs are regenerated from its spec, and its unit tests are
 triaged. Until then the area keeps the old rules: its docs are checked
-against the code, and its unit tests are its proof.
+against the code, and its unit tests are its proof. The land gate then runs
+the area's unit tests in place of its scenarios.
+
+**Triaging an area's unit tests** happens once its scenarios are complete.
+An agent does it from inside fleet, so it never sees a scenario's text. It
+reads each of the area's unit tests against the area's specs and the titles
+and clauses of its scenarios, from the bridge's coverage list. It decides
+whether each test stays or goes by the rule in § Unit tests, and writes one
+report giving the reason for every test it kept and every test it removed. A
+person reads the report before the removals land.
+
+**Twins grow area by area.** A twin answers only the calls the converted
+areas' scenarios make. While a twin is partial, its faithfulness check runs
+only the checks for the calls it answers. The bd twin must pass the whole
+`fleet store check` before items converts. The claude twin must pass the
+whole `fleet agent check` before seats converts.
 
 | Order | Area | Status |
 | --- | --- | --- |
