@@ -7,6 +7,21 @@ files, their state, and `fleet routine list`, `check`, `run` and `history`. It
 is an area of its own because no docs area covers routines; the packs, status
 and exit-code docs mention them only in passing.
 
+## Feature specs
+
+- `brain/specs/routines/files.md` — a routine file: its trigger and its action.
+  Not written yet.
+- `brain/specs/routines/firing.md` — the controller firing a due routine, its
+  state, and the events it writes. Not written yet.
+- `brain/specs/routines/list.md` — `fleet routine list`: every routine loaded,
+  its next due and its last outcome. Not written yet.
+- `brain/specs/routines/check.md` — `fleet routine check`: whether a routine is
+  due now, without firing it. Not written yet.
+- `brain/specs/routines/run.md` — `fleet routine run`: firing one routine now.
+  Not written yet.
+- `brain/specs/routines/history.md` — `fleet routine history`: the routine
+  events on the stream. Not written yet.
+
 ## Modules
 
 - `cli/src/routines.rs` — Runs `fleet routine list`, `check`, `run` and

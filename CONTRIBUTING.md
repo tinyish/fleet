@@ -131,7 +131,7 @@ whenever its pin moves.
 **A scenario** is one Markdown file: a user story with checks.
 
     # S-items-007: a dispatched item survives a controller kill -9
-    covers: items.dispatch.R3, seats.resume.N2
+    covers: items.dispatch.R3, seats.observe.N2
 
     ## Given
     - pack tiny · bd twin: open item t-1
@@ -144,7 +144,7 @@ whenever its pin moves.
 
     ## Then
     - within 30s: t-1 is delivered
-    - the events include seat.resumed for the same session
+    - the events include session.adopted for the same session
     - exactly one commit on the item's branch
 
 `$` lines are fleet commands, `!` lines are faults, and every check under

@@ -5,6 +5,15 @@ reaches it only through an adapter a pack ships. This area covers that contract:
 its types and verbs, the call to the adapter, `fleet store schema` and `fleet
 store check`.
 
+## Feature specs
+
+- `brain/specs/store/contract.md` — the store contract: choosing an adapter, the
+  call, its types, verbs and exit table. Not written yet.
+- `brain/specs/store/schema.md` — `fleet store schema`: printing the contract as
+  a JSON Schema. Not written yet.
+- `brain/specs/store/check.md` — `fleet store check`: running the contract's
+  conformance suite against an adapter. Not written yet.
+
 ## Modules
 
 - `cli/src/store.rs` — Runs `fleet store check` against a store adapter, and

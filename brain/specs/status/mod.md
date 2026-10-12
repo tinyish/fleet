@@ -4,6 +4,15 @@ What a person reads to see what the fleet is doing: `fleet status`, which prints
 the projection the controller published, and the event stream, read with `fleet
 event tail` and `fleet event show`.
 
+## Feature specs
+
+- `brain/specs/status/status.md` — `fleet status`: printing the projection the
+  controller published. Not written yet.
+- `brain/specs/status/event-tail.md` — `fleet event tail`: reading and following
+  the event stream. Not written yet.
+- `brain/specs/status/event-show.md` — `fleet event show`: printing one event by
+  its id. Not written yet.
+
 ## Modules
 
 - `cli/src/status.rs` — Runs `fleet status`, which prints the controller's

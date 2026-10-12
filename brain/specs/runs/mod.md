@@ -6,6 +6,17 @@ inputs, the record item it files, the steps a workflow marks on the stream, and
 the controller re-running a run that waits on something. The arguments of `fleet
 run` and `fleet cancel` are taken by `cli/src/item.rs`, in the items area.
 
+## Feature specs
+
+- `brain/specs/runs/run.md` — `fleet run`: opening a run of a pack's workflow,
+  pinning its inputs, and its outcome. Not written yet.
+- `brain/specs/runs/cancel.md` — `fleet cancel`: closing a run nothing else
+  will end, and letting its seats go. Not written yet.
+- `brain/specs/runs/steps.md` — `fleet event step`: the numbered steps a
+  workflow marks on the stream. Not written yet.
+- `brain/specs/runs/waiting.md` — a run that waits on work or on a person's
+  answer, and the controller running it again. Not written yet.
+
 ## Modules
 
 - `cli/src/step.rs` — Runs `fleet event step`, which a workflow's process calls

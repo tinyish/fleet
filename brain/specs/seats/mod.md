@@ -6,6 +6,31 @@ controller's poll loop (`fleet observe`) that watches every seat and acts on it,
 named and transient seats, rest and halt, and `fleet seat nudge` and `fleet seat
 attach`.
 
+## Feature specs
+
+- `brain/specs/seats/identity.md` — seat ids and names, this machine's identity,
+  and who acts when no one is named. Not written yet.
+- `brain/specs/seats/add.md` — `fleet seat add`: listing a new agent or human
+  seat in `fleet.toml`. Not written yet.
+- `brain/specs/seats/observe.md` — `fleet observe`: the controller's poll loop,
+  what it reads of each seat and how it acts. Not written yet.
+- `brain/specs/seats/events.md` — `fleet event woke`, `handed-off` and `exited`:
+  what a seat says about itself. Not written yet.
+- `brain/specs/seats/rest.md` — `fleet event rest`: a seat asks to stop, and a
+  successor wakes. Not written yet.
+- `brain/specs/seats/clear-halt.md` — `fleet event clear-halt`: asking the
+  controller to lift a halted seat's hold. Not written yet.
+- `brain/specs/seats/nudge.md` — `fleet seat nudge`: typing one message into a
+  live seat's session. Not written yet.
+- `brain/specs/seats/attach.md` — `fleet seat attach`: opening a seat's session
+  at a person's terminal. Not written yet.
+- `brain/specs/seats/spawn.md` — `fleet seat spawn`: making a transient seat
+  with its own worktree and first session. Not written yet.
+- `brain/specs/seats/feed.md` — `fleet seat feed`: handing a live transient seat
+  its next first turn. Not written yet.
+- `brain/specs/seats/retire.md` — `fleet seat retire`: ending a transient seat
+  and reclaiming what it held. Not written yet.
+
 ## Modules
 
 - `cli/src/attach.rs` — Runs `fleet seat attach`, which opens a seat's session

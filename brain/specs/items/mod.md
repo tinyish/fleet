@@ -5,6 +5,27 @@ moves through (`dispatch`, `brief`, `deliver`, `hold`, `clear`, `review` and
 `land`), the entry each one appends to the item's timeline, the landing lane,
 and `fleet item show` and `fleet item list`.
 
+## Feature specs
+
+- `brain/specs/items/dispatch.md` — `fleet dispatch`: giving a ready item to a
+  seat, or asking for a transient one. Not written yet.
+- `brain/specs/items/brief.md` — `fleet brief`: the first turn a dispatched seat
+  reads. Not written yet.
+- `brain/specs/items/deliver.md` — `fleet deliver`: a seat commits its work and
+  hands the item to its reviewer. Not written yet.
+- `brain/specs/items/hold.md` — `fleet hold`: a seat stops on a question for a
+  person. Not written yet.
+- `brain/specs/items/clear.md` — `fleet clear`: a person answers a hold, and the
+  item is ready again. Not written yet.
+- `brain/specs/items/review.md` — `fleet review`: reading a delivery, then
+  returning it or accepting it. Not written yet.
+- `brain/specs/items/land.md` — `fleet land`: squashing an accepted commit onto
+  the trunk through the project's lane. Not written yet.
+- `brain/specs/items/show.md` — `fleet item show`: one item with its fields and
+  its timeline. Not written yet.
+- `brain/specs/items/list.md` — `fleet item list`: the items the store's
+  listings answer. Not written yet.
+
 ## Modules
 
 - `cli/src/item.rs` — Takes the arguments of the item verbs and of `fleet run`

@@ -6,6 +6,25 @@ listing packs, the defaults every fleet gets, which travel inside the binary,
 how installed packs layer over the defaults and shadow each other, the runtime a
 pack pins, and pack settings in `fleet.toml`.
 
+## Feature specs
+
+- `brain/specs/packs/add.md` — `fleet pack add`: fetching a pack and its imports
+  at a version, pinned in `packs.lock`. Not written yet.
+- `brain/specs/packs/remove.md` — `fleet pack remove`: taking an installed pack
+  out and dropping its pin. Not written yet.
+- `brain/specs/packs/list.md` — `fleet pack list`: printing the installed packs
+  from `packs.lock`. Not written yet.
+- `brain/specs/packs/check.md` — `fleet pack check`: the pack format, and each
+  defect a pack has, named. Not written yet.
+- `brain/specs/packs/layering.md` — how installed packs order over the defaults,
+  import one level deep, and shadow each other. Not written yet.
+- `brain/specs/packs/defaults.md` — the defaults every fleet gets from the
+  binary, written into the machine directory. Not written yet.
+- `brain/specs/packs/runtime.md` — the runtime a pack pins or imports for its
+  workflows. Not written yet.
+- `brain/specs/packs/settings.md` — a pack's declared settings, and the values a
+  fleet sets for them in `fleet.toml`. Not written yet.
+
 ## Modules
 
 - `cli/src/pack.rs` — Runs `fleet pack check`, `add`, `remove` and `list`.

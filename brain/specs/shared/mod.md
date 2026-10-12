@@ -7,6 +7,17 @@ the clock, the platform layer, the `fleet.toml` key census and the controller's
 policy, resolving the project a call acts in, the adapter call both contracts
 share, the crate roots, and the fakes and stubs the tests drive.
 
+## Feature specs
+
+- `brain/specs/shared/exit-codes.md` — the exit table every command shares, and
+  how a refusal reads. Not written yet.
+- `brain/specs/shared/output.md` — the `--json` envelope every verb that takes
+  the flag prints. Not written yet.
+- `brain/specs/shared/item-ids.md` — naming an item by its full id, and what a
+  verb does with a suffix. Not written yet.
+- `brain/specs/shared/locations.md` — the machine directory, and finding the
+  fleet and project a call acts in. Not written yet.
+
 ## Modules
 
 - `cli/examples/fleet-agent-stub.rs` — Builds the fake agent adapter beside

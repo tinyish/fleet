@@ -5,6 +5,19 @@ Getting fleet onto a machine and into a project: checking what it runs on with
 and starting and stopping the controller with `fleet start` and `fleet stop`. It
 also covers `fleet prime`, what a seat's session is handed when it starts.
 
+## Feature specs
+
+- `brain/specs/onboarding/doctor.md` — `fleet doctor`: running the doctor checks
+  the pack layers declare, and its verdict. Not written yet.
+- `brain/specs/onboarding/create.md` — `fleet create`: writing a fleet, embedded
+  or standalone, and installing its store's and agent's packs. Not written yet.
+- `brain/specs/onboarding/start.md` — `fleet start`: bringing the controller up
+  as a service, confirmed from the stream. Not written yet.
+- `brain/specs/onboarding/stop.md` — `fleet stop`: taking the controller down,
+  leaving every seat's session running. Not written yet.
+- `brain/specs/onboarding/prime.md` — `fleet prime`: what a seat's session is
+  handed when it starts. Not written yet.
+
 ## Modules
 
 - `cli/src/doctor.rs` — Runs `fleet doctor`: every doctor check the pack layers

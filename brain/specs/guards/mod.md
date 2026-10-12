@@ -4,6 +4,21 @@ Guards refuse dangerous shell commands before a seat's agent runs them. This
 area covers `fleet guard`, which an agent's pre-tool hook calls, and the four
 guard classes: shell-trap, record, release-ref and production-write.
 
+## Feature specs
+
+- `brain/specs/guards/hook.md` — `fleet guard --adapter`: judging an agent's
+  pre-tool payload against the classes in force. Not written yet.
+- `brain/specs/guards/check.md` — `fleet guard --check`: whether each class's
+  checks are configured. Not written yet.
+- `brain/specs/guards/shell-trap.md` — the shell-trap class: commands that give
+  a plausible wrong answer. Not written yet.
+- `brain/specs/guards/record.md` — the record class: commands that destroy,
+  bypass or forge an item's record. Not written yet.
+- `brain/specs/guards/release-ref.md` — the release-ref class: a push whose
+  destination matches the project's release-ref glob. Not written yet.
+- `brain/specs/guards/production-write.md` — the production-write class: writes
+  to what a project lists as production. Not written yet.
+
 ## Modules
 
 - `cli/src/guard.rs` — Runs `fleet guard`, which judges one pre-tool payload, or
