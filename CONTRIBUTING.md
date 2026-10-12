@@ -108,6 +108,7 @@ The land gate checks the kind:
 | `behaviour` | something observable changes | changes first; the item cites the changed clauses | fleet-dtu adds or updates the scenarios for those clauses |
 | `fix` | the code broke a clause that already exists | does not change; the item cites the broken clause | fleet-dtu adds a scenario that would have caught it |
 | `internal` | comments, refactors, speed, dependencies | does not change | every scenario passes unchanged |
+| `spec` | the spec is written or reworded to say what fleet already does | changes; the item cites the clauses it wrote or reworded | fleet-dtu adds or updates the scenarios for those clauses; the code does not change |
 
 A fix with no clause to cite has found a gap in the spec: it is a
 `behaviour` item. An item mislabelled `internal` is caught when its scenarios
@@ -213,8 +214,9 @@ scenarios, and the spec or the suite needs work. A holdout says
 item is squash-landed. It:
 
 - reads the item's kind label and the clauses it cites;
-- refuses an item with no kind, a cited clause that does not exist, or a
-  `behaviour` item whose spec did not change in the item;
+- refuses an item with no kind, a cited clause that does not exist, a
+  `behaviour` item whose spec did not change in the item, or a `spec` item
+  that changes code;
 - stops an item that changes the bridge, the gate, the size list or the
   read-deny settings until a person approves it;
 - runs the guards;

@@ -6,8 +6,9 @@ it binds you. The rules you are most likely to break:
 - **Build from `brain/specs/` only.** A spec says what fleet must do.
   `docs/` is the user manual generated from the specs: never take intended
   behaviour from it, and never edit it outside the docs skill.
-- **Declare the item's kind** (`behaviour`, `fix` or `internal`) and cite the
-  clause ids it touches. A `behaviour` change edits the spec first.
+- **Declare the item's kind** (`behaviour`, `fix`, `internal` or `spec`) and
+  cite the clause ids it touches. A `behaviour` change edits the spec first.
+  A `spec` item changes no code.
 - **Never guess past a spec.** If it is silent, ambiguous or contradicts
   itself, say so on the item and stop that part of the work.
 - **Builders never open fleet-dtu**, the scenario repository, by any means.
