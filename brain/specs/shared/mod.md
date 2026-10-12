@@ -11,8 +11,8 @@ share, the crate roots, and the fakes and stubs the tests drive.
 
 - `brain/specs/shared/exit-codes.md` — the exit table every command shares, and
   how a refusal reads.
-- `brain/specs/shared/output.md` — the `--json` envelope every verb that takes
-  the flag prints. Not written yet.
+- `brain/specs/shared/output.md` — the `--json` envelope: the document a verb
+  prints under the flag, and how a refusal reads in it.
 - `brain/specs/shared/item-ids.md` — naming an item by its full id, and what a
   verb does with a suffix. Not written yet.
 - `brain/specs/shared/locations.md` — the machine directory, and finding the
