@@ -21,15 +21,17 @@ answers each one:
 seed PRD, the specs, the architecture map and the scenarios. People never
 write code and never gate on it; they read it only to learn, in
 walkthroughs. Agents draft most of the intent too, but a person
-approves every change to it. Builder agents work from the specs alone and
-never see a scenario. Reviewer agents still read code, against the
-code-health rules; no person gates on it.
+approves every change to it. Planner agents write implementation plans from
+the feature specs, and builder agents build from those plans; neither ever
+sees a scenario. Reviewer agents still read code, against the code-health
+rules; no person gates on it.
 
-**The loop.** The seed PRD names the features. Each feature has a spec made of
-numbered clauses. An item (a bead) declares its kind and cites the clauses it
-touches. A builder writes the code. fleet-dtu runs the scenarios that cite
-those clauses. The item lands. Health passes and map sittings feed internal
-items back in.
+**The loop.** The seed PRD names the features. Each feature has a feature
+spec made of a story and numbered clauses. An item (a bead) declares its kind
+and cites the clauses it touches. A planner writes the item's implementation
+plan into its bead from those feature specs. A builder writes the code from
+the plan. fleet-dtu runs the scenarios that cite those clauses. The item
+lands. Health passes and map sittings feed internal items back in.
 
 **Where each truth lives:**
 
@@ -38,12 +40,12 @@ items back in.
 | `brain/specs/seed.md` | the seed PRD, one page: what fleet is, who it is for, its features, the limits it never crosses | agents draft, a person approves |
 | `brain/specs/mod.md` | the map's overview: the crates, the areas, how the areas connect, which may depend on which | agents draft from the code, a person approves |
 | `brain/specs/<area>/mod.md` | the area's part of the map: its feature specs, its modules and how work flows through them | agents draft from the code, a person approves |
-| `brain/specs/<area>/<feature>.md` | what a feature does: the only input a builder implements from | agents draft, a person approves |
-| fleet-dtu (sibling repository) | the scenarios and the twins: the proof | agents draft, a person approves; builders never see it |
-| `docs/` | the user manual, generated from the specs | the docs skill only; never a builder's input |
+| `brain/specs/<area>/<feature>.md` | a feature spec: what a feature does and why, the contract every implementation plan is written from | agents draft, a person approves |
+| fleet-dtu (sibling repository) | the scenarios and the twins: the proof | agents draft, a person approves; planners and builders never see it |
+| `docs/` | the user manual, generated from the feature specs | the docs skill only; never a planner's or builder's input |
 | `brain/metrics.md` | the code-health numbers, one row per release | `tools/metrics`, at each release's health pass |
 | the rest of `brain/` | why fleet is shaped the way it is | Alberto |
-| beads | the work queue | agents and people |
+| beads | the work queue, and each item's implementation plan | agents and people; a planner writes the plan |
 
 ## Specs
 
@@ -78,22 +80,86 @@ The map changes when the architecture moves. A test, `cli/tests/map.rs`,
 fails the build on drift: a module no area's map names, a module named
 twice, or a name with no module.
 
-**A feature spec** (`brain/specs/<area>/<feature>.md`) holds:
+**A feature spec** (`brain/specs/<area>/<feature>.md`) does four jobs:
 
-- **Behaviour clauses**, `<area>.<feature>.R<n>`: `WHEN … fleet SHALL …`.
-- **Non-functional clauses**, `<area>.<feature>.N<n>`: recovery after a
-  crash or `kill -9`, concurrency, timing, limits.
-- **Interfaces**: what other areas and the adapters rely on.
-- **Definition of Done**: every clause has at least one scenario.
+- it is the contract a planner writes an implementation plan from;
+- it is what a person reads to understand the feature and why it behaves as
+  it does;
+- it is the source the user docs are generated from;
+- it is where people own intent.
 
-A spec says what a user or a neighbouring component can observe, never how
-the code does it. If a reader could only notice it by reading the code, it is
-not in the spec. That keeps a spec as big as the product's surface, not as
-big as the code.
+Agents read and write most of it, and people review its changes. It holds,
+in this order:
 
-**Zero clarification.** A builder must be able to implement a spec without
-asking anything. An open question is written `[NEEDS CLARIFICATION: …]` and
-blocks building the clauses it touches.
+1. **The story**, for readers. It covers:
+   - what the feature is for, and who meets it and when;
+   - every flow a user walks, with its inputs and outputs;
+   - its errors and edge cases;
+   - the reason behind each choice.
+
+   Use tables, lists and examples wherever they read faster than prose: an
+   exit table, a file layout, the order of lookups. The story may repeat
+   what the clauses say, in the form a person reads fastest.
+2. **Behaviour clauses**, `<area>.<feature>.R<n>`, one EARS sentence each
+   (below).
+3. **Non-functional clauses**, `<area>.<feature>.N<n>`: recovery after a
+   crash or `kill -9`, concurrency, timing, limits.
+4. **Interfaces**: what other areas, the adapters and the operating system
+   rely on.
+5. **Open questions**: each `[NEEDS CLARIFICATION: …]`, or `None.`
+6. **Definition of Done**: every clause has at least one scenario.
+
+**Clauses are written in EARS**, the Easy Approach to Requirements Syntax.
+It has five patterns, and they combine (`WHERE …, WHEN …, fleet SHALL …`):
+
+| Pattern | Form | For |
+| --- | --- | --- |
+| Always | `fleet SHALL …` | what holds whatever happens |
+| Event | `WHEN <trigger>, fleet SHALL …` | a command, a signal, an arriving event |
+| State | `WHILE <state>, fleet SHALL …` | what holds as long as a state lasts |
+| Unwanted | `IF <fault>, THEN fleet SHALL …` | a failure, a timeout, bad input |
+| Optional | `WHERE <feature or platform>, fleet SHALL …` | `WHERE the platform is macOS` |
+
+Each clause follows these rules:
+
+- One observable outcome per clause.
+- Exact values: exit codes, event types, paths relative to the machine
+  directory, bounds in seconds.
+- Another spec's clause is cited by its id, never restated.
+- Only text a script or a person depends on is quoted, never a whole
+  message.
+- A clause says what fleet does now. Where an approved `behaviour` item will
+  change it, a line `Changing: <bead id>: <the new behaviour>` follows the
+  clause until that item lands.
+- Every behaviour the story describes has a clause, and every clause appears
+  in the story. An item that changes one changes the other. If they disagree,
+  the clause is what fleet is held to, and the mismatch is a `spec` item.
+
+A feature spec says what a user or a neighbouring component can observe,
+never how the code does it. If a reader could only notice it by reading the
+code, it is not in the feature spec. That keeps a feature spec as big as the
+product's surface, not as big as the code. Where the code lives is the map's
+job. How one item changes it is that item's implementation plan.
+
+**A feature spec and an implementation plan are different documents.** Keep
+the two names apart everywhere.
+
+| | Feature spec | Implementation plan |
+| --- | --- | --- |
+| Says | what a feature does and why | how one item changes fleet: its approach and its steps |
+| Lives | `brain/specs/<area>/<feature>.md`, for as long as the feature does | the item's bead: the approach in its `design` field (`bd update <id> --design-file <file>`), the steps in its body or child beads |
+| Written by | agents draft, a person approves | a planner, with superpowers:brainstorming and superpowers:writing-plans |
+| Read by | planners, people, the docs skill, fleet-dtu | the builder of that item |
+
+superpowers calls the design it writes a "spec". In fleet that design is the
+first half of an implementation plan, so it goes in the bead's `design`
+field, never in `brain/specs/` or `docs/`.
+
+**Zero clarification.** A planner must be able to write an implementation
+plan from a feature spec without asking anything, and a builder must be able
+to build from the plan without asking anything. An open question in a
+feature spec is written `[NEEDS CLARIFICATION: …]` and blocks planning the
+clauses it touches.
 
 **Clause ids are never reused.** A removed clause stays in the file, marked
 retired, so old items and scenarios that cite it still resolve.
@@ -103,14 +169,14 @@ retired, so old items and scenarios that cite it still resolve.
 Every item declares one kind, as a bead label, and cites its clauses by id.
 The land gate checks the kind:
 
-| Kind | When | The spec | Scenarios |
+| Kind | When | The feature spec | Scenarios |
 | --- | --- | --- | --- |
 | `behaviour` | something observable changes | changes first; the item cites the changed clauses | fleet-dtu adds or updates the scenarios for those clauses |
 | `fix` | the code broke a clause that already exists | does not change; the item cites the broken clause | fleet-dtu adds a scenario that would have caught it |
 | `internal` | comments, refactors, speed, dependencies | does not change | every scenario passes unchanged |
-| `spec` | the spec is written or reworded to say what fleet already does | changes; the item cites the clauses it wrote or reworded | fleet-dtu adds or updates the scenarios for those clauses; the code does not change |
+| `spec` | the feature spec is written or reworded to say what fleet already does | changes; the item cites the clauses it wrote or reworded | fleet-dtu adds or updates the scenarios for those clauses; the code does not change |
 
-A fix with no clause to cite has found a gap in the spec: it is a
+A fix with no clause to cite has found a gap in the feature spec: it is a
 `behaviour` item. An item mislabelled `internal` is caught when its scenarios
 fail.
 
@@ -118,10 +184,10 @@ fail.
 
 fleet-dtu is a sibling repository holding the scenarios
 (`scenarios/<area>/S-<area>-<nnn>.md`), the twins and the runner. **It is
-never mounted into a builder's seat.** Its own agents see fleet's `brain/specs/`
-and the built binary, never fleet's source, so scenarios test the spec and
-not the implementation. Agents draft scenarios from the specs; a person
-approves each one.
+never mounted into a planner's or builder's seat.** Its own agents see
+fleet's `brain/specs/` and the built binary, never fleet's source, so
+scenarios test the feature specs and not the implementation. Agents draft
+scenarios from the feature specs; a person approves each one.
 
 **The twins** are fake `claude` and `bd` command-line tools. They sit behind
 the real adapters from fleet-packs, with real git and real tmux on a private
@@ -188,8 +254,9 @@ map says which. The full suite runs at least daily and at every release.
 
 **What a builder hears back:** the verdict, the scenario's title, the clauses
 it cites, and fleet's own output and event log from the run. Never the
-scenario's text. A builder who finds the spec contradicting itself says so
-instead of guessing, and that becomes a spec item.
+scenario's text. A planner who finds a feature spec contradicting itself,
+or a builder who finds the plan contradicting the feature spec, says so
+instead of guessing, and that becomes a `spec` item.
 
 **The bridge.** `tools/scenarios` is fleet's only way into fleet-dtu. A
 builder runs it with clause ids or an area. It builds fleet, has `dtu` run
@@ -198,7 +265,8 @@ the matching scenarios, and prints only what a builder hears back. With
 and the visible ones' titles. The gate and `tools/metrics` read that list.
 
 fleet's Claude Code project settings deny every session in fleet's checkout
-any read of fleet-dtu, and so every builder seat and its subagents. The file
+any read of fleet-dtu, and so every planner and builder seat and its
+subagents. The file
 tools are denied by a `Read` deny rule. The shell is denied by the sandbox's
 `denyRead`, with unsandboxed retries turned off. Only the bridge is excluded
 from the sandbox. fleet-dtu's own settings deny its sessions fleet's source the
@@ -207,7 +275,7 @@ same way, leaving them `brain/specs/` and the built binary.
 **The holdout reserve.** About one scenario in five never reports to
 builders: it runs only in the daily run and at release, whose results go to
 a person. A failure there means the builders are being fitted to the visible
-scenarios, and the spec or the suite needs work. A holdout says
+scenarios, and the feature spec or the suite needs work. A holdout says
 `holdout: true` under its `covers:` line, and the bridge never runs it.
 
 **The land gate** is `tools/gate <bead id>`, run by the reviewer before an
@@ -314,17 +382,18 @@ with the first area that needs it (the exit codes, locations and output with
 onboarding).
 
 **Converting an area starts from what fleet does today.** An agent drafts
-each spec from fleet's observable behaviour: it runs fleet, and reads the
-area's docs and code. It writes only what a user or a neighbouring component
-can observe. Anything that looks accidental or wrong is written
+each feature spec from fleet's observable behaviour: it runs fleet, and
+reads the area's docs and code. It writes only what a user or a neighbouring
+component can observe. Anything that looks accidental or wrong is written
 `[NEEDS CLARIFICATION: …]` for a person to rule on, never kept silently. The
-person reads and edits each spec file before it is committed. The scenarios
-then pass against today's binary, except where a ruling changes behaviour;
-each such ruling is a `behaviour` item.
+person reads and edits each feature spec before it is committed. The
+scenarios then pass against today's binary, except where a ruling changes
+behaviour; each such ruling is a `behaviour` item, and the clause it will
+change carries its `Changing:` line until it lands.
 
 An area is **converted** when every clause has a scenario, its scenarios pass
-in fleet-dtu, its docs are regenerated from its spec, and its unit tests are
-triaged. Until then the area keeps the old rules: its docs are checked
+in fleet-dtu, its docs are regenerated from its feature specs, and its unit
+tests are triaged. Until then the area keeps the old rules: its docs are checked
 against the code, and its unit tests are its proof. The land gate then runs
 the area's unit tests in place of its scenarios.
 
