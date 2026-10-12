@@ -10,7 +10,7 @@ share, the crate roots, and the fakes and stubs the tests drive.
 ## Feature specs
 
 - `brain/specs/shared/exit-codes.md` — the exit table every command shares, and
-  how a refusal reads. Not written yet.
+  how a refusal reads.
 - `brain/specs/shared/output.md` — the `--json` envelope every verb that takes
   the flag prints. Not written yet.
 - `brain/specs/shared/item-ids.md` — naming an item by its full id, and what a
