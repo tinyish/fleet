@@ -22,7 +22,11 @@ You meet it whenever something other than a person reads fleet's answer:
 
 What a verb puts inside the envelope is that verb's own spec. `$?` beside the
 document is the exit table's row, the same with the flag as without it
-(shared.exit-codes.R10).
+(shared.exit-codes.R10) except for `fleet status --json` (below), and `ok`
+agrees with it: `true` on exit 0 and `false` on any other exit.
+
+This spec also says when a line written for a person carries colour, for
+every verb, with the flag or without it.
 
 ## How it behaves
 
@@ -72,18 +76,22 @@ keep in step.
 
 The keys come in that order: `ok`, `verb`, then `data` or `refusal`. Only
 `fleet doctor`, once its checks have run and not all passed, prints a
-document carrying both, with `refusal` before `data`.
+document carrying both, with `refusal` before `data`: the short answer a
+script branches on comes where a refusal document has it, before the long
+rows.
 
 ### Standard output carries the document and nothing else
 
-Under `--json`, standard output holds the document and no other line. Each
-document is on one line of its own, ending in a newline. What happens to the
-lines a verb prints on standard output without the flag depends on the verb:
+Under `--json`, standard output holds the document and no other line, so a
+program parsing it never meets a line written for a person. Each document is
+whole on one line, ending in a newline, so a reader that splits standard
+output into lines meets one document per line. What happens to the lines a
+verb prints on standard output without the flag depends on the verb:
 
 | Verb | Under `--json`, its standard output lines |
 | --- | --- |
 | `fleet doctor`, `fleet dispatch`, `deliver`, `hold`, `clear`, `review`, `land`, `fleet seat feed`, `seat retire` | move to standard error |
-| `fleet item show`, `item list`, `fleet event show`, `event tail`, `fleet seat add`, `spawn` | are printed nowhere: the document stands in for them, as they are the answer itself (the item, the events, the seat's id or name) |
+| `fleet item show`, `item list`, `fleet event show`, `event tail`, `fleet seat add`, `spawn`, `fleet status` | are printed nowhere: the document stands in for them, as they are the answer itself (the item, the events, the seat's id or name, the status page) |
 
 ### `fleet event tail`
 
@@ -137,8 +145,11 @@ Once its checks have run, `fleet doctor --json` prints one document carrying
 every row in `data`, whatever its checks said, and `ok` follows the exit:
 `true` only on exit 0. A finding (exit 1) or a could-not-tell (exit 3)
 prints `ok` as `false`, with a `refusal` before the rows: its `code` is the
-exit's row name, `refused` or `could_not_tell`, and its `why` is the summary
-line `fleet doctor` writes on standard error, after `doctor `.
+exit's row name, `refused` (shared.exit-codes.R2) or `could_not_tell`
+(shared.exit-codes.R4), and its `why` is the plain text of the summary line
+`fleet doctor` writes on standard error, after `doctor `, with no colour
+codes whatever the terminal. The answer is then said once, in two places,
+as a refusal's is.
 
 ```sh
 $ fleet doctor --json
@@ -154,6 +165,22 @@ which move to standard error under the flag. A `fleet doctor` that refuses
 before any check runs, such as for a check name no layer carries, prints a
 refusal document like any verb, with no `data`.
 
+### Colour
+
+A line is coloured only when the stream it is written on is a terminal, for
+every verb. Whether standard output is a terminal has no say over a line
+written on standard error, nor the other way round. So `fleet stop 2>log` at
+a terminal writes plain lines into `log`. Colour codes are for a person at a
+terminal; in a file or a pipe they are stray bytes a reader has to strip.
+
+### Known gaps
+
+- **Colour follows standard output (fleet-nj2k).** Whether any line is
+  coloured is decided by standard output being a terminal, whichever stream
+  the line is written on. `fleet stop 2>log` at a terminal writes colour
+  codes into `log`, and `fleet stop >/dev/null` at a terminal writes plain
+  lines to the screen.
+
 ## Behaviour
 
 - **shared.output.R1**: WHEN a verb other than `fleet event tail` is called
@@ -161,10 +188,12 @@ refusal document like any verb, with no `data`.
   JSON document on standard output.
 - **shared.output.R2**: WHEN a verb is called with `--json`, fleet SHALL
   print on standard output nothing but the documents shared.output.R1,
-  shared.output.R12 and shared.output.R14 name: no line the verb prints on
-  standard output without the flag is printed there with it.
+  shared.output.R12 and shared.output.R14 name, so a program parsing it never
+  meets a line written for a person: no line the verb prints on standard
+  output without the flag is printed there with it.
 - **shared.output.R3**: fleet SHALL print each document it prints under
-  `--json` on one line of its own, ending in a newline.
+  `--json` whole on one line of its own, ending in a newline, so a reader
+  that splits standard output into lines meets one document per line.
 - **shared.output.R4**: fleet SHALL make each document it prints under
   `--json` a JSON object carrying `ok`, which is `true` or `false`, and
   `verb`.
@@ -217,22 +246,29 @@ refusal document like any verb, with no `data`.
   fed or retired, and the line saying the retired seat's work branch was
   deleted or kept.
 - **shared.output.R17**: WHEN `fleet item show`, `item list`,
-  `fleet event show`, `event tail`, `fleet seat add` or `spawn` is called
-  with `--json`, fleet SHALL print what the verb prints on standard output
-  without the flag on neither standard output nor standard error: the
-  document stands in for it.
+  `fleet event show`, `event tail`, `fleet seat add`, `spawn` or
+  `fleet status` is called with `--json`, fleet SHALL print what the verb
+  prints on standard output without the flag on neither standard output nor
+  standard error: the document stands in for it.
 - **shared.output.R18**: WHEN `fleet status` is called with `--json` and a
   projection is published that it reads, fleet SHALL print a success
   document whose `data` is that projection's JSON value.
 - **shared.output.R19**: WHEN `fleet doctor` called with `--json` has run its
   checks and exits 1 or 3, fleet SHALL print a document carrying `ok` as
-  `false`, a `refusal` whose `code` is the name of the row it exits with
-  (shared.exit-codes.R11), and a `data` key whose content the verb's own spec states, as on
-  exit 0.
+  `false`, a `refusal` whose `code` is the name of the row it exits with,
+  `refused` (shared.exit-codes.R2) or `could_not_tell`
+  (shared.exit-codes.R4), and a `data` key whose content the verb's own spec
+  states, as on exit 0.
 - **shared.output.R20**: WHEN fleet prints the document shared.output.R19
-  names, fleet SHALL set its `refusal`'s `why` to the text of the summary
-  line `fleet doctor` writes on standard error after `doctor `, character for
-  character.
+  names, fleet SHALL set its `refusal`'s `why` to the plain text of the
+  summary line `fleet doctor` writes on standard error after `doctor `,
+  character for character, with no colour codes whatever the terminal.
+- **shared.output.R21**: fleet SHALL write colour codes in a line, under
+  any verb, only where the stream that line is written on is a terminal.
+  Today: whether a line is coloured is decided by standard output being a
+  terminal, whichever stream the line is written on, so a line on standard
+  error is coloured into a file when standard output is a terminal, and
+  plain on a terminal when standard output is not (fleet-nj2k).
 
 ## Non-functional
 
@@ -259,8 +295,12 @@ None.
 
 ## Open questions
 
-- [NEEDS CLARIFICATION: no verb that takes `--json` reaches shared.output.R13 today (each turns its own errors into refusals), so no scenario can cover it; it is held by unit tests until one does, or until the Definition of Done names it as an exception (fleet-iox1).]
+None.
 
 ## Definition of Done
 
-Every clause above has at least one scenario in fleet-dtu.
+Every clause above has at least one scenario in fleet-dtu, except
+shared.output.R13. No verb that takes `--json` reaches R13 today, because
+each turns its own errors into refusals, so no scenario can set it up. R13 is
+held by unit tests until a verb reaches it, and then it needs a scenario like
+any other clause.

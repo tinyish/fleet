@@ -23,13 +23,20 @@ fleet will not do what you asked.
 
 | Exit | Name | What it means | For example |
 | --- | --- | --- | --- |
-| 0 | `done` | The verb did what it was asked, and any write it made reads back. | `fleet --version` |
-| 1 | `refused` | The thing named is absent, is not in the state the verb needs, or already is so. Or a check the verb runs answered no. | `fleet stop` with nothing loaded |
-| 2 | `usage` | The call itself is wrong: a missing, unknown or invalid command, argument or flag; two flags that cannot go together; no command, or a family with no verb; or a question with no terminal to ask it on. | `fleet doctor --bogus`; `fleet create < /dev/null` |
+| 0 | `done` | The verb did what it was asked, and confirmed any change it made. | `fleet --version` |
+| 1 | `refused` | The thing named is absent, is not in the state the verb needs, or already is so. Or a check the verb runs answered no. | `fleet stop` with nothing loaded; a verb run outside any fleet |
+| 2 | `usage` | The call itself is wrong: a missing, unknown or invalid command, argument or flag; a name the verb takes from a fixed set it knows, such as a check name, that is not in that set; two flags that cannot go together; no command, or a family with no verb; or a question with no terminal to ask it on. | `fleet doctor --bogus`; `fleet doctor` given a check name no layer carries; `fleet create < /dev/null` |
 | 3 | `could_not_tell` | Something the answer needs could not be read, so fleet cannot say what happened. It is never a success. | `fleet observe --once` with no seat list |
 | 4 | `no_session` | The verb needs a seat's live session, and the seat has none. | `fleet seat attach` for a seat with no session |
 | 5 | `no_collector` | No controller is consuming the event stream: there is no event stream, no projection, or a projection older than the verb allows. | `fleet status` with no projection; `fleet event show` with no stream |
 | 6 | `wrong_seat_kind` | The seat is the wrong kind for the verb: a transient seat where a named one is needed, or the other way round. | `fleet event rest` on a transient seat; `fleet seat retire` on a named seat |
+
+Rows 1 and 2 both cover a name that matches nothing, and which one applies
+depends on where the name comes from. An item or a seat comes and goes, so a
+named one that is absent is refused, exit 1: the call was right, and the
+thing is not there. A name the verb takes from a fixed set it knows, such as
+a check name for `fleet doctor`, can only be a typo when it is not in the
+set, so the call itself is wrong, exit 2.
 
 fleet exits with no other number. The one exception is `fleet seat attach`,
 which hands your terminal to tmux. From then on the exit is tmux's, because
@@ -42,6 +49,10 @@ spelling the number a second time. Asking for `--json` never changes the
 exit: the same refusal exits with the same number with the flag and without
 it. `fleet status --json` is the exception, because it reads nothing beyond
 the projection; the status area's spec says what it exits.
+
+The document never reads as a success that the exit does not back:
+`fleet doctor --json` says `ok` is `true` only when it exits 0, and `false`
+when it exits 1 or 3.
 
 A verb whose exit means something narrower, such as `fleet doctor` or
 `fleet guard`, says so in its own spec. It still exits only with a number
@@ -93,7 +104,7 @@ fleet create: embedded or standalone? — stdin is not a terminal; answer it wit
 Exit 3 means fleet cannot say what happened, and it is never a success. A
 verb that cannot say what happened is a third answer rather than a failure.
 
-- **A verb that acted but cannot read back that the act took effect** exits
+- **A verb that acted but cannot confirm that the act took effect** exits
   3, never 0. It may have done part of the work, so a script treats the
   outcome as unknown. The `fleet event` writers read their line back as the
   stream's last line, and exit 3 when it is not.
@@ -112,10 +123,18 @@ verb that cannot say what happened is a third answer rather than a failure.
   shared.output.R13) it writes the same lines and exits
   the same way, and also prints a refusal document whose code is
   `could_not_tell` on standard output (see shared.output).
-- **The verbs that write a line of their own to the event stream** and that
-  R21 and R22 name exit 3 when they cannot append it: the `fleet event`
-  writers (`woke`, `rest`, `handed-off`, `exited`, `clear-halt` and `step`),
-  `fleet seat nudge` and `fleet seat attach --write`.
+- **A verb that cannot append a line of its own to the event stream** exits
+  3. That holds for the `fleet event` writers (`woke`, `rest`, `handed-off`,
+  `exited`, `clear-halt` and `step`), `fleet seat nudge`,
+  `fleet seat attach --write`, and every other verb, `fleet observe --once`
+  among them. `fleet observe` polling in a loop is the one exception: a loop
+  is not a one-shot answer, so it says so on standard error and keeps
+  polling. `fleet observe --once` polls once and ends, so it is a one-shot
+  answer like any other verb.
+- **A verb that cannot open or read the event stream it reads** exits 3:
+  `fleet event tail`, given a stream that is there but will not open or
+  read, cannot say what is in it, and an empty answer would read as a stream
+  with no events.
 
 For example, `fleet observe --once` with no seat list exits 3:
 
@@ -131,21 +150,60 @@ so: nothing was unreadable, and the fleet the verb needs is absent, so it
 refuses with exit 1, as `fleet start` always has. shared.locations says
 where fleet looks for a fleet.
 
+### When standard output closes early
+
+When a verb's standard output is closed before the verb has finished writing
+to it, as by `fleet prime | head -1`, the verb exits 0 and writes nothing
+about it on standard error. Whoever reads the output chose to stop reading:
+that is not a failure of the verb, and a line about it would only be noise in
+a pipeline that worked as meant.
+
+### Known gaps
+
+Today's binary does not yet do all of the above. Each gap has an item that
+closes it.
+
+- **A `config.json` that does not parse (fleet-9sr5).** A verb looking for
+  the fleet that finds the machine directory's `config.json` but cannot parse
+  it refuses with exit 1, as though no fleet were named, rather than exit 3.
+- **`fleet routine run` and a failed append (fleet-xboj).** It says so under
+  a `fleet observe:` prefix and exits with the routine's outcome.
+- **`fleet run` and a failed append where the run never started
+  (fleet-36ab).** When `run.failed` does not reach the stream, it keeps the
+  refusal's own exit.
+- **A closed standard output (fleet-wtpr).** A verb whose standard output is
+  closed before it has written everything, as by `fleet prime | head -1`,
+  panics, writes the panic on standard error and exits 101, a number outside
+  the table, instead of exiting 0 quietly.
+- **`fleet observe --once` and a failed append (fleet-ponk).** It says so on
+  standard error and exits as its poll otherwise would, 0 where the poll
+  went well, instead of exiting 3.
+- **`fleet event tail` and a stream it cannot read (fleet-lmi8).** Where the
+  event stream is there but does not open or read, it treats the stream as
+  empty and exits 0 instead of 3.
+
 ## Behaviour
 
-- **shared.exit-codes.R1**: WHEN a verb has done what it was asked and any
-  write it made reads back, fleet SHALL exit 0, the row named `done`.
+- **shared.exit-codes.R1**: WHEN a verb has done what it was asked and has
+  confirmed any change it made, fleet SHALL exit 0, the row named `done`.
 - **shared.exit-codes.R2**: IF the thing a verb names is absent, is not in the
   state the verb needs, or already is so, or a check the verb runs answers
   no, THEN fleet SHALL exit 1, the row named `refused`.
 - **shared.exit-codes.R3**: IF the call itself is wrong (a missing, unknown or
-  invalid command, argument or flag; two flags that cannot go together; no
-  command, or a family with no verb; or a question fleet would have to ask
-  with no terminal to ask it on), THEN fleet SHALL exit 2, the row named
-  `usage`.
+  invalid command, argument or flag; a name the verb takes from a fixed set
+  it knows, such as a check name, that is not in that set; two flags that
+  cannot go together; no command, or a family with no verb; or a question
+  fleet would have to ask with no terminal to ask it on), THEN fleet SHALL
+  exit 2, the row named `usage`. A named item or seat that is absent is not
+  such a name: shared.exit-codes.R2 refuses it.
 - **shared.exit-codes.R4**: IF something the answer needs cannot be read, so
   fleet cannot say what happened, THEN fleet SHALL exit 3, the row named
   `could_not_tell`.
+  Today: a verb looking for the fleet that cannot parse the machine
+  directory's `config.json` refuses with exit 1, as though no fleet were
+  named (fleet-9sr5).
+  Today: `fleet event tail`, where the event stream is there but does not
+  open or read, treats it as empty and exits 0 (fleet-lmi8).
 - **shared.exit-codes.R5**: IF a verb needs a seat's live session and the seat
   has none, THEN fleet SHALL exit 4, the row named `no_session`.
 - **shared.exit-codes.R6**: IF a verb needs a controller consuming the event
@@ -158,7 +216,9 @@ where fleet looks for a fleet.
 - **shared.exit-codes.R8**: fleet SHALL exit with one of the numbers 0 to 6
   and no other, except that once `fleet seat attach` has handed the terminal
   to tmux, the exit is tmux's.
-- **shared.exit-codes.R9**: IF a verb has acted but cannot read back that the
+  Today: a verb whose standard output is closed early, as by
+  `fleet prime | head -1`, panics and exits 101 (fleet-wtpr).
+- **shared.exit-codes.R9**: IF a verb has acted but cannot confirm that the
   act took effect, THEN fleet SHALL exit 3 and never 0.
 - **shared.exit-codes.R10**: WHEN a verb that takes `--json` is called with
   it, fleet SHALL exit with the same number it exits with without the flag,
@@ -212,6 +272,24 @@ where fleet looks for a fleet.
   fleet SHALL print a document whose `ok` is `true` only where it exits 0,
   and `false` where it exits 1 or 3 (see shared.output.R6 and
   shared.output.R19).
+- **shared.exit-codes.R25**: IF a verb cannot append a line of its own to
+  the event stream, other than `fleet observe` polling in a loop
+  (shared.exit-codes.R26), THEN fleet SHALL exit 3, the row named
+  `could_not_tell`. `fleet observe --once` is bound by this clause.
+  Today: `fleet observe --once` says so on standard error and exits as its
+  poll otherwise would, 0 where the poll went well (fleet-ponk).
+  Today: `fleet routine run` says so and exits with the routine's outcome
+  (fleet-xboj).
+  Today: `fleet run`, where the run never started and `run.failed` does not
+  reach the stream, keeps the refusal's own exit (fleet-36ab).
+- **shared.exit-codes.R26**: WHILE `fleet observe` polls in a loop (without
+  `--once`), IF it cannot append a line to the event stream, THEN fleet SHALL
+  say so on standard error and keep polling rather than exit.
+- **shared.exit-codes.R27**: IF a verb's standard output is closed before the
+  verb has finished writing to it, THEN fleet SHALL exit 0, the row named
+  `done`, and write nothing about it on standard error.
+  Today: the verb panics, writes the panic on standard error and exits 101
+  (fleet-wtpr).
 
 ## Non-functional
 
@@ -231,7 +309,7 @@ None.
 
 ## Open questions
 
-- [NEEDS CLARIFICATION: should `fleet routine run`, `fleet run` where the run never started, and `fleet observe` also exit 3 when they cannot append to the event stream? Today each answers its own way: routine run says so and exits with the routine's outcome, run keeps the refusal's own exit, and observe says so and keeps polling (fleet-6dn4).]
+None.
 
 ## Definition of Done
 
