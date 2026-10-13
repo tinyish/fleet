@@ -130,7 +130,11 @@ Each clause follows these rules:
 - One observable outcome per clause.
 - Exact values: exit codes, event types, paths relative to the machine
   directory, bounds in seconds.
-- Another spec's clause is cited by its id, never restated.
+- A rule is stated by one clause. Every other clause, in this spec or
+  another, cites that clause by its full id and never restates it.
+- Where two clauses' triggers can both hold, the broader clause names the
+  narrower one as its exception ("except as <id> says"), so every case meets
+  exactly one clause.
 - Only text a script or a person depends on is quoted, never a whole
   message.
 - Where today's binary falls short of a clause, a line

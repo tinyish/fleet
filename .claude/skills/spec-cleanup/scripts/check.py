@@ -22,6 +22,8 @@ DEFINED = re.compile(r'^- (~~)?\*\*(' + ID + r')\*\*(~~)?')
 RETIRED_OK = re.compile(r'^- ~~\*\*' + ID + r'\*\*~~ retired \d{4}-\d{2}-\d{2}: \S')
 CITED = re.compile(r'\b(' + ID + r')\b')
 BEAD = re.compile(r'\bfleet-[a-z0-9]+(?:\.\d+)*\b')
+PAREN = re.compile(r'\(([^()]*)\)')
+TOKEN = re.compile(r'(' + ID + r')|\b([RN]\d+)\b')
 REQUIRED = ['## Interfaces', '## Open questions', '## Definition of Done']
 
 
@@ -103,7 +105,17 @@ def main():
         for _, t in today_lines(open(path).read().split('\n')):
             anywhere.update(BEAD.findall(t))
 
-    problems, work = 0, []
+    # Where each item's Today: lines sit, as (spec, clause), across every
+    # spec: one item under several clauses is a lead for the judgement step.
+    under = {}
+    for _, path in every:
+        lines = open(path).read().split('\n')
+        for n, t in today_lines(lines):
+            clause = next((m.group(2) for m in map(DEFINED.match, reversed(lines[:n])) if m), '?')
+            for b in BEAD.findall(t):
+                under.setdefault(b, []).append(clause)
+
+    problems, work, scoped_beads = 0, [], set()
 
     def report(path, n, code, msg):
         nonlocal problems
@@ -128,6 +140,15 @@ def main():
                     report(path, n, 'CITE-MISSING', f'{cid} is defined in no spec')
                 elif cid in retired and not DEFINED.match(line):
                     report(path, n, 'CITE-RETIRED', f'{cid} is retired')
+        own = '.'.join(os.path.relpath(path, root)[:-3].split(os.sep))
+        for m in PAREN.finditer(text):
+            n = text.count('\n', 0, m.start()) + 1
+            spec = None
+            for t in TOKEN.finditer(m.group(1)):
+                if t.group(1):
+                    spec = t.group(1).rsplit('.', 1)[0]
+                elif spec and spec != own:
+                    report(path, n, 'BARE-CITE', f'{t.group(2)} follows a {spec} id: spell it {spec}.{t.group(2)}')
         todays = today_lines(lines)
         today_beads = set()
         for n, t in todays:
@@ -141,6 +162,7 @@ def main():
                 elif status[b] == 'closed':
                     report(path, n, 'TODAY-CLOSED', f'{b} is closed')
             work.append({'spec': path, 'line': n, 'beads': beads, 'text': t})
+            scoped_beads.update(beads)
         start, gaps = section(lines, '### Known gaps')
         gap_beads = set(BEAD.findall('\n'.join(gaps)))
         if todays and start is None:
@@ -158,6 +180,11 @@ def main():
             if not l.startswith('- [NEEDS CLARIFICATION:'):
                 report(path, qstart, 'QUESTIONS-FORM', f'"{l[:60]}" is not `[NEEDS CLARIFICATION: …]`')
 
+    # Leads, not findings: one gap may truly break clauses in several specs.
+    for b in sorted(scoped_beads):
+        places = sorted(set(under.get(b, [])))
+        if len(places) > 1:
+            print(f'LEAD TODAY-REPEAT {b} is on the Today: lines of {", ".join(places)}')
     print('TODAY ' + json.dumps(work))
     sys.exit(1 if problems else 0)
 

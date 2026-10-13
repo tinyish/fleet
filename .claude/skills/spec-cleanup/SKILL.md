@@ -51,7 +51,13 @@ Each `path:line: CODE message` line is a finding. Exit 0 is clean, and 1 means f
 | TODAY-CLOSED / TODAY-UNKNOWN | a `Today:` line names a closed or missing item |
 | GAP-ORPHAN / GAP-MISSING | `### Known gaps` and the `Today:` lines disagree |
 | CITE-MISSING / CITE-RETIRED | a citation resolves to nothing, or to a retired clause |
+| BARE-CITE | a bare `R<n>` follows another spec's full id; every cross-spec id is spelled in full |
 | RETIRED-FORM, CHANGING, GAPS-HEADING, NO-SECTION, NO-GAPS, QUESTIONS-FORM, DUP-ID | the file's form breaks § Specs |
+
+`LEAD TODAY-REPEAT` lines are not findings and do not fail the run. Each
+names an item whose `Today:` lines sit under more than one clause. Step 3
+judges them: one gap may truly break several clauses, but a copied clause
+often brings its copied `Today:` line along.
 
 The `TODAY` JSON line at the end lists every `Today:` line, for step 6.
 

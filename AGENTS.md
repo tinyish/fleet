@@ -18,6 +18,10 @@ it binds you. The rules you are most likely to break:
 - **Declare the item's kind** (`behaviour`, `fix`, `internal` or `spec`) and
   cite the clause ids it touches. A `behaviour` change edits the feature spec
   first. A `spec` item changes no code.
+- **A feature spec's story and clauses match row by row.** Before you hand
+  in a spec, check every table row and every example in its story against a
+  clause. Each exit, bound, order, stream, line or command the story names is
+  stated by a clause, with the same value.
 - **Never guess past a feature spec or a plan.** If it is silent, ambiguous
   or contradicts itself, say so on the item and stop that part of the work.
 - **Planners and builders never open fleet-dtu**, the scenario repository,
