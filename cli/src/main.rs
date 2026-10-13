@@ -32,7 +32,7 @@ mod transient;
 mod ui;
 
 use anyhow::{Context, Result};
-use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use exit::Exit;
 use fleet_controller::events;
 use fleet_controller::runs::Runs as RunsSeam;
@@ -527,7 +527,12 @@ fn main() -> ExitCode {
 }
 
 fn dispatch() -> Result<Exit> {
-    let cli = Cli::parse();
+    // Parsed through the matches rather than `Cli::parse`, because the gate
+    // below reads the verb as typed and its `--json` off them.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)
+        .map_err(|e| e.format(&mut Cli::command()))
+        .unwrap_or_else(|e| e.exit());
 
     if cli.version {
         println!("{}", env!("CARGO_PKG_VERSION"));
@@ -541,6 +546,19 @@ fn dispatch() -> Result<Exit> {
         eprint!("{}", Cli::command().render_help());
         return Ok(Exit::Usage);
     };
+
+    // NO MACHINE DIRECTORY RELATIVE TO WHERE A CALL STANDS (shared.locations
+    // R30 to R32): refused here, once, before any verb's own code runs, so no
+    // verb and no library under it resolves a directory that moves with the
+    // working directory. `fleet observe` is the controller, gated the same.
+    // `fleet guard` and `fleet prime` are exempt until the spec's open question
+    // is ruled: a guard that exits 1 fails open, and prime always exits 0.
+    if !matches!(family, Family::Guard { .. } | Family::Prime) {
+        if let Err(why) = platform::try_machine_dir() {
+            let (verb, json) = exit::typed_verb(&matches);
+            return Ok(exit::refuse(&verb, Exit::Refused, &why.to_string(), json));
+        }
+    }
 
     // The terminal is read once, here, and handed to the verbs that print
     // through it: a per-call reading would let one page change shape halfway

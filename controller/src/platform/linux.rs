@@ -5,11 +5,10 @@ use fleet_core::process::{resolve_on_path, run_bounded};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn machine_dir_under(home: &Path, xdg_state: Option<&Path>) -> PathBuf {
-    match xdg_state {
-        Some(state) => state.join("fleet"),
-        None => home.join(".fleet"),
-    }
+/// `fleet` under `XDG_STATE_HOME` where it is set, ahead of any home
+/// (shared.locations R5).
+pub fn state_dir(xdg_state: Option<&Path>) -> Option<PathBuf> {
+    xdg_state.map(|state| state.join("fleet"))
 }
 
 /// The directories a child of this controller searches, in order.

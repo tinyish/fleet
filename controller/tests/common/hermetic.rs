@@ -27,6 +27,12 @@ pub const FLEET_DIR: &str = "FLEET_DIR";
 pub const FLEET_HOME: &str = "FLEET_HOME";
 /// The user's home, which every constructed `PATH` is built off.
 pub const HOME: &str = "HOME";
+/// The state directory the machine directory sits under on Linux, read when
+/// `FLEET_DIR` is unset and BEFORE `FLEET_HOME`. STRIPPED, never set: the block
+/// sets `FLEET_DIR`, so an arm keeping it whole never reads this, and an arm
+/// that removes `FLEET_DIR` would otherwise resolve the state directory of the
+/// shell the suite runs from. An arm whose subject is it sets it after the block.
+pub const XDG_STATE_HOME: &str = "XDG_STATE_HOME";
 /// The tmux binary every host call runs (`fleet_controller::host::tmux`). A
 /// rig with no tmux stub of its own gets the refusing one, so no arm reaches
 /// the operator's tmux, and so never the live fleet's own socket on it.
@@ -68,6 +74,7 @@ pub fn vars(home: &Path, machine: &Path) -> Vec<(&'static str, Option<OsString>)
         (HOME, Some(home.as_os_str().to_owned())),
         (FLEET_HOME, Some(home.as_os_str().to_owned())),
         (FLEET_DIR, Some(machine.as_os_str().to_owned())),
+        (XDG_STATE_HOME, None),
         (TMUX_BIN, Some(refusing_tmux().into_os_string())),
         (HERMETIC, Some(OsString::from("1"))),
         (FLEET_ACTOR, None),

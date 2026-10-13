@@ -5,12 +5,13 @@
 //! verbs cannot reach yet — 4, and 6 — are the controller's and are measured in
 //! `drive_seats.rs` beside the seat they refuse.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod common;
 use common::hermetic::Hermetic;
+use common::hermetic::{FLEET_DIR, FLEET_HOME, HOME, XDG_STATE_HOME};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -55,6 +56,31 @@ impl Machine {
             .hermetic(&self.root.join("home"), &self.root)
             .output()
             .expect("the built binary runs")
+    }
+
+    /// The run from `cwd` (made here), with `set` put on and `removed` taken
+    /// out AFTER the block: an arm whose subject is the variables the machine
+    /// directory is resolved from.
+    fn run_in_env(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        set: &[(&str, &str)],
+        removed: &[&str],
+    ) -> Output {
+        std::fs::create_dir_all(cwd).expect("the working directory is created");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fleet"));
+        command
+            .args(args)
+            .current_dir(cwd)
+            .hermetic(&self.root.join("home"), &self.root);
+        for (name, value) in set {
+            command.env(name, value);
+        }
+        for name in removed {
+            command.env_remove(name);
+        }
+        command.output().expect("the built binary runs")
     }
 
     /// The same run from a directory under the machine's root that no project
@@ -398,4 +424,138 @@ fn a_fleet_whose_packs_do_not_resolve_is_still_three() {
         .expect("the built binary runs");
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     one_refusal(&out, "doctor");
+}
+
+// ---- no machine directory relative to where a call stands ------------------
+
+const RELATIVE: &str = "FLEET_DIR is rel, a relative path — set FLEET_DIR to an absolute path";
+
+/// shared.locations R30, R32: a relative FLEET_DIR is refused, as 1, under the
+/// verb as typed: from every verb, the controller's own `fleet observe` among
+/// them, and before any of them reads anything.
+#[test]
+fn a_relative_fleet_dir_is_refused_under_every_verb() {
+    let machine = Machine::new("relative-dir");
+    let cwd = machine.root.join("somewhere");
+    for (verb, args) in [
+        ("event show", &["event", "show", "x"][..]),
+        ("seat attach", &["seat", "attach", "x"][..]),
+        ("start", &["start"][..]),
+        ("observe", &["observe", "--once"][..]),
+    ] {
+        let out = machine.run_in_env(args, &cwd, &[(FLEET_DIR, "rel")], &[]);
+        assert_eq!(out.status.code(), Some(1), "{verb}: {}", stderr(&out));
+        assert_eq!(stderr(&out), format!("fleet {verb}: {RELATIVE}\n"));
+        assert!(out.stdout.is_empty(), "{verb}: {}", String::from_utf8_lossy(&out.stdout));
+    }
+    let left = std::fs::read_dir(&cwd).expect("the directory reads").count();
+    assert_eq!(left, 0, "nothing was made where the calls stood");
+}
+
+/// shared.locations R30 under `--json`: one refusal document, its code the
+/// row the call exits with and its why the stderr line's own text.
+#[test]
+fn a_relative_fleet_dir_under_json_is_one_refusal_document() {
+    let machine = Machine::new("relative-json");
+    let cwd = machine.root.join("somewhere");
+    let out = machine.run_in_env(&["event", "show", "x", "--json"], &cwd, &[(FLEET_DIR, "rel")], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let document = one_refusal(&out, "event show");
+    assert_eq!(document["refusal"]["why"], RELATIVE);
+    assert_eq!(stderr(&out), format!("fleet event show: {RELATIVE}\n"));
+}
+
+/// shared.locations R30 for FLEET_HOME: refused where it names the home, and
+/// never read (so never refused) under a FLEET_DIR that outranks it (R2).
+#[test]
+fn a_relative_fleet_home_is_refused_only_where_it_is_read() {
+    let machine = Machine::new("relative-home");
+    let cwd = machine.root.join("somewhere");
+    let out = machine.run_in_env(&["status"], &cwd, &[(FLEET_HOME, "rel")], &[FLEET_DIR]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out),
+        "fleet status: FLEET_HOME is rel, a relative path — set FLEET_HOME to an absolute path\n"
+    );
+
+    // The control: the block's absolute FLEET_DIR wins, and the call goes on
+    // to the stream's own refusal.
+    let out = machine.run_in_env(&["event", "show", "x"], &cwd, &[(FLEET_HOME, "rel")], &[]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+}
+
+/// shared.locations R31: no HOME is refused only where nothing else names the
+/// machine directory. On Linux XDG_STATE_HOME does; macOS never reads it.
+#[test]
+fn no_home_is_refused_only_where_nothing_else_names_the_machine_directory() {
+    let machine = Machine::new("no-home");
+    let cwd = machine.root.join("somewhere");
+    let out = machine.run_in_env(&["status"], &cwd, &[], &[FLEET_DIR, FLEET_HOME, HOME]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out),
+        "fleet status: HOME is unset and nothing else names the machine directory — set HOME to \
+         an absolute path\n"
+    );
+    assert!(!cwd.join(".fleet").exists(), "no machine directory where the call stood");
+
+    let out = machine.run_in_env(&["event", "show", "x"], &cwd, &[], &[FLEET_HOME, HOME]);
+    assert_eq!(out.status.code(), Some(5), "FLEET_DIR alone names it: {}", stderr(&out));
+
+    let state = machine.root.join("state").display().to_string();
+    let out = machine.run_in_env(
+        &["event", "show", "x"],
+        &cwd,
+        &[(XDG_STATE_HOME, state.as_str())],
+        &[FLEET_DIR, FLEET_HOME, HOME],
+    );
+    let expected = if cfg!(target_os = "linux") { 5 } else { 1 };
+    assert_eq!(out.status.code(), Some(expected), "{}", stderr(&out));
+}
+
+/// shared.locations R32: a refused call writes nothing, even from the verb that
+/// would write a fleet where it stands. What is not a verb (the version, the
+/// bare help, a line that does not parse) resolves no machine directory.
+#[test]
+fn a_refused_call_writes_nothing_and_what_is_not_a_verb_is_not_refused() {
+    let machine = Machine::new("refused-writes-nothing");
+    let cwd = machine.root.join("somewhere");
+    let rel = [(FLEET_DIR, "rel")];
+    let out = machine.run_in_env(
+        &["create", "--embedded", "--agent", "x", "--store", "none"],
+        &cwd,
+        &rel,
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stderr(&out), format!("fleet create: {RELATIVE}\n"));
+    let left = std::fs::read_dir(&cwd).expect("the directory reads").count();
+    assert_eq!(left, 0, "create wrote nothing");
+
+    let out = machine.run_in_env(&["--version"], &cwd, &rel, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = machine.run_in_env(&[], &cwd, &rel, &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let out = machine.run_in_env(&["doctor", "--bogus"], &cwd, &rel, &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).starts_with("error:"), "{}", stderr(&out));
+}
+
+/// shared.locations R32's exemption: `fleet guard` and `fleet prime` resolve
+/// as before under a relative FLEET_DIR, and neither prints the refusal line
+/// (a guard that exits 1 lets the tool call through unjudged; prime always
+/// exits 0). Until the open question is ruled.
+#[test]
+fn guard_and_prime_are_exempt_from_the_relative_refusal() {
+    let machine = Machine::new("relative-exempt");
+    let cwd = machine.root.join("somewhere");
+    for args in [&["guard", "shell-trap"][..], &["prime"][..]] {
+        let out = machine.run_in_env(args, &cwd, &[(FLEET_DIR, "rel")], &[]);
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(!stderr(&out).contains("a relative path"), "{args:?}: {}", stderr(&out));
+        assert!(!stdout.contains("a relative path"), "{args:?}: {stdout}");
+        assert_ne!(out.status.code(), Some(101), "{args:?} did not panic: {}", stderr(&out));
+    }
+    let out = machine.run_in_env(&["prime"], &cwd, &[(FLEET_DIR, "rel")], &[]);
+    assert_eq!(out.status.code(), Some(0), "prime always exits 0: {}", stderr(&out));
 }

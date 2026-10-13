@@ -34,11 +34,31 @@ A variable set to an empty value, or to spaces only, counts as unset.
 macOS has no state directory of the XDG kind, so it never reads
 `XDG_STATE_HOME`. On Linux, `XDG_STATE_HOME` beats `FLEET_HOME`.
 
-A relative `FLEET_DIR` or `FLEET_HOME` is read against the working directory.
-With `FLEET_DIR`, `FLEET_HOME` and `HOME` all unset (and, on Linux,
-`XDG_STATE_HOME` unset too), the machine directory is `.fleet` under the
-working directory. Either way, one machine gets a different machine
-directory in every directory it runs in. Both are changing (see below).
+A machine directory is never relative to where you stand. Read against the
+working directory, a relative path would give one machine a different
+machine directory in every directory it runs in. So fleet refuses, exit 1
+(shared.exit-codes.R2), in two cases:
+
+- the variable that decides the machine directory, `FLEET_DIR` or
+  `FLEET_HOME`, names a relative path;
+- `HOME` is unset and nothing else names the machine directory: `FLEET_DIR`
+  and `FLEET_HOME` are unset too, and on Linux so is `XDG_STATE_HOME`.
+
+The refusal line names the variable and asks for an absolute path:
+
+```sh
+$ FLEET_DIR=scratch fleet status
+fleet status: FLEET_DIR is scratch, a relative path — set FLEET_DIR to an absolute path
+```
+
+Only the variable that decides is checked. A relative `FLEET_HOME` under a
+set `FLEET_DIR`, or on Linux under a set `XDG_STATE_HOME`, is never read,
+so it refuses nothing. Every verb refuses this way, `fleet observe` among
+them, whether or not it would have read the machine directory, and before
+it reads or writes anything. `fleet --version`, `fleet` with no command,
+and a command line that does not parse answer as shared.exit-codes says.
+`fleet guard` and `fleet prime` are the exception: they resolve as before
+(see Open questions).
 
 Working out the machine directory creates nothing. A verb that only reads,
 such as `fleet prime`, leaves a machine directory that does not exist as it
@@ -177,11 +197,6 @@ what fleet does today, with a `Changing:` line after each one.
   `FLEET_DIR`, whichever variable produced it.
 - **A seat's session carries `FLEET_DIR`** (fleet-19w0). It is handed the
   controller's `FLEET_DIR`.
-- **No machine directory relative to where you stand** (fleet-5yd9). A
-  relative `FLEET_DIR` or `FLEET_HOME` is refused. An unset `HOME` is refused
-  only when nothing else gives fleet an absolute machine directory: neither
-  `FLEET_DIR` nor `FLEET_HOME` is set, and on Linux `XDG_STATE_HOME` is not
-  set either. The refusal names the variable and asks for an absolute path.
 - **No lock file in a checkout** (fleet-hn6e). The locks for a project's files
   live in the machine directory, keyed by the project.
 - **On Linux, the unit follows `XDG_CONFIG_HOME`** (fleet-r0xz), where it is
@@ -310,22 +325,24 @@ what fleet does today, with a `Changing:` line after each one.
 - **shared.locations.R29**: WHEN the controller starts a seat's session, fleet
   SHALL hand the session no `FLEET_DIR` and no `FLEET_HOME`.
   Changing: fleet-19w0: the session is handed the controller's `FLEET_DIR`.
-- **shared.locations.R30**: IF `FLEET_DIR` or `FLEET_HOME` names a relative
-  path, THEN fleet SHALL read it against the working directory.
-  Changing: fleet-5yd9: fleet refuses (shared.exit-codes.R2) on a line that
-  names the variable and asks for an absolute path.
+- **shared.locations.R30**: IF `FLEET_DIR` names a relative path, or
+  `FLEET_DIR` is unset, `FLEET_HOME` names a relative path and R5 does not
+  apply, THEN fleet SHALL refuse (shared.exit-codes.R2) on a refusal line
+  (shared.exit-codes.R12) that names that variable and asks for an absolute
+  path.
 - **shared.locations.R31**: IF `FLEET_DIR`, `FLEET_HOME` and `HOME` are all
-  unset, and on Linux `XDG_STATE_HOME` is unset too, THEN fleet SHALL use
-  `.fleet` under the working directory as the machine directory.
-  Changing: fleet-5yd9: where `HOME` is unset, neither `FLEET_DIR` nor
-  `FLEET_HOME` is set, and, where the platform is Linux, `XDG_STATE_HOME` is
-  not set either, fleet refuses (shared.exit-codes.R2) on a line that names
-  `HOME` and asks for an absolute path.
+  unset, and on Linux `XDG_STATE_HOME` is unset too, THEN fleet SHALL refuse
+  (shared.exit-codes.R2) on a refusal line (shared.exit-codes.R12) that
+  names `HOME` and asks for an absolute path.
+- **shared.locations.R32**: IF R30 or R31 refuses a call, THEN fleet SHALL
+  refuse it before the verb reads or writes anything, whichever verb was
+  called and whether or not it reads the machine directory, except `fleet
+  guard` and `fleet prime`, which resolve as before (see Open questions).
 
 ## Non-functional
 
 - **shared.locations.N1**: WHEN fleet resolves the machine directory (R1 to
-  R6, R30, R31) or looks for the fleet a call acts in (R21 to R24, R26, R27),
+  R6, R30 to R32) or looks for the fleet a call acts in (R21 to R24, R26, R27),
   fleet SHALL create no file and no directory in doing so.
 
 ## Interfaces
@@ -349,7 +366,7 @@ what fleet does today, with a `Changing:` line after each one.
 
 ## Open questions
 
-None.
+- [NEEDS CLARIFICATION: should `fleet guard` and `fleet prime` also refuse a relative `FLEET_DIR` or `FLEET_HOME`, or no `HOME` (shared.locations.R30, R31)? A guard hook that exits 1 lets the tool call through unjudged, and `fleet prime`'s help promises exit 0, so both are exempt until ruled (fleet-5yd9).]
 
 ## Definition of Done
 

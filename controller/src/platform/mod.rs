@@ -55,13 +55,58 @@ mod macos;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("the controller targets macOS and Linux; Windows is not a target");
 
-/// The fleet directory for this machine.
+/// Why this call has no machine directory: the variable a person sets to give
+/// it one (shared.locations R30, R31).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unresolved {
+    /// `FLEET_DIR` or `FLEET_HOME`, deciding, names a path that would be read
+    /// against the working directory and so name another directory from every
+    /// directory a call is made in.
+    Relative { variable: &'static str, value: PathBuf },
+    /// `HOME` is unset and no other variable names the machine directory.
+    NoHome,
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unresolved::Relative { variable, value } => write!(
+                f,
+                "{variable} is {}, a relative path — set {variable} to an absolute path",
+                value.display()
+            ),
+            Unresolved::NoHome => f.write_str(
+                "HOME is unset and nothing else names the machine directory — set HOME to an \
+                 absolute path",
+            ),
+        }
+    }
+}
+
+impl Unresolved {
+    /// The directory this resolved to before the refusal: the path as given,
+    /// read against the working directory. Only the verbs R32 exempts use it.
+    fn as_before(&self) -> PathBuf {
+        match self {
+            Unresolved::Relative { variable: "FLEET_HOME", value } => value.join(".fleet"),
+            Unresolved::Relative { value, .. } => value.clone(),
+            Unresolved::NoHome => PathBuf::from(".fleet"),
+        }
+    }
+}
+
+/// The platform's rule for a machine directory under a state directory.
+type StateDir = fn(Option<&Path>) -> Option<PathBuf>;
+
+/// The fleet directory for this machine, or why there is none.
 ///
 /// One resolution order, everywhere: `FLEET_DIR` is the directory itself and
-/// wins outright; `FLEET_HOME` is the home it sits under; otherwise the
-/// platform's own answer under the user's home.
-pub fn machine_dir() -> PathBuf {
-    resolve_machine_dir(
+/// wins outright; then the platform's state directory, where it reads one;
+/// then `.fleet` under `FLEET_HOME`, else under `HOME`. Only the variable that
+/// decides is checked, so a relative one that is outranked refuses nothing.
+pub fn try_machine_dir() -> Result<PathBuf, Unresolved> {
+    resolve_on(
+        sys::state_dir,
         env_dir("FLEET_DIR").as_deref(),
         env_dir("FLEET_HOME").as_deref(),
         env_dir("HOME").as_deref(),
@@ -69,18 +114,45 @@ pub fn machine_dir() -> PathBuf {
     )
 }
 
-/// The resolution itself, with every input passed in: the environment is read
-/// once, above, so the order can be tested without touching it.
-pub fn resolve_machine_dir(
+/// The machine directory, for code inside a `fleet` call.
+///
+/// `cli/src/main.rs` refuses a call whose environment names no machine
+/// directory before any verb runs (shared.locations R32), so every caller here
+/// is past [`try_machine_dir`] already. The two verbs R32 exempts, `fleet
+/// guard` and `fleet prime`, are not: they resolve as before, the unresolved
+/// path read against the working directory (see the spec's open questions).
+pub fn machine_dir() -> PathBuf {
+    try_machine_dir().unwrap_or_else(|why| why.as_before())
+}
+
+/// The resolution itself, with the platform's rule and every input passed in:
+/// the environment is read once, above, so the order is tested for both
+/// platforms on either box without touching it.
+fn resolve_on(
+    state_dir: StateDir,
     fleet_dir: Option<&Path>,
     fleet_home: Option<&Path>,
     home: Option<&Path>,
     xdg_state: Option<&Path>,
-) -> PathBuf {
+) -> Result<PathBuf, Unresolved> {
     if let Some(dir) = fleet_dir {
-        return dir.to_path_buf();
+        return absolute("FLEET_DIR", dir).map(Path::to_path_buf);
     }
-    sys::machine_dir_under(fleet_home.or(home).unwrap_or(Path::new("")), xdg_state)
+    if let Some(dir) = state_dir(xdg_state) {
+        return Ok(dir);
+    }
+    if let Some(home) = fleet_home {
+        return absolute("FLEET_HOME", home).map(|home| home.join(".fleet"));
+    }
+    home.map(|home| home.join(".fleet")).ok_or(Unresolved::NoHome)
+}
+
+fn absolute<'a>(variable: &'static str, path: &'a Path) -> Result<&'a Path, Unresolved> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(Unresolved::Relative { variable, value: path.to_path_buf() })
+    }
 }
 
 /// The user's home, which the constructed `PATH` is built off.
@@ -663,25 +735,98 @@ mod tests {
         fn geteuid() -> u32;
     }
 
+    /// Both platforms' rule for a state directory, so each arm below reads both
+    /// on whichever box it runs on.
+    const BOTH: [StateDir; 2] = [macos::state_dir, linux::state_dir];
+
     #[test]
     fn the_machine_directory_resolves_in_one_order_on_both_platforms() {
         let d = Path::new("/named/dir");
         let h2 = Path::new("/home2");
         let h1 = Path::new("/home1");
-        let xdg = Path::new("/state");
+        for state_dir in BOTH {
+            assert_eq!(
+                resolve_on(state_dir, Some(d), Some(h2), Some(h1), Some(Path::new("/state"))),
+                Ok(d.to_path_buf()),
+                "FLEET_DIR is the directory itself and wins outright"
+            );
+            assert_eq!(
+                resolve_on(state_dir, None, Some(h2), Some(h1), None),
+                Ok(h2.join(".fleet")),
+                "FLEET_HOME is the home it sits under, and beats HOME"
+            );
+            assert_eq!(resolve_on(state_dir, None, None, Some(h1), None), Ok(h1.join(".fleet")));
+        }
+    }
+
+    /// The one cell of the table that differs: Linux reads the state
+    /// directory, ahead of FLEET_HOME — even a relative one, which it then never
+    /// reads (R5) — and macOS never reads it (R4).
+    #[test]
+    fn the_state_directory_moves_the_machine_directory_on_linux_alone() {
+        let (h, s) = (Path::new("/h"), Path::new("/s"));
+        assert_eq!(resolve_on(macos::state_dir, None, None, Some(h), Some(s)), Ok(h.join(".fleet")));
+        assert_eq!(resolve_on(linux::state_dir, None, None, Some(h), Some(s)), Ok(s.join("fleet")));
         assert_eq!(
-            resolve_machine_dir(Some(d), Some(h2), Some(h1), Some(xdg)),
-            d,
-            "FLEET_DIR is the directory itself and wins outright"
+            resolve_on(linux::state_dir, None, Some(Path::new("rel")), Some(h), Some(s)),
+            Ok(s.join("fleet")),
+            "a FLEET_HOME the state directory outranks is never read"
         );
+    }
+
+    /// R30: the variable that decides, refused by name when it is relative.
+    #[test]
+    fn a_relative_fleet_dir_or_fleet_home_is_refused_by_name() {
+        let (rel, h) = (Path::new("rel"), Path::new("/h"));
+        for state_dir in BOTH {
+            assert_eq!(
+                resolve_on(state_dir, Some(rel), None, Some(h), None),
+                Err(Unresolved::Relative { variable: "FLEET_DIR", value: rel.to_path_buf() })
+            );
+            assert_eq!(
+                resolve_on(state_dir, None, Some(rel), Some(h), None),
+                Err(Unresolved::Relative { variable: "FLEET_HOME", value: rel.to_path_buf() })
+            );
+            assert_eq!(
+                resolve_on(state_dir, Some(Path::new("/d")), Some(rel), Some(h), None),
+                Ok(PathBuf::from("/d")),
+                "a FLEET_HOME that FLEET_DIR outranks is never read (R2)"
+            );
+            assert!(
+                matches!(
+                    resolve_on(state_dir, Some(Path::new("~/x")), None, Some(h), None),
+                    Err(Unresolved::Relative { variable: "FLEET_DIR", .. })
+                ),
+                "a tilde is not expanded: ~/x is a relative path"
+            );
+        }
         assert_eq!(
-            resolve_machine_dir(None, Some(h2), Some(h1), None),
-            h2.join(".fleet"),
-            "FLEET_HOME is the home it sits under, and beats HOME"
+            Unresolved::Relative { variable: "FLEET_DIR", value: rel.to_path_buf() }.to_string(),
+            "FLEET_DIR is rel, a relative path — set FLEET_DIR to an absolute path"
         );
+    }
+
+    /// R31: no HOME is refused only where nothing else names the machine
+    /// directory, and on macOS the state directory is not something else.
+    #[test]
+    fn no_home_is_refused_only_where_nothing_else_names_the_machine_directory() {
+        let s = Path::new("/s");
+        for state_dir in BOTH {
+            assert_eq!(resolve_on(state_dir, None, None, None, None), Err(Unresolved::NoHome));
+            assert_eq!(
+                resolve_on(state_dir, Some(Path::new("/d")), None, None, None),
+                Ok(PathBuf::from("/d"))
+            );
+            assert_eq!(
+                resolve_on(state_dir, None, Some(Path::new("/fh")), None, None),
+                Ok(PathBuf::from("/fh/.fleet"))
+            );
+        }
+        assert_eq!(resolve_on(macos::state_dir, None, None, None, Some(s)), Err(Unresolved::NoHome));
+        assert_eq!(resolve_on(linux::state_dir, None, None, None, Some(s)), Ok(s.join("fleet")));
         assert_eq!(
-            resolve_machine_dir(None, None, Some(h1), None),
-            h1.join(".fleet")
+            Unresolved::NoHome.to_string(),
+            "HOME is unset and nothing else names the machine directory — set HOME to an absolute path"
         );
     }
 
@@ -694,23 +839,6 @@ mod tests {
             fleet_core::process::deadline_cause(fleet_core::agent::types::AGENT_TIMEOUT)
                 .contains("did not answer within 20s")
         );
-    }
-
-    /// The one cell of the platform table that differs between the two.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn the_state_directory_is_not_a_shape_this_platform_reads() {
-        let under_state =
-            resolve_machine_dir(None, None, Some(Path::new("/h")), Some(Path::new("/s")));
-        assert_eq!(under_state, Path::new("/h/.fleet"));
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn the_state_directory_moves_the_machine_directory() {
-        let under_state =
-            resolve_machine_dir(None, None, Some(Path::new("/h")), Some(Path::new("/s")));
-        assert_eq!(under_state, Path::new("/s/fleet"));
     }
 
     /// The constructed child PATH: built from the platform's own list and

@@ -5,10 +5,10 @@ use fleet_core::process::{resolve_on_path, run_bounded};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// macOS has no XDG state directory, so the second argument is not a shape this
-/// platform reads.
-pub fn machine_dir_under(home: &Path, _xdg_state: Option<&Path>) -> PathBuf {
-    home.join(".fleet")
+/// macOS has no XDG state directory, so no machine directory comes from one
+/// and `XDG_STATE_HOME` is not a shape this platform reads (shared.locations R4).
+pub fn state_dir(_xdg_state: Option<&Path>) -> Option<PathBuf> {
+    None
 }
 
 /// The directories a child of this controller searches, in order.

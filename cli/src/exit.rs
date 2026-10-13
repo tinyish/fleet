@@ -102,6 +102,21 @@ pub fn say(verb: &str, exit: Exit, why: impl std::fmt::Display) -> Exit {
     exit
 }
 
+/// The verb as typed, without `fleet` and its arguments (`event show`,
+/// `seat attach`), and whether the call asked for `--json`: what a refusal
+/// made before any verb's own code runs reads off the parsed line.
+pub fn typed_verb(matches: &clap::ArgMatches) -> (String, bool) {
+    let mut words = Vec::new();
+    let mut leaf = matches;
+    while let Some((name, sub)) = leaf.subcommand() {
+        words.push(name);
+        leaf = sub;
+    }
+    // A verb with no `--json` flag answers an error here, which is "not asked".
+    let json = matches!(leaf.try_get_one::<bool>("json"), Ok(Some(true)));
+    (words.join(" "), json)
+}
+
 /// The verb an error stopped, put on the error as its outermost context.
 ///
 /// A `fleet:` line that would carry this and nothing more is left out
