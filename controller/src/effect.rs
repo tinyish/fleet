@@ -97,6 +97,10 @@ pub struct Target<'a> {
     /// table recorded for a session whose pane has died.
     pub session_id: Option<&'a str>,
     pub context_tokens: Option<u64>,
+    /// The machine directory the process starting this session resolved,
+    /// which the session is handed as `FLEET_DIR` (shared.locations R29) so
+    /// the verbs the seat runs act on this machine.
+    pub machine_dir: &'a Path,
 }
 
 impl Target<'_> {
@@ -416,6 +420,10 @@ pub use fleet_core::item::run::ENV_BIN as FLEET_BIN_VAR;
 /// seat's own `seat:<id>`.
 pub use fleet_core::item::run::ENV_ACTOR as FLEET_ACTOR_VAR;
 
+/// The variable a started session's verbs resolve their machine directory
+/// from, set to the directory the starting process resolved.
+pub use fleet_core::item::run::ENV_DIR as FLEET_DIR_VAR;
+
 /// This process's own executable, as the absolute path the shim requires.
 ///
 /// Whatever the operating system answers, and nothing when it answers nothing
@@ -429,7 +437,9 @@ pub fn own_executable() -> Option<PathBuf> {
 /// The variables fleet sets for a seat's session, whatever agent runs in it
 /// (D1, D7): the constructed `PATH`, the four a shell needs
 /// ([`crate::platform::PASSED_THROUGH`]), this process's own
-/// executable as `FLEET_BIN`, and WHO THE SESSION ACTS AS — `actor`, so its own
+/// executable as `FLEET_BIN`, the machine directory it resolved as `FLEET_DIR`
+/// (never its own variable, so a controller resolved from `FLEET_HOME` hands the
+/// directory all the same), and WHO THE SESSION ACTS AS — `actor`, so its own
 /// bare verbs are the seat's.
 ///
 /// NOTHING IS INHERITED (lessons claude-code D1). A service-launched process
@@ -438,7 +448,7 @@ pub fn own_executable() -> Option<PathBuf> {
 /// it; so the `PATH` is the platform's, built off the home, and the process's
 /// own contributes nothing. What an agent's adapter adds for its own agent it
 /// answers in its [`Argv`]'s environment, and core sets both, exactly.
-pub fn seat_environment(actor: &str) -> BTreeMap<String, String> {
+pub fn seat_environment(actor: &str, machine_dir: &Path) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert(
         "PATH".to_string(),
@@ -452,6 +462,7 @@ pub fn seat_environment(actor: &str) -> BTreeMap<String, String> {
     if let Some(bin) = own_executable() {
         env.insert(FLEET_BIN_VAR.to_string(), bin.display().to_string());
     }
+    env.insert(FLEET_DIR_VAR.to_string(), machine_dir.display().to_string());
     env.insert(FLEET_ACTOR_VAR.to_string(), actor.to_string());
     env
 }
@@ -491,7 +502,7 @@ fn bring_up(
     };
     // WHO THE SESSION ACTS AS [ASSUMES D7], among the variables fleet sets for
     // every seat's session: its own bare verbs are the seat's.
-    let fleets = seat_environment(&Actor::seat(target.seat).to_string());
+    let fleets = seat_environment(&Actor::seat(target.seat).to_string(), target.machine_dir);
     // A start clears the name before the launch writes its seed, so a live
     // session refuses it before anything is written. A resume writes nothing,
     // and is asked for FIRST: one the adapter will not build leaves the dead

@@ -142,6 +142,11 @@ fn a_policy() -> Policy {
 /// and stream lines are keyed on.
 const S1: &str = "01a0d1f1-0aec-765f-9abe-4f5e6a7b8c91";
 
+/// The machine directory every target here was started under: a path no
+/// variable of this process names, so a session that carries it carries the
+/// directory its starter resolved and never a pass-through.
+const MACHINE: &str = "/fleet-effects/the-machine-this-start-resolved";
+
 fn s1() -> SeatId {
     SeatId::parse(S1).expect("the fixture's id parses")
 }
@@ -163,6 +168,7 @@ fn a_target(worktree: &str) -> Target<'_> {
         run: None,
         session_id: Some("a-session"),
         context_tokens: Some(1_000),
+        machine_dir: Path::new(MACHINE),
     }
 }
 
@@ -201,7 +207,7 @@ fn a_spec(worktree: &str) -> Launch {
         posture: Posture::Auto,
         first_turn: "/wake s1".to_string(),
         config_dir: None,
-        env: fleet_controller::effect::seat_environment(&format!("seat:{S1}")),
+        env: fleet_controller::effect::seat_environment(&format!("seat:{S1}"), Path::new(MACHINE)),
         permissions: Permissions::default(),
     }
 }
@@ -699,6 +705,12 @@ fn a_revive_resumes_the_full_id_and_kills_a_fork() {
     );
     let pane = rig.host.session(&rig.session()).expect("the resume stands");
     assert_eq!(pane.pid, resumed_pane, "a NEW session, and not pane {dead}");
+    assert!(
+        pane.env
+            .contains(&("FLEET_DIR".to_string(), MACHINE.to_string())),
+        "the resume is handed the machine directory too: {:?}",
+        pane.env
+    );
     let revived = rig
         .events()
         .into_iter()
@@ -1336,6 +1348,42 @@ fn a_nudge_marks_its_session_and_states_what_it_carried() {
         "refused: blocked on permission prompt"
     );
     assert_eq!(rig.host.sends(&rig.session()).len(), before, "no byte");
+}
+
+/// A session is handed the machine directory its start was made under as
+/// `FLEET_DIR`, and no `FLEET_HOME` (shared.locations R29): the verbs the seat
+/// runs act on the machine that started it. The target names a directory no
+/// variable of this process names, so the value is the resolved one and not a
+/// copy of this process's own `FLEET_DIR`.
+#[test]
+fn a_session_carries_the_machine_directory_it_was_started_under_as_fleet_dir() {
+    let rig = Rig::new("fleet-dir");
+    let worktree = rig.worktree().display().to_string();
+    let mut table = Table::default();
+    let mut log = rig.log();
+    let outcome = effect::spawn_woken(
+        &rig.agent(),
+        &rig.host,
+        &a_policy(),
+        &a_target(&worktree),
+        &mut log,
+        &mut table,
+        1_000,
+    );
+    assert_eq!(outcome, effect::Outcome::Spawned);
+    let env = rig
+        .host
+        .session(&rig.session())
+        .expect("the start left its session on the host")
+        .env;
+    assert!(
+        env.contains(&("FLEET_DIR".to_string(), MACHINE.to_string())),
+        "the start carries FLEET_DIR={MACHINE}: {env:?}"
+    );
+    assert!(
+        !env.iter().any(|(name, _)| name == "FLEET_HOME"),
+        "and no FLEET_HOME: {env:?}"
+    );
 }
 
 /// A session's pane carries THIS PROCESS'S OWN EXECUTABLE as `FLEET_BIN`, so

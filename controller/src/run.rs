@@ -1487,6 +1487,7 @@ fn act(
                 observation,
                 context_tokens,
                 recorded,
+                machine_dir,
             ) else {
                 eprintln!(
                     "fleet observe: {machine_name} is due {} and names no one worktree, so there \
@@ -1583,6 +1584,7 @@ fn target_for<'a>(
     observation: &'a SeatObservation,
     context_tokens: Option<u64>,
     recorded: Recorded,
+    machine_dir: &'a Path,
 ) -> Option<Target<'a>> {
     // The directory the seat was SEEN in when it was seen in one, and its single
     // configured worktree otherwise. A seat registered on several projects and
@@ -1619,6 +1621,7 @@ fn target_for<'a>(
         run: None,
         session_id: observation.session_id.as_deref(),
         context_tokens,
+        machine_dir,
     })
 }
 

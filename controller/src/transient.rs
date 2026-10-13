@@ -693,6 +693,7 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
         run: crate::runs::of_this_process(),
         session_id: None,
         context_tokens: None,
+        machine_dir: machine.machine_dir,
     };
     // INTO A TABLE OF ITS OWN: what this call produces is the ROW, and the file
     // it belongs in can be written by a feed or a retire while the start runs.

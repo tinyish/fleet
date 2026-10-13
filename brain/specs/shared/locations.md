@@ -125,10 +125,11 @@ may lack the `XDG_STATE_HOME` you set. Told the directory, the controller
 reads and writes the one `fleet start` wrote `config.json` in, and never
 resolves another.
 
-A seat's session is handed no `FLEET_DIR` and no `FLEET_HOME`. Under a
-`FLEET_DIR`, the verbs a seat runs in its session resolve a different machine
-directory from the controller that started it. A run's command and a
-routine's action are handed `FLEET_DIR`.
+A seat's session is handed `FLEET_DIR`, set to the machine directory the
+controller resolved, whichever variable produced it. The verbs a seat runs in
+its session then act on the controller's machine, as a run's command and a
+routine's action do. The session is handed no `FLEET_HOME`: with `FLEET_DIR`
+set, nothing would read it.
 
 ### Finding the project a call acts in
 
@@ -195,8 +196,6 @@ what fleet does today, with a `Changing:` line after each one.
   items, `fleet doctor`, `fleet prime`) fall back only inside a checkout, and
   refuse outside one. Machine verbs (`fleet start`, `fleet stop`) act from any
   directory. Only `fleet prime` changes.
-- **A seat's session carries `FLEET_DIR`** (fleet-19w0). It is handed the
-  controller's `FLEET_DIR`.
 - **No lock file in a checkout** (fleet-hn6e). The locks for a project's files
   live in the machine directory, keyed by the project.
 - **On Linux, the unit follows `XDG_CONFIG_HOME`** (fleet-r0xz), where it is
@@ -321,8 +320,8 @@ what fleet does today, with a `Changing:` line after each one.
   fleet SHALL act from any working directory, inside a project or a git
   checkout or not.
 - **shared.locations.R29**: WHEN the controller starts a seat's session, fleet
-  SHALL hand the session no `FLEET_DIR` and no `FLEET_HOME`.
-  Changing: fleet-19w0: the session is handed the controller's `FLEET_DIR`.
+  SHALL hand the session `FLEET_DIR` set to the machine directory the
+  controller resolved (R2 to R6), and no `FLEET_HOME`.
 - **shared.locations.R30**: IF `FLEET_DIR` names a relative path, or
   `FLEET_DIR` is unset, `FLEET_HOME` names a relative path and R5 does not
   apply, THEN fleet SHALL refuse (shared.exit-codes.R2) on a refusal line
@@ -361,8 +360,8 @@ what fleet does today, with a `Changing:` line after each one.
   place of `packs/`; the packs area's spec says what else it moves.
 - The guards, `fleet prime` and the item verbs walk up the same way (R21 to
   R23). They differ only where no file is found (R24, R27, R28).
-- A seat's session is handed no machine directory today (R29); the seats
-  area's spec cites that clause.
+- A seat's session is handed `FLEET_DIR` naming the machine directory (R29);
+  the seats area's spec cites that clause.
 - shared.exit-codes.R23 states the exit for a verb that finds no fleet (R25).
 
 ## Open questions

@@ -491,6 +491,30 @@ mod effects {
         assert_eq!(rig.start_actor(), format!("seat:{SEAT_ID}"));
     }
 
+    /// A start hands the session the machine directory the controller
+    /// resolved as `FLEET_DIR`, and no `FLEET_HOME` (shared.locations R29), so
+    /// the verbs the seat runs act on the controller's machine. The rig's
+    /// controller runs with `FLEET_HOME` set as well, and the session is
+    /// handed none of it.
+    #[test]
+    fn a_start_hands_the_session_the_controllers_machine_directory_as_fleet_dir() {
+        let rig = Rig::new("effect-fleet-dir");
+        rig.write_roster("[]");
+
+        let out = rig.observe();
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(seat_row(&rig)["outcome"], "spawned");
+
+        let start = rig.last_start();
+        assert_eq!(start.var("FLEET_DIR"), rig.machine().display().to_string());
+        assert_eq!(
+            start.var("FLEET_HOME"),
+            "",
+            "no FLEET_HOME: {:?}",
+            start.env
+        );
+    }
+
     /// AC3(b), AC7 and AC8 — the rest collection, in its fixed order of stop
     /// then start the successor, both on the host, and the same collection with
     /// its stop failing. Nothing is removed: the predecessor was the host's

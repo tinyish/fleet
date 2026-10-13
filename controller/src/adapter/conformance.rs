@@ -347,7 +347,12 @@ fn a_launch(
         model,
         posture,
         config_dir: Some(config_dir.display().to_string()),
-        env: crate::effect::seat_environment(&Actor::seat(seat).to_string()),
+        // The machine directory as a seat's start hands it, so a check's
+        // session carries what a seat's does.
+        env: crate::effect::seat_environment(
+            &Actor::seat(seat).to_string(),
+            &crate::platform::machine_dir(),
+        ),
         permissions: Permissions::default(),
     }
 }
@@ -1179,7 +1184,10 @@ fn live_resumed(ctx: &Ctx) -> Answer {
     let argv = answered("resume", ctx.agent.resume(&asked))?;
     conforms("resume", &argv)?;
     runs_something("resume", &argv)?;
-    let fleets = crate::effect::seat_environment(&Actor::seat(live.seat).to_string());
+    let fleets = crate::effect::seat_environment(
+        &Actor::seat(live.seat).to_string(),
+        &crate::platform::machine_dir(),
+    );
     let name = live.session_name();
     let _ = live.host.kill(&name);
     live.host

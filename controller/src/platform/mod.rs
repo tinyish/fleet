@@ -214,6 +214,10 @@ pub fn child_path(home: &Path) -> String {
 /// `FLEET_ACTOR` is not here for the second of those reasons: a controller
 /// started from inside a seat would make every session it starts that seat.
 /// A start and a resume set it from the seat they are for.
+///
+/// `FLEET_DIR` is not here either: a start sets it from the machine directory
+/// this process resolved, which a controller resolved from `FLEET_HOME` has
+/// and no variable of its own names.
 pub const PASSED_THROUGH: [&str; 4] = ["HOME", "USER", "TMPDIR", "LANG"];
 
 /// Set, a seam naming no binary is a refusal rather than a fall back to one on
