@@ -22,14 +22,24 @@ fn utf8(bytes: Vec<u8>) -> String {
 
 // ---- `fleet prime` -----------------------------------------------------------
 
-/// A scratch tree: a working directory with no `fleet.toml` above it, a fleet
+/// A scratch tree, a checkout: a working directory with no `fleet.toml` above it, a fleet
 /// directory the binary is pointed at, and whatever else the case writes.
 struct Scratch {
     root: PathBuf,
 }
 
 impl Scratch {
+    /// A scratch tree that is a checkout: a `.git` directory at its root, which
+    /// is all the walk reads (shared.locations.R24). `fleet prime` falls back to
+    /// the machine's fleet only inside one, as a seat's worktree is.
     fn new(label: &str) -> Scratch {
+        let s = Scratch::bare(label);
+        s.dir(".git");
+        s
+    }
+
+    /// The same tree outside every checkout.
+    fn bare(label: &str) -> Scratch {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let root =
             std::env::temp_dir().join(format!("fleet-prime-{label}-{}-{n}", std::process::id()));
@@ -118,7 +128,11 @@ fn prime(cwd: &Path, fleet_dir: &Path, env: &[(&str, &str)]) -> Output {
 }
 
 fn line_one(out: &Output) -> String {
-    assert_eq!(out.status.code(), Some(0), "prime always exits 0");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "prime exits 0 where it finds its fleet"
+    );
     utf8(out.stdout.clone())
         .lines()
         .next()
@@ -211,24 +225,117 @@ fn config_json(fleet_toml: &Path, children: &str) -> String {
     )
 }
 
+/// No fleet anywhere: no file above the directory and no `config.json`.
+/// Prime refuses as every project verb does (shared.locations.R25), under its
+/// own name on stderr, exit 1, and prints nothing on stdout.
 #[test]
-fn with_no_config_anywhere_prime_says_so_in_one_line() {
+fn with_no_fleet_anywhere_prime_refuses() {
     let s = Scratch::new("no-config");
     let cwd = s.dir("cwd");
     let fleet_dir = s.dir("fleet-dir");
 
     let out = prime(&cwd, &fleet_dir, &[]);
-    assert_eq!(out.status.code(), Some(0));
-    let text = utf8(out.stdout);
-    assert_eq!(text.lines().count(), 1, "line 1 alone: {text}");
+    assert_eq!(out.status.code(), Some(1), "{}", utf8(out.stderr.clone()));
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout.clone())
+    );
     let here = std::fs::canonicalize(&cwd).expect("the scratch cwd resolves");
-    assert_eq!(
-        text.trim_end(),
-        format!(
-            "fleet {} — no fleet config found above {}",
-            env!("CARGO_PKG_VERSION"),
-            here.display()
-        )
+    assert_eq!(utf8(out.stderr), no_fleet_line(&here));
+}
+
+/// The walk's no-fleet line, as `fleet prime` says it.
+fn no_fleet_line(cwd: &Path) -> String {
+    format!(
+        "fleet prime: no `fleet.toml` and no `.fleet/project.toml` above {} — `fleet create` \
+         writes one\n",
+        cwd.display()
+    )
+}
+
+/// A fleet the machine names, at `fleet-root/fleet.toml` in `s`.
+fn a_named_fleet(s: &Scratch) {
+    let fleet_toml = s.write("fleet-root/fleet.toml", "");
+    s.write("fleet-dir/config.json", &config_json(&fleet_toml, ""));
+}
+
+/// shared.locations.R24, R25: outside every checkout the machine's fleet is
+/// not a fallback, and prime refuses. The control is the same tree made a
+/// checkout, where it is primed.
+#[test]
+fn outside_every_checkout_prime_refuses_the_machine_s_fleet() {
+    let s = Scratch::bare("outside");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    a_named_fleet(&s);
+
+    let out = prime(&cwd, &fleet_dir, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", utf8(out.stderr.clone()));
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout.clone())
+    );
+    let here = std::fs::canonicalize(&cwd).expect("the scratch cwd resolves");
+    assert_eq!(utf8(out.stderr), no_fleet_line(&here));
+
+    s.dir("cwd/.git");
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.starts_with(&format!("fleet {} — packs: ", env!("CARGO_PKG_VERSION"))),
+        "{line}"
+    );
+}
+
+/// A linked worktree's `.git` is a FILE, and it is a checkout all the same:
+/// a seat's worktree is one.
+#[test]
+fn a_linked_worktree_s_git_file_is_a_checkout() {
+    let s = Scratch::bare("git-file");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    a_named_fleet(&s);
+    s.write("cwd/.git", "gitdir: /nowhere/.git/worktrees/cwd\n");
+
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.starts_with(&format!("fleet {} — packs: ", env!("CARGO_PKG_VERSION"))),
+        "{line}"
+    );
+}
+
+/// shared.locations.R24 asks for a policy file that EXISTS: a machine naming
+/// one that is gone is no fleet, even inside a checkout.
+#[test]
+fn a_named_policy_file_that_is_gone_is_no_fleet() {
+    let s = Scratch::new("gone");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    s.write(
+        "fleet-dir/config.json",
+        &config_json(&s.root.join("fleet-root/fleet.toml"), ""),
+    );
+
+    let out = prime(&cwd, &fleet_dir, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", utf8(out.stderr.clone()));
+    let here = std::fs::canonicalize(&cwd).expect("the scratch cwd resolves");
+    assert_eq!(utf8(out.stderr), no_fleet_line(&here));
+}
+
+/// The checkout matters only where the walk finds no file: an embedded
+/// fleet's own `fleet.toml` is primed outside every checkout.
+#[test]
+fn an_embedded_fleet_outside_every_checkout_is_primed() {
+    let s = Scratch::bare("embedded-outside");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    s.write("cwd/fleet.toml", "");
+
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.starts_with(&format!("fleet {} — packs: ", env!("CARGO_PKG_VERSION"))),
+        "{line}"
     );
 }
 
@@ -926,7 +1033,11 @@ fn line_two_is_the_store_s_own_version_and_its_adapter() {
     ] {
         let (_s, cwd, fleet_dir) = tracker_rig(label, version);
         let out = prime(&cwd, &fleet_dir, &[]);
-        assert_eq!(out.status.code(), Some(0), "prime always exits 0");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "prime exits 0 where it finds its fleet"
+        );
         let text = utf8(out.stdout);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.get(1), Some(&line), "{label}: {text}");
@@ -980,7 +1091,11 @@ fn line_two_reads_the_adapter_the_project_names() {
         );
 
         let out = prime(&under, &fleet_dir, &[]);
-        assert_eq!(out.status.code(), Some(0), "prime always exits 0");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "prime exits 0 where it finds its fleet"
+        );
         let text = utf8(out.stdout);
         assert_eq!(
             text.lines().nth(1),
@@ -1052,7 +1167,11 @@ fn a_store_that_cannot_be_read_is_line_two_s_own_answer() {
         let started = std::time::Instant::now();
         let out = prime(&project, &fleet_dir, &[]);
         let took = started.elapsed();
-        assert_eq!(out.status.code(), Some(0), "{label}: prime always exits 0");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{label}: prime exits 0 where it finds its fleet"
+        );
         let text = utf8(out.stdout);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.get(1), Some(&line.as_str()), "{label}: {text}");
@@ -1182,7 +1301,11 @@ fn a_session_under_a_seat_s_worktree_gets_no_item_line() {
     );
 
     let out = prime(&under, &fleet_dir, &[]);
-    assert_eq!(out.status.code(), Some(0), "prime always exits 0");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "prime exits 0 where it finds its fleet"
+    );
     let text = utf8(out.stdout);
     let items: Vec<&str> = text.lines().filter(|l| l.starts_with("item:")).collect();
     assert!(

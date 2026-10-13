@@ -371,9 +371,13 @@ what a session is handed at its start: the version, this fleet's pack layers
 and its guards on one line, then the resolved rules file, then one line per
 item assigned to the seat whose row names this directory.
 
-It reads nothing from stdin and always exits 0. A session-start hook that fails
-closed takes the session down with it, so a part that cannot be read says so in
-its own line and the next part still prints.")]
+It reads nothing from stdin and exits 0 once it has found the fleet. A
+session-start hook that fails closed takes the session down with it, so a part
+that cannot be read says so in its own line and the next part still prints.
+
+Where it finds no fleet for this directory (outside a git checkout, the
+machine's fleet is not one) it refuses with exit 1, on stderr, and prints
+nothing.")]
     Prime,
 }
 

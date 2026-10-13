@@ -263,8 +263,8 @@ pub fn resolve_from(
     // THE WALK IS NOT THE ONLY ANSWER, and a directory it fails on is not a
     // fleetless one. A seat's worktree cut beside a project whose own
     // `fleet.toml` is not committed carries neither file above it, and the
-    // machine directory still names the fleet — the same fallback `fleet prime`
-    // takes (`fleet-cli's prime::command`) and the guards take
+    // machine directory still names the fleet — the fallback every project verb
+    // takes through here, `fleet prime` among them, and the one the guards take
     // (`fleet-cli's guard::resolve_policy`), so every reader answers about one fleet.
     //
     // THE ROOT IS THE CALLER'S OWN CHECKOUT, and the fallback is owed only to a

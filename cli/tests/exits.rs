@@ -564,8 +564,8 @@ fn a_refused_call_writes_nothing_and_what_is_not_a_verb_is_not_refused() {
 
 /// shared.locations R32's exemption: `fleet guard` and `fleet prime` resolve
 /// as before under a relative FLEET_DIR, and neither prints the refusal line
-/// (a guard that exits 1 lets the tool call through unjudged; prime always
-/// exits 0). Until the open question is ruled.
+/// (a guard that exits 1 lets the tool call through unjudged; prime exits 0
+/// where it finds its fleet). Until the open question is ruled.
 #[test]
 fn guard_and_prime_are_exempt_from_the_relative_refusal() {
     let machine = Machine::new("relative-exempt");
@@ -589,11 +589,14 @@ fn guard_and_prime_are_exempt_from_the_relative_refusal() {
         stderr(&out)
     );
 
+    // An embedded fleet here, so prime finds its fleet and the gate is the
+    // only thing in question.
+    std::fs::write(cwd.join("fleet.toml"), "").expect("the fleet file is written");
     let out = machine.run_in_env(&["prime"], &cwd, &rel, &[]);
     assert_eq!(
         out.status.code(),
         Some(0),
-        "prime always exits 0: {}",
+        "prime exits 0 where it finds its fleet: {}",
         stderr(&out)
     );
     assert!(

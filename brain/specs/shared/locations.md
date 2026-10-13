@@ -184,15 +184,17 @@ file sits above it, and the machine still names the fleet.
 Outside every checkout, the verb refuses. There is no tree to act in, and a
 guessed project would put a seat in the wrong one. The refusal names the
 working directory and `fleet create`, and exits as shared.exit-codes.R23
-says. `fleet create`, `fleet start`, `fleet stop`, `fleet prime` and
-`fleet guard` decide in their own specs what they do where there is no fleet.
+says. `fleet prime` is such a verb: a seat's session runs it in the seat's
+worktree, which is a checkout, so a seat is primed wherever it works, and a
+session outside every checkout is told there is no fleet there.
+`fleet create`, `fleet start`, `fleet stop` and `fleet guard` decide in
+their own specs what they do where there is no fleet.
 
-Today the verbs differ where no file is found above the working directory:
+The verbs differ where no file is found above the working directory:
 
 | Verb | Where no file is found |
 | --- | --- |
-| the item verbs, `fleet doctor` | act in `config.json`'s fleet only inside a git checkout, and refuse outside one |
-| `fleet prime` | acts under `config.json`'s fleet from any directory, inside a checkout or not |
+| the item verbs, `fleet doctor`, `fleet prime` | act in `config.json`'s fleet only inside a git checkout, and refuse outside one |
 | `fleet start`, `fleet stop` | act on the machine from any directory, inside a checkout or not |
 
 `fleet stop` resolves no fleet at all. A stop that looked for a project first
@@ -210,10 +212,6 @@ what fleet does today, with a `Changing:` line after each one.
   `.fleet/project.toml` that `projects.toml` does not list will refuse, and
   name the command that registers it. So will a verb in a declared project on
   a machine whose `config.json` is absent or names no fleet.
-- **The fallback splits by kind of verb** (fleet-x1qu). Project verbs (the
-  items, `fleet doctor`, `fleet prime`) fall back only inside a checkout, and
-  refuse outside one. Machine verbs (`fleet start`, `fleet stop`) act from any
-  directory. Only `fleet prime` changes.
 
 ## Behaviour
 
@@ -316,20 +314,17 @@ what fleet does today, with a `Changing:` line after each one.
   R21 to R24, THEN fleet SHALL refuse with the exit shared.exit-codes.R23
   states, on a refusal line (shared.exit-codes.R12, R13) that names the
   working directory and `fleet create`. `fleet create`, `fleet start`,
-  `fleet stop`, `fleet prime` and `fleet guard` are not bound by this clause:
-  their own specs say what each does where there is no fleet.
-  Changing: fleet-x1qu: `fleet prime` is bound by this clause too.
+  `fleet stop` and `fleet guard` are not bound by this clause: their own
+  specs say what each does where there is no fleet.
 - **shared.locations.R26**: WHEN the directory R21 stops at holds a
   `.fleet/project.toml` and `config.json` is absent or names no policy file
   that exists, fleet SHALL still act in the standalone project rooted there.
   Changing: fleet-np9q: fleet refuses (shared.exit-codes.R2) on a line that
   names `fleet create --standalone`, the command that registers it.
-- **shared.locations.R27**: WHEN `fleet prime` is called, R21 finds neither
-  file, and `config.json` names a policy file that exists, fleet SHALL act
-  under that fleet whether or not the working directory is inside a git
-  checkout.
-  Changing: fleet-x1qu: `fleet prime` falls back only inside a checkout, as
-  R24 says, and refuses outside one, as R25 says.
+- **shared.locations.R27**: (retired by fleet-x1qu: `fleet prime` finds its
+  fleet as every verb that acts in a project does, by R21 to R26; where no
+  file is found that is R24's fallback inside a checkout and R25's refusal
+  outside one.)
 - **shared.locations.R28**: WHEN `fleet start` or `fleet stop` is called,
   fleet SHALL act from any working directory, inside a project or a git
   checkout or not.
@@ -363,7 +358,7 @@ what fleet does today, with a `Changing:` line after each one.
 ## Non-functional
 
 - **shared.locations.N1**: WHEN fleet resolves the machine directory (R1 to
-  R6, R30 to R32) or looks for the fleet a call acts in (R21 to R24, R26, R27),
+  R6, R30 to R32) or looks for the fleet a call acts in (R21 to R24, R26),
   fleet SHALL create no file and no directory in doing so.
 
 ## Interfaces
@@ -380,7 +375,7 @@ what fleet does today, with a `Changing:` line after each one.
 - A verb that takes `--packs-dir` reads packs from the directory it names in
   place of `packs/`; the packs area's spec says what else it moves.
 - The guards, `fleet prime` and the item verbs walk up the same way (R21 to
-  R23). They differ only where no file is found (R24, R27, R28).
+  R23). They differ only where no file is found (R24, R25, R28).
 - A seat's session is handed `FLEET_DIR` naming the machine directory (R29);
   the seats area's spec cites that clause.
 - shared.exit-codes.R23 states the exit for a verb that finds no fleet (R25).

@@ -1,10 +1,14 @@
 //! `fleet prime` — what a session is handed at its start.
 //!
-//! THE EXIT IS ALWAYS DONE AND NOTHING IS READ FROM STDIN. A session-start hook
-//! that fails closed takes the session down with it, so every branch here ends
-//! on a line rather than on a status: a layering this fleet cannot resolve, a
-//! rules file that is not there and a store that will not answer each say so
-//! in their own words and the next part still prints.
+//! ONCE THE FLEET IS FOUND THE EXIT IS DONE, AND NOTHING IS READ FROM STDIN.
+//! A session-start hook that fails closed takes the session down with it, so
+//! every branch after that ends on a line rather than on a status: a layering
+//! this fleet cannot resolve, a rules file that is not there and a store that
+//! will not answer each say so in their own words and the next part still
+//! prints. The fleet is found as every project verb finds it
+//! (shared.locations.R21 to R26); where it finds no fleet for this directory
+//! it refuses before anything prints, as every project verb refuses there
+//! (shared.locations.R25): exit 1, the line on stderr.
 //!
 //! Line 2 is the project's store as it names itself: its answer to the
 //! contract's `version`, through the opener every verb takes, and the adapter
@@ -41,27 +45,23 @@ pub fn command() -> Exit {
     let version = env!("CARGO_PKG_VERSION");
     let cwd = std::env::current_dir().unwrap_or_default();
     let machine_dir = platform::machine_dir();
+
+    // THE FLEET IS FOUND AS EVERY PROJECT VERB FINDS IT, through the one
+    // resolution they share (shared.locations.R21 to R26): an embedded
+    // fleet's own `fleet.toml`; for a declared project, the fleet's file
+    // `config.json` names; where the walk finds neither, that same file only
+    // inside a git checkout. Anywhere else that resolution's refusal is this
+    // verb's, said before anything prints.
+    let fleet_toml = match fleet_controller::project::resolve_from(&cwd, machine_dir.clone(), None)
+    {
+        Ok(here) => here.policy_file,
+        Err(stop) => return crate::exit::refuse_stop("prime", &stop, false),
+    };
     let machine = config::read(&config::path_in(&machine_dir)).ok();
-
-    // The order `fleet guard` resolves its policy in, so the two verbs answer
-    // about one file: an embedded fleet's own, and — for a declared project,
-    // which wins at its own level — the FLEET's, named by the machine
-    // directory.
+    // Line 2's project is the WALK's: a directory the checkout fallback
+    // admitted has no project file of its own, and line 2 says so rather
+    // than naming the checkout.
     let found = fleet_controller::project::walk_up_config(&cwd);
-    let fleet_toml = match &found {
-        Some(fleet_controller::project::Found::Embedded(path)) => Some(path.clone()),
-        Some(fleet_controller::project::Found::Declared(_)) | None => {
-            machine.as_ref().map(|m| m.fleet_toml.clone())
-        }
-    };
-
-    let Some(fleet_toml) = fleet_toml else {
-        println!(
-            "fleet {version} — no fleet config found above {}",
-            cwd.display()
-        );
-        return Exit::Done;
-    };
 
     let policy = crate::guard::read_text(&fleet_toml);
     let (packs_dir, defaults_dir) = defaults::pack_dirs(&machine_dir, None);
