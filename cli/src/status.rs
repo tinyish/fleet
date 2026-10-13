@@ -371,9 +371,11 @@ fn capped_on(
 /// MACHINE-LEVEL, because the runs are: a machine's runs span its projects, so
 /// every registered project is asked, over the roots the run pass looks a
 /// run's record up across. A root that will not resolve is skipped, as the
-/// pass skips it — a machine is not broken because one of its roots moved. A
-/// store that will not answer is not skipped: a count without it is a count
-/// of some of the holds, printed as all of them.
+/// pass skips it — a machine is not broken because one of its roots moved.
+/// A registered declared project is skipped where `config.json` names no
+/// fleet (shared.locations.R26), so the count covers only the projects this
+/// machine can act in. A store that will not answer is not skipped: a count
+/// without it is a count of some of the holds, printed as all of them.
 fn open_holds_on(machine_dir: &Path) -> Result<BTreeSet<String>, String> {
     let mut open = BTreeSet::new();
     for root in registered_roots(machine_dir) {

@@ -193,7 +193,9 @@ tell, and exits 3 (shared.exit-codes.R4).
 
 `fleet create` is not refused in such a directory, because it is the command
 that registers. `fleet start` and `fleet stop` act from any directory (see
-below), and `fleet guard` reads such a directory as its own spec says.
+below). `fleet store check` and `fleet agent check` are not refused either:
+they read the adapter settings that directory's project names, as they do in
+a registered one. `fleet guard` reads such a directory as its own spec says.
 
 The nearest directory wins. Take a `fleet.toml` in `~/work/app` and another in
 `~/work/app/tools`. A verb run in `~/work/app/tools/sub` acts in the fleet in
@@ -313,7 +315,7 @@ Walking up creates nothing.
 - **shared.locations.R22**: WHEN the directory R21 stops at holds a
   `.fleet/project.toml`, `config.json` names a policy file that exists, and
   `projects.toml` lists that directory, or the checkout the declaration's
-  `[project] primary` names, as a project's root (R13, matched as R35 says),
+  `[project] primary` names, as a project's root (R13, matched as R36 says),
   fleet SHALL act in the standalone project rooted there, under the fleet
   whose policy file `config.json` names (R11), even where a `fleet.toml` sits
   beside it.
@@ -336,8 +338,8 @@ Walking up creates nothing.
   that exists, THEN fleet SHALL refuse (shared.exit-codes.R2) on a refusal
   line (shared.exit-codes.R12, R13) that names that directory, `config.json`
   and `fleet create --standalone`, the command that registers the project.
-  `fleet create`, `fleet guard` and the verbs R28 names are not bound by this
-  clause.
+  `fleet create`, `fleet guard`, `fleet store check`, `fleet agent check` and
+  the verbs R28 names are not bound by this clause.
 - **shared.locations.R27**: (retired by fleet-x1qu: `fleet prime` finds its
   fleet as every verb that acts in a project does, by R21 to R26; where no
   file is found that is R24's fallback inside a checkout and R25's refusal
@@ -377,16 +379,18 @@ Walking up creates nothing.
   checkout the declaration's `[project] primary` names, THEN fleet SHALL
   refuse (shared.exit-codes.R2) on a refusal line (shared.exit-codes.R12,
   R13) that names that directory, `projects.toml` and
-  `fleet create --standalone`, the command that registers it. A root is
-  matched as a directory: two paths that reach the same directory are one
-  root. `fleet create`, `fleet guard` and the verbs R28 names are not bound
-  by this clause.
+  `fleet create --standalone`, the command that registers it, where a root
+  is matched as R36 says. `fleet create`, `fleet guard`, `fleet store check`,
+  `fleet agent check` and the verbs R28 names are not bound by this clause.
+- **shared.locations.R36**: WHEN fleet compares a directory with a root
+  `projects.toml` lists (R22, R35), fleet SHALL count the two as one root
+  where they name the same directory, however each is spelled.
 
 ## Non-functional
 
 - **shared.locations.N1**: WHEN fleet resolves the machine directory (R1 to
   R6, R30 to R32) or looks for the fleet a call acts in (R21 to R24, R26,
-  R35), fleet SHALL create no file and no directory in doing so.
+  R35, R36), fleet SHALL create no file and no directory in doing so.
 
 ## Interfaces
 
@@ -402,9 +406,12 @@ Walking up creates nothing.
 - A verb that takes `--packs-dir` reads packs from the directory it names in
   place of `packs/`; the packs area's spec says what else it moves.
 - The guards, `fleet prime`, `fleet start` and the item verbs walk up the
-  same way (R21 to R23). `fleet prime` and the item verbs refuse a declared
-  project the machine has not registered (R26, R35); `fleet start` reads it
-  all the same, and the guards' spec says what a guard reads there. `fleet
+  same way (R21 to R23). Every verb that acts in a project refuses a declared
+  project the machine has not registered (R26, R35): the item verbs,
+  `fleet prime`, `fleet doctor`, `fleet run`, the seat verbs and the
+  `fleet routine` verbs among them. `fleet create`, `fleet start`,
+  `fleet stop`, `fleet store check` and `fleet agent check` are not refused
+  there, and the guards' spec says what a guard reads there. `fleet
   prime` and the item verbs then fall back to a checkout (R24) and, where
   that finds no fleet, refuse (R25). `fleet guard` follows its own spec where
   no file is found (R25). Where no file is found, `fleet start` acts on

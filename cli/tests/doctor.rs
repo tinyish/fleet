@@ -1342,11 +1342,11 @@ fn unregistered_line(rig: &Rig, here: &Path) -> String {
     )
 }
 
-/// shared.locations.R22, R35: a declared project the machine's register does
-/// not list is refused, naming the register and the command that registers
-/// it, under --json as one refusal; the same project registered is checked.
-/// On macOS the register holds the temp dir's `/var` spelling and the walk
-/// reads `/private/var`, so the registered arm is also the check that one
+/// shared.locations.R22, R35, R36: a declared project the machine's register
+/// does not list is refused, naming the register and the command that
+/// registers it, under --json as one refusal; the same project registered is
+/// checked. On macOS the register holds the temp dir's `/var` spelling and the
+/// walk reads `/private/var`, so the registered arm is also the check that one
 /// directory under two spellings is one root.
 #[test]
 fn a_declared_project_is_checked_only_once_the_machine_registers_it() {
@@ -1390,8 +1390,8 @@ fn a_declared_project_is_checked_only_once_the_machine_registers_it() {
     );
 }
 
-/// shared.locations.R22, R35: a seat's worktree carries its own copy of a
-/// committed declaration, and the register lists the primary checkout and
+/// shared.locations.R22, R35, R36: a seat's worktree carries its own copy of
+/// a committed declaration, and the register lists the primary checkout and
 /// never the worktree. The copy is admitted where the register lists the
 /// `[project] primary` it names, matched as a directory (the declaration
 /// names it canonically, the register by the temp dir's spelling); it is

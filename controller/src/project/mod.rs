@@ -364,7 +364,7 @@ fn walk_from(
 ///
 /// THE ROOT IS MATCHED AS A DIRECTORY, NOT A SPELLING: the register holds the
 /// spelling `fleet create` was run under, and one directory reached two ways
-/// is one project. Canonicalizing reads and creates nothing (N1).
+/// is one project (R36). Canonicalizing reads and creates nothing (N1).
 pub fn admit_declared(dir: &Path, machine_dir: &Path) -> Result<(), Stop> {
     let seat_list = config::path_in(machine_dir);
     let named = config::read(&seat_list).is_ok_and(|machine| machine.fleet_toml.is_file());
