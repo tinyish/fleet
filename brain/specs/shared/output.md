@@ -7,8 +7,8 @@ Uses: shared.exit-codes
 Most verbs a program drives take `--json`, which asks for the outcome as a
 JSON document on standard output instead of lines a person reads. Every such
 document has the same outer shape, the envelope: whether the verb did what it
-was asked, which verb answered, and then either what it did or why it
-refused. A program parses one document and learns what happened, rather than
+was asked, which verb answered, and then what it did or why it refused, or,
+for a `fleet doctor` whose checks did not all pass, both. A program parses one document and learns what happened, rather than
 parsing lines written for a person.
 
 You meet it whenever something other than a person reads fleet's answer:
@@ -62,15 +62,16 @@ keep in step.
 
 | Key | Present when | What a script reads from it |
 | --- | --- | --- |
-| `ok` | always | `true`: read `data`. `false`: read `refusal`. |
+| `ok` | always | `true`: read `data`. `false`: read `refusal`, and for `fleet doctor` once its checks have run, `data` too. |
 | `verb` | always | which verb answered: the verb as typed, without `fleet` and its arguments, such as `doctor`, `event show` or `seat add` |
-| `data` | `ok` is `true` | the outcome; its shape is the verb's own spec |
+| `data` | `ok` is `true`, and in `fleet doctor`'s document once its checks have run | the outcome; its shape is the verb's own spec |
 | `refusal` | `ok` is `false` | an object with `code` and `why` |
 | `refusal.code` | `ok` is `false` | the exit table's row name, such as `refused`, `usage`, `could_not_tell` or `no_collector`; a script branches on it |
-| `refusal.why` | `ok` is `false` | the reason, as the refusal line on standard error says it |
+| `refusal.why` | `ok` is `false` | the reason, as the refusal line on standard error says it; for `fleet doctor`'s finding or could-not-tell, its summary line |
 
-The keys come in that order: `ok`, `verb`, then `data` or `refusal`. A
-document never carries both `data` and `refusal`.
+The keys come in that order: `ok`, `verb`, then `data` or `refusal`. Only
+`fleet doctor`, once its checks have run and not all passed, prints a
+document carrying both, with `refusal` before `data`.
 
 ### Standard output carries the document and nothing else
 
@@ -126,23 +127,32 @@ $ echo $?
 
 ### `fleet doctor`
 
-Today `fleet doctor --json`, once its checks have run, prints a success
-document whatever its checks said: `ok` is `true` and `data` carries every
-row, while `$?` is 0, 1 or 3 (shared.exit-codes.R24). A ruling changes this
-(fleet-accn): `ok` will be `true` only on exit 0, and a finding or a
-could-not-tell will print `ok` as `false` with the exit's row name as the
-code, keeping every row in `data`. A `fleet doctor` that refuses before any
-check runs, such as for a check name no layer carries, prints a refusal
-document like any verb.
+Once its checks have run, `fleet doctor --json` prints one document carrying
+every row in `data`, whatever its checks said, and `ok` follows the exit:
+`true` only on exit 0. A finding (exit 1) or a could-not-tell (exit 3)
+prints `ok` as `false`, with a `refusal` before the rows: its `code` is the
+exit's row name, `refused` or `could_not_tell`, and its `why` is the summary
+line `fleet doctor` writes on standard error, after `doctor `.
+
+```sh
+$ fleet doctor --json
+{"ok":false,"verb":"doctor","refusal":{"code":"refused","why":"7 checks — 6 pass, 1 finding, 0 could not tell"},"data":{"checks":[…],"counts":{"could_not_tell":0,"finding":1,"pass":6},"verdict":"finding"}}
+$ echo $?
+1
+```
+
+A script reads `ok` as the doctor's answer and `data` for which check said
+what. A finding is still not a refusal (shared.exit-codes.R2): `fleet
+doctor` writes no `fleet doctor:` line for it, only its rows and its summary,
+which move to standard error under the flag. A `fleet doctor` that refuses
+before any check runs, such as for a check name no layer carries, prints a
+refusal document like any verb, with no `data`.
 
 ### What is changing
 
 Each of these is an approved change. Until its bead lands, the clauses state
 what fleet does today, with a `Changing:` line after each one.
 
-- **`ok` follows the exit** (fleet-accn). `fleet doctor --json` with a
-  finding or a could-not-tell prints `ok` as `false`, with the exit's row
-  name as the code, and keeps every row in `data`.
 - **An untranslated error answers in the envelope** (fleet-iox1). Where fleet
   stops on an error it did not turn into a refusal, it prints a refusal
   document whose code is `could_not_tell` and whose `why` is the error's
@@ -169,20 +179,13 @@ what fleet does today, with a `Changing:` line after each one.
   typed, without `fleet` and without its arguments or flags, such as
   `doctor`, `event show` or `seat add`: the same words its refusal line names
   after `fleet` (shared.exit-codes.R12).
-- **shared.output.R6**: WHEN a verb called with `--json` does not refuse (a
-  check's finding is not a refusal, shared.exit-codes.R2), fleet SHALL print
-  a document carrying `ok` as `true` and a `data` key, whose content the
-  verb's own spec states, and no `refusal` key. `fleet doctor` answers so
-  once its checks have run, whatever its exit (shared.exit-codes.R24).
-  Changing: fleet-accn: `ok` is `true` only on exit 0; `fleet doctor` with a
-  finding or a could-not-tell answers as shared.output.R7 says, and still
-  carries every row in `data`.
-- **shared.output.R7**: IF a verb called with `--json` refuses, THEN fleet
-  SHALL print a document carrying `ok` as `false` and a `refusal` key, and no
-  `data` key.
-  Changing: fleet-accn: `fleet doctor` with a finding or a could-not-tell
-  also prints `ok` as `false`, with the exit's row name as its code
-  (shared.exit-codes.R24), and keeps every row in `data`.
+- **shared.output.R6**: WHEN a verb called with `--json` exits 0
+  (shared.exit-codes.R1), fleet SHALL print a document carrying `ok` as
+  `true` and a `data` key, whose content the verb's own spec states, and no
+  `refusal` key.
+- **shared.output.R7**: IF a verb called with `--json` refuses (a check's
+  finding is not a refusal, shared.exit-codes.R2), THEN fleet SHALL print a
+  document carrying `ok` as `false` and a `refusal` key, and no `data` key.
 - **shared.output.R8**: IF a verb called with `--json` refuses, THEN fleet
   SHALL make the document's `refusal` a JSON object carrying `code`, which
   shared.exit-codes.R11 fixes, and `why`.
@@ -194,7 +197,8 @@ what fleet does today, with a `Changing:` line after each one.
   SHALL still write its refusal line on standard error, as it does without
   the flag (shared.exit-codes.R12).
 - **shared.output.R11**: fleet SHALL put the keys of each document it prints
-  under `--json` in the order `ok`, `verb`, then `data` or `refusal`.
+  under `--json` in the order `ok`, `verb`, then `data` or `refusal`, and in
+  a document carrying both (shared.output.R19), `refusal` before `data`.
 - **shared.output.R12**: WHEN `fleet event tail` is called with `--json`,
   fleet SHALL print one document per event it prints (shared.output.R6), each
   on its own line, and no document when it prints no event.
@@ -224,6 +228,15 @@ what fleet does today, with a `Changing:` line after each one.
 - **shared.output.R18**: WHEN `fleet status` is called with `--json` and a
   projection is published that it reads, fleet SHALL print a success
   document whose `data` is that projection's JSON value.
+- **shared.output.R19**: WHEN `fleet doctor` called with `--json` has run its
+  checks and exits 1 or 3, fleet SHALL print a document carrying `ok` as
+  `false`, a `refusal` whose `code` is the name of the row it exits with
+  (shared.exit-codes.R11), and a `data` key whose content is the same as on
+  exit 0.
+- **shared.output.R20**: WHEN fleet prints the document shared.output.R19
+  names, fleet SHALL set its `refusal`'s `why` to the text of the summary
+  line `fleet doctor` writes on standard error after `doctor `, character for
+  character.
 
 ## Non-functional
 
@@ -233,8 +246,9 @@ None.
 
 - Scripts, the SDK, agents and the doctor checks read standard output as the
   envelope: they branch on `ok`, then read `data` or branch on the
-  `refusal`'s `code` (shared.exit-codes.R11). `$?` beside the document is
-  shared.exit-codes.R10's.
+  `refusal`'s `code` (shared.exit-codes.R11); `fleet doctor`'s document
+  carries both on a finding or a could-not-tell (shared.output.R19). `$?`
+  beside the document is shared.exit-codes.R10's.
 - The verbs that take `--json` today are `fleet dispatch`, `deliver`, `hold`,
   `clear`, `review` and `land`; `fleet item show` and `item list`;
   `fleet seat add`, `spawn`, `feed` and `retire`; `fleet doctor`;

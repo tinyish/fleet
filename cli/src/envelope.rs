@@ -9,11 +9,14 @@
 //! number: the number is on `$?`, and a second spelling of it is a second thing
 //! to keep in step.
 //!
-//! The key order is fixed — `ok`, then `verb`, then the outcome — and the two
+//! The key order is fixed — `ok`, then `verb`, then the outcome — and the three
 //! documents are built as text because this workspace pins `serde_json` with
 //! `preserve_order` off (the pin's own comment, `fleet/Cargo.toml`), so a map
 //! would answer the keys alphabetically instead. Every value still goes through
 //! `serde_json`, so the escaping is the library's and never this module's.
+//!
+//! One document carries both an outcome and a refusal: a report whose checks
+//! ran and did not all pass ([`fell_short`]), with the refusal first.
 
 use crate::exit::Exit;
 
@@ -30,8 +33,30 @@ pub fn ok(verb: &str, data: &serde_json::Value) -> String {
 /// same sentence the verb says on stderr.
 pub fn refusal(verb: &str, exit: Exit, why: &str) -> String {
     format!(
-        "{{\"ok\":false,\"verb\":{},\"refusal\":{{\"code\":{},\"why\":{}}}}}",
+        "{{\"ok\":false,\"verb\":{},\"refusal\":{}}}",
         quoted(verb),
+        refusal_object(exit, why)
+    )
+}
+
+/// A report whose checks ran and did not all pass: `ok` false, the row it
+/// exits with as the refusal, and the rows after it. `fleet doctor`'s alone —
+/// its finding is not a refusal, so the outcome stays, but `ok` follows the
+/// exit (shared.output.R19).
+pub fn fell_short(verb: &str, exit: Exit, why: &str, data: &serde_json::Value) -> String {
+    format!(
+        "{{\"ok\":false,\"verb\":{},\"refusal\":{},\"data\":{}}}",
+        quoted(verb),
+        refusal_object(exit, why),
+        serialized(data)
+    )
+}
+
+/// `{"code":<row name>,"why":<sentence>}`, the one spelling both documents
+/// that carry a refusal share.
+fn refusal_object(exit: Exit, why: &str) -> String {
+    format!(
+        "{{\"code\":{},\"why\":{}}}",
         quoted(exit.class()),
         quoted(why)
     )
@@ -51,14 +76,14 @@ fn serialized(value: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ok, refusal};
+    use super::{fell_short, ok, refusal};
     use crate::exit::Exit;
 
-    /// The two shapes, byte for byte. The key order is part of what this module
+    /// The three shapes, byte for byte. The key order is part of what this module
     /// promises a caller, so the pin is the whole string and not a parse and a
     /// look at three fields.
     #[test]
-    fn the_two_shapes_are_pinned_byte_for_byte() {
+    fn the_three_shapes_are_pinned_byte_for_byte() {
         assert_eq!(
             ok("event show", &serde_json::json!({ "seq": 3 })),
             r#"{"ok":true,"verb":"event show","data":{"seq":3}}"#
@@ -66,6 +91,15 @@ mod tests {
         assert_eq!(
             refusal("event show", Exit::Refused, "no event 0a-01"),
             r#"{"ok":false,"verb":"event show","refusal":{"code":"refused","why":"no event 0a-01"}}"#
+        );
+        assert_eq!(
+            fell_short(
+                "doctor",
+                Exit::Refused,
+                "7 checks — 6 pass, 1 finding, 0 could not tell",
+                &serde_json::json!({ "verdict": "finding" })
+            ),
+            r#"{"ok":false,"verb":"doctor","refusal":{"code":"refused","why":"7 checks — 6 pass, 1 finding, 0 could not tell"},"data":{"verdict":"finding"}}"#
         );
     }
 

@@ -27,10 +27,11 @@
 //! adapters are asked only verbs that read, and nothing here starts a
 //! session.
 //!
-//! THE REPORT IS THE OUTCOME. Under `--json` the document is a success
-//! whatever the checks said, carrying every row and the aggregate; the exit is
-//! the aggregate either way. `ok` is false only for the verb's own refusals,
-//! said before any check runs.
+//! THE REPORT IS THE OUTCOME. Under `--json` the document carries every row
+//! and the aggregate whatever the checks said, and `ok` follows the exit: true
+//! only when every check passed. A finding or a could-not-tell answers false
+//! with the exit's row as its refusal, the rows beside it. The verb's own
+//! refusals, said before any check runs, carry no rows.
 
 use std::ffi::OsStr;
 use std::io::Write;
@@ -450,17 +451,12 @@ impl Report<'_> {
             1 => String::from("1 check"),
             n => format!("{n} checks"),
         };
-        let summary = self.ui.line(
-            tone(verdict),
-            VERB,
-            &checks,
-            Some(&format!(
-                "{pass} pass, {finding} finding, {unknown} could not tell"
-            )),
-        );
+        let counted = format!("{pass} pass, {finding} finding, {unknown} could not tell");
+        let summary = self.ui.line(tone(verdict), VERB, &checks, Some(&counted));
         let _ = writeln!(self.human, "{summary}");
         let _ = self.human.flush();
 
+        let exit = Exit::of(verdict.exit());
         if json {
             let data = serde_json::json!({
                 "checks": self.rows.iter().map(Row::json).collect::<Vec<_>>(),
@@ -471,9 +467,18 @@ impl Report<'_> {
                 },
                 "verdict": verdict.code(),
             });
-            println!("{}", envelope::ok(VERB, &data));
+            // `ok` FOLLOWS THE EXIT. A finding or a could-not-tell is not a
+            // refusal, so no `fleet doctor:` line is said and the rows stay;
+            // the document still answers false, with the row it exits with,
+            // and the summary's own unstyled words as the why.
+            let document = if exit == Exit::Done {
+                envelope::ok(VERB, &data)
+            } else {
+                envelope::fell_short(VERB, exit, &format!("{checks} — {counted}"), &data)
+            };
+            println!("{document}");
         }
-        Exit::of(verdict.exit())
+        exit
     }
 }
 

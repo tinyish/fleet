@@ -128,15 +128,6 @@ so: nothing was unreadable, and the fleet the verb needs is absent, so it
 refuses with exit 1, as `fleet start` always has. shared.locations says
 where fleet looks for a fleet.
 
-### Where today's exits do not fit their row
-
-Some of today's exits do not match the meaning in the table. Each one has an
-approved change, listed after it.
-
-- **`fleet doctor --json` with a finding or a could-not-tell.** Today the
-  document's `ok` is `true` whatever the checks said. `ok` will be `true`
-  only on exit 0 (fleet-accn).
-
 ## Behaviour
 
 - **shared.exit-codes.R1**: WHEN a verb has done what it was asked and any
@@ -215,11 +206,9 @@ approved change, listed after it.
   says where it looks and which verbs refuse), THEN fleet SHALL exit 1, the
   row named `refused`.
 - **shared.exit-codes.R24**: WHEN `fleet doctor --json` has run its checks,
-  fleet SHALL print a document whose `ok` is `true` whether it exits 0, 1 or
-  3 (see shared.output).
-  Changing: fleet-accn: `ok` is `true` only on exit 0. On a finding or a
-  could-not-tell, `ok` is `false`, the code is the exit's row name, and the
-  rows stay in `data`.
+  fleet SHALL print a document whose `ok` is `true` only where it exits 0,
+  and `false` where it exits 1 or 3 (see shared.output.R6 and
+  shared.output.R19).
 
 ## Non-functional
 

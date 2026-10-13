@@ -753,9 +753,9 @@ fn a_name_no_layer_carries_is_usage_and_nothing_runs() {
 
 // ---- 7. --json --------------------------------------------------------------
 
-/// The finding under --json: one document on stdout, `ok` true because the
-/// report is the outcome, the aggregate in `data.verdict` and on the exit, and
-/// the human rows moved to stderr.
+/// The finding under --json: one document on stdout, `ok` false with the exit's
+/// row as its refusal and every row still in `data`, the aggregate in
+/// `data.verdict` and on the exit, and the human rows moved to stderr.
 #[test]
 fn json_carries_every_row_and_the_exit_carries_the_aggregate() {
     let rig = Rig::new("json", UNCONFIGURED);
@@ -765,7 +765,21 @@ fn json_carries_every_row_and_the_exit_carries_the_aggregate() {
     assert_eq!(said.lines().count(), 1, "one line: {said}");
     let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
 
-    assert_eq!(document["ok"], true);
+    assert_eq!(document["ok"], false);
+    assert_eq!(
+        document["refusal"]["code"], "refused",
+        "the exit's row, not the verdict"
+    );
+    assert_eq!(
+        document["refusal"]["why"],
+        "7 checks — 6 pass, 1 finding, 0 could not tell"
+    );
+    assert!(
+        said.starts_with(
+            r#"{"ok":false,"verb":"doctor","refusal":{"code":"refused","why":"7 checks"#
+        ),
+        "the refusal comes before the rows: {said}"
+    );
     assert_eq!(document["verb"], "doctor");
     assert_eq!(document["data"]["verdict"], "finding");
     assert_eq!(
@@ -841,6 +855,64 @@ fn json_carries_every_row_and_the_exit_carries_the_aggregate() {
         aside.contains("finding guards-installed (defaults) — "),
         "the rows are on stderr: {aside}"
     );
+    assert!(
+        aside
+            .lines()
+            .any(|line| line == "doctor 7 checks — 6 pass, 1 finding, 0 could not tell"),
+        "the why is the summary line's own words: {aside}"
+    );
+    assert!(
+        !aside.contains("fleet doctor:"),
+        "a finding is not a refusal line: {aside}"
+    );
+}
+
+/// The control: a clean pass under --json is the success document, `ok` true
+/// and no refusal, so the `false` above is the finding's and not the flag's.
+#[test]
+fn json_on_a_clean_pass_is_the_success_document() {
+    let rig = Rig::new("json-green", CONFIGURED);
+    let out = rig.doctor(&["--json"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["data"]["verdict"], "pass");
+    assert!(document.get("refusal").is_none(), "{said}");
+    assert!(
+        said.starts_with(r#"{"ok":true,"verb":"doctor","data":"#),
+        "{said}"
+    );
+}
+
+/// A could-not-tell under --json: exit 3, the row's own name as the code, and
+/// the rows still carried.
+#[test]
+fn json_on_a_could_not_tell_carries_its_row_and_every_check() {
+    let rig = Rig::new("json-unknown", CONFIGURED);
+    rig.pack("scratch", None);
+    rig.check("scratch", "fx-seven", "exit 7");
+    let out = rig.doctor(&["--json"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
+    assert_eq!(said.lines().count(), 1, "one line: {said}");
+    let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["refusal"]["code"], "could_not_tell");
+    assert_eq!(
+        document["refusal"]["why"],
+        "8 checks — 7 pass, 0 finding, 1 could not tell"
+    );
+    assert_eq!(document["data"]["verdict"], "could_not_tell");
+    assert_eq!(
+        document["data"]["counts"],
+        serde_json::json!({ "pass": 7, "finding": 0, "could_not_tell": 1 })
+    );
+    assert_eq!(
+        document["data"]["checks"].as_array().map(Vec::len),
+        Some(DEFAULTS.len() + BUILT_IN.len() + 1),
+        "{said}"
+    );
 }
 
 /// No project under --json: the verb's own refusal, row 1, not a report.
@@ -868,6 +940,10 @@ fn json_with_a_name_no_layer_carries_is_a_usage_refusal() {
     let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
     assert_eq!(document["ok"], false);
     assert_eq!(document["refusal"]["code"], "usage");
+    assert!(
+        document.get("data").is_none(),
+        "a refusal before any check carries no rows"
+    );
 }
 
 // ---- 8. no project ----------------------------------------------------------
