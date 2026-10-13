@@ -100,10 +100,10 @@ Where there is no projection it prints a refusal document whose code is
 `no_collector`, and exits 5 (shared.exit-codes.R6). A projection that does
 not parse, or is a version this binary does not read, is a refusal too,
 whose code is `could_not_tell`, exiting 3. Under the flag it reads nothing
-beyond the projection, so where the page exits 3 over a section it could not
-fill, `fleet status --json` prints the projection and exits 0
-(shared.exit-codes.R10). What the projection holds is the status area's
-spec.
+beyond the projection, so where the page exits 3 over a section it could
+not fill, `fleet status --json` prints the projection and exits 0
+(shared.exit-codes.R1, shared.output.R18). What the projection holds is the
+status area's spec.
 
 ```sh
 $ fleet status --json
@@ -239,9 +239,8 @@ None.
   `clear`, `review` and `land`; `fleet item show` and `item list`;
   `fleet seat add`, `spawn`, `feed` and `retire`; `fleet doctor`;
   `fleet event tail` and `event show`; and `fleet status`. Each verb's spec
-  says it takes the flag,
-  states what its `data` holds, and cites these clauses rather than
-  restating them.
+  says it takes the flag, states what its `data` holds, and cites these
+  clauses rather than restating them.
 - The SDK replays the event stream through `fleet event tail --json`
   (shared.output.R12).
 - A doctor check the defaults carry, `adopt-board`, reads
