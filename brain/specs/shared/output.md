@@ -92,21 +92,37 @@ standard output. It refuses, if at all, before it prints any event, so a
 refusal is the only document on standard output. The SDK replays the stream
 from these documents; what each `data` holds is the event verbs' own spec.
 
+### `fleet status`
+
+`fleet status --json` prints one success document whose `data` is the
+projection the controller last published, as the file holds it, on one line.
+Where there is no projection it prints a refusal document whose code is
+`no_collector`, and exits 5 (shared.exit-codes.R6). A projection that does
+not parse, or is a version this binary does not read, is a refusal too,
+whose code is `could_not_tell`, exiting 3. Under the flag it reads nothing
+beyond the projection, so where the page exits 3 over a section it could not
+fill, `fleet status --json` prints the projection and exits 0
+(shared.exit-codes.R10). What the projection holds is the status area's
+spec.
+
+```sh
+$ fleet status --json
+{"ok":false,"verb":"status","refusal":{"code":"no_collector","why":"there is no projection at <machine-dir>/projection.json to print (No such file or directory (os error 2)) — run `fleet start`"}}
+fleet status: there is no projection at <machine-dir>/projection.json to print (No such file or directory (os error 2)) — run `fleet start`
+$ echo $?
+5
+```
+
 ### When there is no document
 
 - **The command line does not parse.** fleet writes its `error:` block on
   standard error and nothing on standard output, and exits 2
   (shared.exit-codes.R15).
 - **fleet stops on an error it did not turn into a refusal.** For a verb
-  other than `fleet event tail` and `fleet status`, fleet writes its `fleet:`
+  other than `fleet event tail`, fleet writes its `fleet:`
   and `caused by:` lines on standard error (shared.exit-codes.R17), nothing
   on standard output, and exits 3. This will print a refusal document
   (fleet-iox1).
-- **`fleet status --json`.** It takes the flag but prints no envelope: it
-  prints the projection as it is stored, and where there is no projection it
-  prints nothing on standard output and exits 5 (shared.exit-codes.R6). The
-  status area's spec says what it prints. It will answer in the envelope
-  (fleet-k8xi).
 
 ### `fleet doctor`
 
@@ -132,25 +148,18 @@ what fleet does today, with a `Changing:` line after each one.
   document whose code is `could_not_tell` and whose `why` is the error's
   reason, still writes its `fleet:` and `caused by:` lines on standard error,
   and exits 3.
-- **`fleet status --json` answers in the envelope** (fleet-k8xi). It prints a
-  success document with the published projection as its `data`, and where
-  there is no projection a refusal document whose code is `no_collector`,
-  exiting 5. This spec then drops its exception for `fleet status`.
 
 ## Behaviour
 
-- **shared.output.R1**: WHEN a verb other than `fleet event tail` and
-  `fleet status` is called with `--json` and its command line parses, fleet
-  SHALL print exactly one JSON document on standard output, except where
-  shared.output.R13 applies.
+- **shared.output.R1**: WHEN a verb other than `fleet event tail` is called
+  with `--json` and its command line parses, fleet SHALL print exactly one
+  JSON document on standard output, except where shared.output.R13 applies.
   Changing: fleet-iox1: the shared.output.R13 exception goes; that path
   prints one refusal document too.
-  Changing: fleet-k8xi: `fleet status` is no longer excepted.
-- **shared.output.R2**: WHEN a verb other than `fleet status` is called with
-  `--json`, fleet SHALL print on standard output nothing but the documents
-  shared.output.R1, shared.output.R12 and shared.output.R14 name: no line the
-  verb prints on standard output without the flag is printed there with it.
-  Changing: fleet-k8xi: `fleet status` is no longer excepted.
+- **shared.output.R2**: WHEN a verb is called with `--json`, fleet SHALL
+  print on standard output nothing but the documents shared.output.R1,
+  shared.output.R12 and shared.output.R14 name: no line the verb prints on
+  standard output without the flag is printed there with it.
 - **shared.output.R3**: fleet SHALL print each document it prints under
   `--json` on one line of its own, ending in a newline.
 - **shared.output.R4**: fleet SHALL make each document it prints under
@@ -189,10 +198,9 @@ what fleet does today, with a `Changing:` line after each one.
 - **shared.output.R12**: WHEN `fleet event tail` is called with `--json`,
   fleet SHALL print one document per event it prints (shared.output.R6), each
   on its own line, and no document when it prints no event.
-- **shared.output.R13**: IF a verb other than `fleet event tail` and
-  `fleet status`, called with `--json`, stops on an error it did not turn
-  into a refusal (shared.exit-codes.R17), THEN fleet SHALL print nothing on
-  standard output.
+- **shared.output.R13**: IF a verb other than `fleet event tail`, called with
+  `--json`, stops on an error it did not turn into a refusal
+  (shared.exit-codes.R17), THEN fleet SHALL print nothing on standard output.
   Changing: fleet-iox1: fleet prints a refusal document whose code is
   `could_not_tell` and whose `why` is the error's reason, keeps the lines
   shared.exit-codes.R17 names on standard error, and exits 3.
@@ -213,6 +221,9 @@ what fleet does today, with a `Changing:` line after each one.
   with `--json`, fleet SHALL print what the verb prints on standard output
   without the flag on neither standard output nor standard error: the
   document stands in for it.
+- **shared.output.R18**: WHEN `fleet status` is called with `--json` and a
+  projection is published that it reads, fleet SHALL print a success
+  document whose `data` is that projection's JSON value.
 
 ## Non-functional
 
@@ -227,8 +238,8 @@ None.
 - The verbs that take `--json` today are `fleet dispatch`, `deliver`, `hold`,
   `clear`, `review` and `land`; `fleet item show` and `item list`;
   `fleet seat add`, `spawn`, `feed` and `retire`; `fleet doctor`;
-  `fleet event tail` and `event show`; and `fleet status`, which prints no
-  envelope today (fleet-k8xi). Each verb's spec says it takes the flag,
+  `fleet event tail` and `event show`; and `fleet status`. Each verb's spec
+  says it takes the flag,
   states what its `data` holds, and cites these clauses rather than
   restating them.
 - The SDK replays the event stream through `fleet event tail --json`

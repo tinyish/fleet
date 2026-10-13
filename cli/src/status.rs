@@ -26,7 +26,11 @@ use fleet_controller::{clock, config, platform};
 use fleet_core::item::{rules, Stop};
 use fleet_core::policy as core_policy;
 
+use crate::envelope;
 use crate::exit::{refuse_stop, Exit};
+
+/// The verb's name, as its refusal line and its document both spell it.
+const VERB: &str = "status";
 
 /// How far back the runs section lists a failed run, in hours.
 ///
@@ -41,7 +45,7 @@ const FAILED_WINDOW_HOURS: u64 = 24;
 /// the pair refuses with clap's own usage line and the exit table's row 2.
 #[derive(clap::Args)]
 pub struct StatusArgs {
-    /// print the projection document verbatim
+    /// print the projection as one JSON document, in the envelope
     #[arg(long)]
     pub json: bool,
 
@@ -54,7 +58,7 @@ pub fn status_command(args: &StatusArgs) -> Exit {
     let mut out = std::io::stdout();
     match run(args, &mut out) {
         Ok(exit) => exit,
-        Err(stop) => refuse_stop("status", &stop, false),
+        Err(stop) => refuse_stop(VERB, &stop, args.json),
     }
 }
 
@@ -63,12 +67,13 @@ fn run(args: &StatusArgs, out: &mut dyn Write) -> Result<Exit, Stop> {
     let path = projection::path_in(&machine_dir);
     let body = read_projection(&path)?;
 
-    // --json is the document and not a rendering of it, so the bytes go out
-    // whole. The parse above still ran: an unparsable document is the same
-    // could-not-tell whichever flag asked for it.
+    // --json is the document and not a rendering of it: the projection as
+    // published, whole, as the envelope's data on one line. The parse above
+    // still ran, so a document the page would refuse is refused here too, and
+    // nothing past the projection is read.
     if args.json {
-        out.write_all(body.text.as_bytes())
-            .map_err(|e| wrote_nothing(&e))?;
+        let data = as_data(&body.text, &path)?;
+        writeln!(out, "{}", envelope::ok(VERB, &data)).map_err(|e| wrote_nothing(&e))?;
         return Ok(Exit::Done);
     }
 
@@ -128,6 +133,19 @@ fn read_projection(path: &Path) -> Result<Body, Stop> {
         )));
     }
     Ok(Body { text, document })
+}
+
+/// The published projection as the envelope's `data`: the file's own JSON
+/// value, every key it holds, whatever this binary's type reads of it. The
+/// text has already parsed once, so this refusal is the same one
+/// [`read_projection`] would say.
+fn as_data(text: &str, path: &Path) -> Result<serde_json::Value, Stop> {
+    serde_json::from_str(text).map_err(|e| {
+        Stop::could_not_tell(format!(
+            "the projection at {} does not parse: {e}",
+            path.display()
+        ))
+    })
 }
 
 /// Everything the page needs beside the projection, each instrument's failure

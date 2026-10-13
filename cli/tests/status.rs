@@ -436,8 +436,8 @@ fn busy_view() -> SeatView {
     seat_named(BUILDER_1, "Orla").seat
 }
 
-/// AC2, the flags: `--json` is the file's bytes and nothing else; `--seat`
-/// is one seat's two rows; an unknown seat is 1; both flags together are 2.
+/// AC2, the flags: `--json` is the projection in the envelope, on one line;
+/// `--seat` is one seat's two rows; an unknown seat is 1; both flags together are 2.
 #[test]
 fn the_two_flags_print_what_they_name_and_refuse_what_they_cannot() {
     let rig = Rig::new("flags");
@@ -452,11 +452,27 @@ fn the_two_flags_print_what_they_name_and_refuse_what_they_cannot() {
 
     let json = rig.run(&["status", "--json"]);
     assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
-    assert_eq!(
-        String::from_utf8_lossy(&json.stdout),
-        bytes,
-        "the document goes out byte for byte"
+    let printed = stdout(&json);
+    assert!(
+        bytes.trim_end().lines().count() > 1,
+        "the control: the published file spans lines"
     );
+    assert_eq!(
+        printed.lines().count(),
+        1,
+        "one document on one line: {printed}"
+    );
+    assert!(
+        printed.starts_with(r#"{"ok":true,"verb":"status","data":"#),
+        "{printed}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&printed).expect("the document parses");
+    let published: serde_json::Value = serde_json::from_str(&bytes).expect("the projection parses");
+    assert_eq!(
+        parsed["data"], published,
+        "the data is the projection as published"
+    );
+    assert!(parsed.get("refusal").is_none(), "{printed}");
 
     let one = rig.run(&["status", "--seat", "builder-1"]);
     assert_eq!(one.status.code(), Some(0), "{}", stderr(&one));
@@ -583,6 +599,85 @@ fn the_three_refusals_carry_their_own_exits_and_name_their_file() {
         stderr(&unknown).contains(&format!("version {}", projection::VERSION + 1)),
         "{}",
         stderr(&unknown)
+    );
+}
+
+/// The refusals under --json answer in the envelope: no projection is
+/// `no_collector` at 5, a torn or version-ahead one `could_not_tell` at 3, each
+/// one document whose why is the stderr line's own text.
+#[test]
+fn the_json_refusals_answer_in_the_envelope() {
+    let rig = Rig::new("json-refusals");
+
+    let refused = |out: &Output, code: &str, exit: i32| {
+        assert_eq!(out.status.code(), Some(exit), "{}", stderr(out));
+        let printed = stdout(out);
+        assert_eq!(printed.lines().count(), 1, "one document: {printed}");
+        let answer: serde_json::Value =
+            serde_json::from_str(&printed).expect("the document parses");
+        assert_eq!(answer["ok"], false);
+        assert_eq!(answer["verb"], "status");
+        assert_eq!(answer["refusal"]["code"], code);
+        assert!(answer.get("data").is_none(), "{printed}");
+        let line = stderr(out);
+        let said = line
+            .lines()
+            .find_map(|l| l.strip_prefix("fleet status: "))
+            .unwrap_or_else(|| panic!("the refusal line is on stderr: {line}"));
+        assert_eq!(answer["refusal"]["why"], said, "said once, in two places");
+    };
+
+    let missing = rig.run(&["status", "--json"]);
+    refused(&missing, "no_collector", 5);
+    assert!(
+        stderr(&missing).contains("fleet start"),
+        "{}",
+        stderr(&missing)
+    );
+
+    std::fs::write(rig.projection_file(), "{ not json at all").expect("the fixture is written");
+    refused(&rig.run(&["status", "--json"]), "could_not_tell", 3);
+
+    let mut ahead = document(
+        &rig.policy_file(),
+        &fleet_controller::clock::now_stamp(),
+        Vec::new(),
+    );
+    ahead.version = projection::VERSION + 1;
+    rig.publish(&ahead);
+    refused(&rig.run(&["status", "--json"]), "could_not_tell", 3);
+}
+
+/// Under --json the verb reads the projection and nothing else: a stale one
+/// is still the success document, and a policy file that is gone does not
+/// reach the exit. The page without the flag is the control: it exits 3 over
+/// the same missing file.
+#[test]
+fn the_json_document_reads_only_the_projection() {
+    let rig = Rig::new("json-only");
+    rig.publish(&document(
+        &rig.policy_file(),
+        LONG_AGO,
+        vec![seat("builder-1")],
+    ));
+    std::fs::remove_file(rig.policy_file()).expect("the policy file is removed");
+
+    let page = rig.run(&["status"]);
+    assert_eq!(
+        page.status.code(),
+        Some(3),
+        "the control: {}",
+        stderr(&page)
+    );
+
+    let json = rig.run(&["status", "--json"]);
+    assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout(&json)).expect("the document parses");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(
+        parsed["data"]["generated_at"], LONG_AGO,
+        "a stale projection is not refused"
     );
 }
 

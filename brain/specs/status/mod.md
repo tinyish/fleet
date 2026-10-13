@@ -17,9 +17,10 @@ event tail` and `fleet event show`.
 
 - `cli/src/status.rs` — Runs `fleet status`, which prints the controller's
   published projection with the policy, runs, routines and open holds.
-  Depends on: `cli/src/exit.rs`, `controller/src/clock.rs`,
-  `controller/src/config.rs`, `controller/src/events.rs`,
-  `controller/src/platform/mod.rs`, `controller/src/policy.rs`,
+  Depends on: `cli/src/envelope.rs`, `cli/src/exit.rs`,
+  `controller/src/clock.rs`, `controller/src/config.rs`,
+  `controller/src/events.rs`, `controller/src/platform/mod.rs`,
+  `controller/src/policy.rs`,
   `controller/src/project/mod.rs`, `controller/src/projection.rs`,
   `controller/src/routines/mod.rs`, `controller/src/runs.rs`,
   `core/src/item/mod.rs`, `core/src/item/rules.rs`, `core/src/policy.rs`.
