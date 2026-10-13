@@ -17,18 +17,19 @@ context. A person can also run it by hand to see what a session started in
 that directory would be told.
 
 It only reads: it creates no file and appends no event. It needs no
-controller, takes no arguments and no `--json`, and never waits on standard
-input.
+controller, takes no arguments and no `--json`, only `--help` and `-h`, and
+never waits on standard input.
 
 ## How it behaves
 
 ### Which fleet it reads
 
 `fleet prime` finds its fleet as every verb that acts in a project does
-(shared.locations.R21 to R24, R26, R35): an embedded fleet's own
-`fleet.toml`, the fleet `config.json` names for a declared project this
-machine registers, and, where the walk finds neither file, the fleet
-`config.json` names only inside a git checkout. A seat's session runs
+(shared.locations.R21 to shared.locations.R24, shared.locations.R26,
+shared.locations.R35): an embedded fleet's own `fleet.toml`, the fleet
+`config.json` names for a declared project this machine registers, and,
+where the walk finds neither file, the fleet `config.json` names only inside
+a git checkout. A seat's session runs
 `fleet prime` in the seat's worktree, which is a checkout. So a seat is
 primed wherever it works, provided the walk finds its fleet: a committed
 `fleet.toml` (shared.locations.R23); a committed `.fleet/project.toml` whose
@@ -37,15 +38,15 @@ file that exists (shared.locations.R22); or, with no file, `config.json`
 naming a policy file that exists (shared.locations.R24).
 
 Where it finds no fleet, or a declared project this machine has not
-registered, it refuses as every such verb does (shared.locations.R25, R26,
-R35): it says why on standard error, prints nothing on standard output, and
-exits 1. A session outside every checkout is told there is no fleet there.
-Where `config.json` or `projects.toml` is there but will not read, so it
-cannot tell which fleet it acts in, it says so as every such verb does
-(shared.locations.R38), likewise prints nothing on standard output, and
-exits 3. Today a `config.json` that does not parse gets the no-fleet
-refusal and exit 1 instead (shared.locations.R38's `Today:` line,
-fleet-9sr5).
+registered, it refuses as every such verb does (shared.locations.R25,
+shared.locations.R26, shared.locations.R35): it says why on standard error,
+prints nothing on standard output, and exits 1. A session outside every
+checkout is told there is no fleet there. Where `config.json` or
+`projects.toml` is there but will not read, so it cannot tell which fleet it
+acts in, it says so as every such verb does (shared.locations.R38), likewise
+prints nothing on standard output, and exits 3. Today a `config.json` that
+does not parse gets the no-fleet refusal and exit 1 instead
+(shared.locations.R38's `Today:` line, fleet-9sr5).
 
 The guards part reports each class on or off as `fleet guard` treats it in
 the same directory: both read the fleet's policy file, so the two verbs
@@ -60,12 +61,12 @@ do there. It cannot tell which fleet it is in, so it does not answer as
 though it stood outside every checkout.
 
 The machine directory prime reads `config.json` and the packs from is the one
-shared.locations.R2 to R6 resolve. A seat's session is handed the
-controller's (shared.locations.R29). Where the variable that decides it names
-a relative path, or `HOME` is unset and nothing else names it, prime refuses
-before it reads anything, as every verb but `fleet guard` does
-(shared.locations.R30 to R32): exit 1, the reason on standard error, and
-nothing on standard output.
+shared.locations.R2 to shared.locations.R6 resolve. A seat's session is
+handed the controller's (shared.locations.R29). Where the variable that
+decides it names a relative path, or `HOME` is unset and nothing else names
+it, prime refuses before it reads anything, as every verb but `fleet guard`
+does (shared.locations.R30 to shared.locations.R32): exit 1, the reason on
+standard error, and nothing on standard output.
 
 ### How it exits
 
@@ -74,15 +75,15 @@ Once it has found its fleet and its command line parses, `fleet prime` exits
 hook that fails closed takes the session down with it. So a part that cannot
 be read says so in its own place, and the parts after it still print. A
 command line that does not parse exits 2: `fleet prime --json` or any other
-argument (shared.exit-codes.R3, shared.exit-codes.R15).
+argument but `--help` and `-h` (shared.exit-codes.R3, shared.exit-codes.R15).
 
 Where it has no fleet to act in, prime exits as every verb does there: 1
 where it finds no fleet or a declared project the machine has not
-registered (shared.exit-codes.R2, R23), and 3 where it cannot tell which
-fleet it acts in (shared.locations.R38) or cannot read its working directory
-(shared.exit-codes.R4). With no fleet it has no context to hand the session,
-and a refusal is a refusal whoever called it. Its refusal of a machine
-directory it cannot resolve exits 1 (above).
+registered (shared.exit-codes.R2, shared.exit-codes.R23), and 3 where it
+cannot tell which fleet it acts in (shared.locations.R38) or cannot read its
+working directory (shared.exit-codes.R4). With no fleet it has no context
+to hand the session, and a refusal is a refusal whoever called it. Its
+refusal of a machine directory it cannot resolve exits 1 (above).
 
 Everything is written on standard output, and nothing on standard error.
 Where whatever reads standard output closes it before prime has finished
@@ -187,7 +188,8 @@ intent, and a `Today:` line says what fleet does now.
 - **The store line names the store the project's verbs use** (fleet-10uu).
   Today, in a seat's worktree with no fleet file of its own, prime opens the
   bd pack's store rather than the one the fleet's policy file names.
-- **A closed standard output exits 0 quietly** (fleet-wtpr). Today prime
+- **A closed standard output exits 0 quietly** (fleet-wtpr, carried by
+  shared.exit-codes.R27's `Today:` line). Today prime, like every verb,
   panics, writes the panic on standard error and exits 101.
 - **An unreadable `config.json` in an embedded fleet says so** (fleet-vaf4).
   Today the seat's item lines just vanish.
@@ -204,10 +206,7 @@ intent, and a `Today:` line says what fleet does now.
 
 - **onboarding.prime.R1**: WHEN `fleet prime` has found its fleet and its
   command line parses, fleet SHALL exit 0 (shared.exit-codes.R1), whether or
-  not each part below could be read, and whether or not its standard output
-  stays open until it has printed (shared.exit-codes.R27).
-  Today: where standard output closes early, as with
-  `fleet prime | head -1`, prime panics and exits 101 (fleet-wtpr).
+  not each part below could be read.
 - **onboarding.prime.R2**: IF `fleet prime` is given any argument or flag
   other than `--help` or `-h`, `--json` included, THEN fleet SHALL treat the command
   line as one that does not parse (shared.exit-codes.R3,
@@ -216,21 +215,19 @@ intent, and a `Today:` line says what fleet does now.
   `fleet prime`.
 - **onboarding.prime.R4**: WHILE `fleet prime` has found its fleet, fleet
   SHALL write everything it prints on standard output, and nothing on
-  standard error, its standard output closing early included
-  (shared.exit-codes.R27).
-  Today: where standard output closes early, prime writes a panic on
-  standard error (fleet-wtpr).
+  standard error.
 - **onboarding.prime.R5**: WHEN `fleet prime` is called, fleet SHALL find the
   fleet it acts under as every verb that acts in a project finds it
-  (shared.locations.R21 to R24, R36).
+  (shared.locations.R21 to shared.locations.R24, shared.locations.R36).
 - **onboarding.prime.R6**: IF `fleet prime` finds no fleet for the working
   directory, or a declared project the machine has not registered
-  (shared.locations.R25, R26, R35), or cannot tell which fleet it acts in
-  (shared.locations.R38), THEN fleet SHALL say why on a line on standard
-  error as those clauses word it, print nothing on standard output, and
-  exit as those clauses say: 1 under shared.locations.R25, R26 and R35
-  (shared.exit-codes.R2, R23), and 3 under shared.locations.R38
-  (shared.exit-codes.R4).
+  (shared.locations.R25, shared.locations.R26, shared.locations.R35), or
+  cannot tell which fleet it acts in (shared.locations.R38), THEN fleet SHALL
+  say why on a line on standard error as those clauses word it, print
+  nothing on standard output, and exit as those clauses say: 1 under
+  shared.locations.R25, shared.locations.R26 and shared.locations.R35
+  (shared.exit-codes.R2, shared.exit-codes.R23), and 3 under
+  shared.locations.R38 (shared.exit-codes.R4).
 - **onboarding.prime.R7**: IF the fleet's policy file cannot be read or does
   not parse, THEN fleet SHALL make the guards part read `could not be read —`
   followed by a reason naming the policy file, in place of what
@@ -284,7 +281,9 @@ intent, and a `Today:` line says what fleet does now.
   make the store line read `store: none` and say there is no project here.
 - **onboarding.prime.R21**: IF the project's store cannot be opened or does
   not answer its version, THEN fleet SHALL make the store line read
-  `store: could not be read —` followed by the reason.
+  `store: could not be read —` followed by the reason, and where no
+  installed pack carries the store's adapter, name the `fleet pack add` line
+  that installs it.
 - **onboarding.prime.R22**: WHEN the pack layers resolve and a layer carries
   a readable `assets/rules.md`, fleet SHALL print after the store line the
   file from the highest layer that carries it, byte for byte, ending in a
@@ -302,9 +301,9 @@ intent, and a `Today:` line says what fleet does now.
 - **onboarding.prime.R26**: fleet SHALL find the seat of `fleet prime` by R25
   alone, whatever `FLEET_ACTOR` or any other environment variable says.
 - **onboarding.prime.R27**: WHEN R25 finds a seat, fleet SHALL print after the
-  rules one line, starting `item:`, giving the id and the title of each item
-  the store holds assigned to that seat's full id whose status is `open` or
-  `in_progress`, in the order the store lists them.
+  rules one line per item the store holds assigned to that seat's full id
+  whose status is `open` or `in_progress`, in the order the store lists them,
+  each starting `item:` and giving that item's id and title.
 - **onboarding.prime.R28**: WHEN R25 finds a seat that has no such item,
   fleet SHALL print the one line `item: none`.
 - **onboarding.prime.R29**: IF R25 finds a seat and the store cannot be
@@ -324,8 +323,9 @@ intent, and a `Today:` line says what fleet does now.
   `fleet prime` whether or not a controller is running.
 - **onboarding.prime.R33**: IF `fleet prime` cannot read its working
   directory, THEN fleet SHALL say on a line on standard error
-  (shared.exit-codes.R12, R13) that the working directory could not be read,
-  print nothing on standard output, and exit 3 (shared.exit-codes.R4).
+  (shared.exit-codes.R12, shared.exit-codes.R13) that the working directory
+  could not be read, print nothing on standard output, and exit 3
+  (shared.exit-codes.R4).
   Today: prime goes on as though the walk found neither file there, outside
   every checkout, and refuses with exit 1 on the no-fleet line naming an
   empty directory (fleet-fd5g).
@@ -369,10 +369,10 @@ intent, and a `Today:` line says what fleet does now.
   standard output early included (shared.exit-codes.R27); where it finds
   none, prime refuses on standard error (R6), prints no context, and the
   hook sees exit 1, as it does where prime cannot resolve the machine
-  directory (shared.locations.R30 to R32); where it cannot tell which fleet
-  it acts in (R6, under shared.locations.R38) or cannot read its working
-  directory (R33), the hook sees exit 3; nothing is read from standard
-  input (R3); and the two store calls are bounded (N1, N2), so the hook
+  directory (shared.locations.R30 to shared.locations.R32); where it cannot
+  tell which fleet it acts in (R6, under shared.locations.R38) or cannot read
+  its working directory (R33), the hook sees exit 3; nothing is read from
+  standard input (R3); and the two store calls are bounded (N1, N2), so the hook
   waits at most those two bounds on the store.
 - **The store adapter** is asked two calls of the store contract: `version`
   (R17, N1) and `list` filtered to the seat as assignee (R27, N2). The bd
