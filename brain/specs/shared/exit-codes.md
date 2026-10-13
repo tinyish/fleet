@@ -108,7 +108,9 @@ verb that cannot say what happened is a third answer rather than a failure.
   cause that reads `caused by:` after its indent, and exits 3. Where the
   `fleet:` line would carry only the verb's name, fleet leaves it out: the
   verb's own `fleet <verb>:` line above it already names the verb, and the
-  causes follow that line.
+  causes follow that line. Under `--json` it writes the same lines and exits
+  the same way, and also prints a refusal document whose code is
+  `could_not_tell` on standard output (see shared.output).
 - **The verbs that write a line of their own to the event stream** and that
   R21 and R22 name exit 3 when they cannot append it: the `fleet event`
   writers (`woke`, `rest`, `handed-off`, `exited`, `clear-halt` and `step`),
@@ -183,10 +185,10 @@ where fleet looks for a fleet.
   family and no verb (such as `fleet pack`), THEN fleet SHALL print that
   level's help on standard error and nothing on standard output.
 - **shared.exit-codes.R17**: IF fleet stops on an error it did not turn into a
-  refusal, THEN fleet SHALL write on standard error a line that starts with
-  `fleet:` and gives the error, unless that line would carry only the verb's
-  name, followed by one indented line for each cause, which reads
-  `caused by:` after its indent, and exit 3.
+  refusal, THEN fleet SHALL write on standard error, with or without
+  `--json`, a line that starts with `fleet:` and gives the error, unless that
+  line would carry only the verb's name, followed by one indented line for
+  each cause, which reads `caused by:` after its indent, and exit 3.
 - **shared.exit-codes.R18**: IF `fleet event woke`, `rest`, `handed-off`,
   `exited`, `clear-halt` or `step` has written its line and the stream's last
   line is not that line, THEN fleet SHALL exit 3.

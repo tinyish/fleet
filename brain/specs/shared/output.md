@@ -67,7 +67,7 @@ keep in step.
 | `data` | `ok` is `true`, and in `fleet doctor`'s document once its checks have run | the outcome; its shape is the verb's own spec |
 | `refusal` | `ok` is `false` | an object with `code` and `why` |
 | `refusal.code` | `ok` is `false` | the exit table's row name, such as `refused`, `usage`, `could_not_tell` or `no_collector`; a script branches on it |
-| `refusal.why` | `ok` is `false` | the reason, as the refusal line on standard error says it; for `fleet doctor`'s finding or could-not-tell, its summary line |
+| `refusal.why` | `ok` is `false` | the reason, as the refusal line on standard error says it; for `fleet doctor`'s finding or could-not-tell, its summary line; for an error fleet did not turn into a refusal, the text of every line it writes on standard error, each without its `fleet: ` or `caused by: ` prefix, joined by `: ` (shared.output.R13) |
 
 The keys come in that order: `ok`, `verb`, then `data` or `refusal`. Only
 `fleet doctor`, once its checks have run and not all passed, prints a
@@ -114,16 +114,21 @@ $ echo $?
 5
 ```
 
+### When fleet stops on an error of its own
+
+Under `--json`, a verb other than `fleet event tail` that stops on an error
+it did not turn into a refusal still answers in the envelope. It prints one
+refusal document whose `code` is `could_not_tell` and whose `why` is the text
+of every line it writes on standard error (shared.exit-codes.R17), each
+without its `fleet: ` or `caused by: ` prefix, joined by `: `. It still
+writes those lines and exits 3, as it does without the flag, so a script
+reading the document and a person reading the lines learn the same thing.
+
 ### When there is no document
 
 - **The command line does not parse.** fleet writes its `error:` block on
   standard error and nothing on standard output, and exits 2
   (shared.exit-codes.R15).
-- **fleet stops on an error it did not turn into a refusal.** For a verb
-  other than `fleet event tail`, fleet writes its `fleet:`
-  and `caused by:` lines on standard error (shared.exit-codes.R17), nothing
-  on standard output, and exits 3. This will print a refusal document
-  (fleet-iox1).
 
 ### `fleet doctor`
 
@@ -148,24 +153,11 @@ which move to standard error under the flag. A `fleet doctor` that refuses
 before any check runs, such as for a check name no layer carries, prints a
 refusal document like any verb, with no `data`.
 
-### What is changing
-
-Each of these is an approved change. Until its bead lands, the clauses state
-what fleet does today, with a `Changing:` line after each one.
-
-- **An untranslated error answers in the envelope** (fleet-iox1). Where fleet
-  stops on an error it did not turn into a refusal, it prints a refusal
-  document whose code is `could_not_tell` and whose `why` is the error's
-  reason, still writes its `fleet:` and `caused by:` lines on standard error,
-  and exits 3.
-
 ## Behaviour
 
 - **shared.output.R1**: WHEN a verb other than `fleet event tail` is called
   with `--json` and its command line parses, fleet SHALL print exactly one
-  JSON document on standard output, except where shared.output.R13 applies.
-  Changing: fleet-iox1: the shared.output.R13 exception goes; that path
-  prints one refusal document too.
+  JSON document on standard output.
 - **shared.output.R2**: WHEN a verb is called with `--json`, fleet SHALL
   print on standard output nothing but the documents shared.output.R1,
   shared.output.R12 and shared.output.R14 name: no line the verb prints on
@@ -204,10 +196,11 @@ what fleet does today, with a `Changing:` line after each one.
   on its own line, and no document when it prints no event.
 - **shared.output.R13**: IF a verb other than `fleet event tail`, called with
   `--json`, stops on an error it did not turn into a refusal
-  (shared.exit-codes.R17), THEN fleet SHALL print nothing on standard output.
-  Changing: fleet-iox1: fleet prints a refusal document whose code is
-  `could_not_tell` and whose `why` is the error's reason, keeps the lines
-  shared.exit-codes.R17 names on standard error, and exits 3.
+  (shared.exit-codes.R17), THEN fleet SHALL print on standard output one
+  document carrying `ok` as `false` and a `refusal` whose `code` is
+  `could_not_tell` and whose `why` is the text of every line
+  shared.exit-codes.R17 writes, each without its `fleet: ` or `caused by: `
+  prefix, joined by `: `, and no `data` key.
 - **shared.output.R14**: IF `fleet event tail` called with `--json` refuses,
   THEN fleet SHALL print its refusal document (shared.output.R7) and no
   event document.

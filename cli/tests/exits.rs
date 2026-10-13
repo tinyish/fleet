@@ -219,6 +219,11 @@ fn an_unreadable_instrument_is_three_and_prints_the_chain() {
         Some("  caused by: the seat list could not be read, so no poll ran"),
         "the cause follows the verb's own line: {printed}"
     );
+    assert!(
+        out.stdout.is_empty(),
+        "an untranslated error without --json prints no document: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 
     // The control the arm needs: the same verb over a machine directory that
     // HAS a seat list reaches the loop, so the 3 above is the missing

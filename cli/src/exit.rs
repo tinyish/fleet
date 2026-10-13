@@ -117,6 +117,15 @@ pub fn typed_verb(matches: &clap::ArgMatches) -> (String, bool) {
     (words.join(" "), json)
 }
 
+/// The verb this call asked to answer in the envelope: the verb as typed,
+/// where it was given `--json`. `main` names it in the could-not-tell document
+/// an error no verb turned into a refusal is answered with
+/// (shared.output.R13), which `fleet event tail` does not print.
+pub fn asked(matches: &clap::ArgMatches) -> Option<String> {
+    let (verb, json) = typed_verb(matches);
+    (json && verb != "event tail").then_some(verb)
+}
+
 /// The verb an error stopped, put on the error as its outermost context.
 ///
 /// A `fleet:` line that would carry this and nothing more is left out
@@ -160,13 +169,34 @@ pub(crate) fn untranslated_lines(err: &anyhow::Error) -> Vec<String> {
     lines
 }
 
-/// An error no verb turned into a refusal: its lines on stderr, and the row
-/// it answers, which is could-not-tell and never 0.
-pub fn untranslated(err: &anyhow::Error) -> Exit {
+/// An error no verb turned into a refusal: its lines on stderr, the
+/// could-not-tell document on stdout where the call asked `verb` for `--json`
+/// (shared.output.R13), and the row it answers, which is could-not-tell and
+/// never 0.
+pub fn untranslated(err: &anyhow::Error, json: Option<&str>) -> Exit {
     for line in untranslated_lines(err) {
         eprintln!("{line}");
     }
+    if let Some(verb) = json {
+        println!("{}", untranslated_document(err, verb));
+    }
     Exit::CouldNotTell
+}
+
+/// The could-not-tell document for an error no verb turned into a refusal.
+fn untranslated_document(err: &anyhow::Error, verb: &str) -> String {
+    crate::envelope::refusal(verb, Exit::CouldNotTell, &reason(err))
+}
+
+/// The error's reason, as the document's `why` carries it: the text of every
+/// line [`untranslated_lines`] writes, each without its `fleet: ` or
+/// `caused by: ` prefix, joined by `: ` (shared.output.R13).
+fn reason(err: &anyhow::Error) -> String {
+    err.chain()
+        .skip(usize::from(verb_only(err)))
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 #[cfg(test)]
@@ -214,7 +244,86 @@ mod tests {
     #[test]
     fn an_untranslated_error_is_could_not_tell() {
         let err = anyhow::anyhow!("x").context(super::Stopped::verb("observe"));
-        assert_eq!(super::untranslated(&err), Exit::CouldNotTell);
+        assert_eq!(super::untranslated(&err, None), Exit::CouldNotTell);
+    }
+
+    /// Under `--json`, an error no verb turned into a refusal is one
+    /// could-not-tell document, its keys in the envelope's order and no `data`.
+    #[test]
+    fn an_untranslated_error_under_json_is_one_could_not_tell_document() {
+        let err =
+            anyhow::anyhow!("the store did not answer").context("the ready set could not be read");
+        let document = super::untranslated_document(&err, "item list");
+        assert!(
+            document.starts_with(
+                r#"{"ok":false,"verb":"item list","refusal":{"code":"could_not_tell","why":"#
+            ),
+            "{document}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&document).expect("the document parses");
+        assert_eq!(
+            parsed["refusal"]["why"], "the ready set could not be read: the store did not answer",
+            "{document}"
+        );
+        assert!(parsed.get("data").is_none(), "{document}");
+    }
+
+    /// The reason never stops at the verb's name: a context that names only
+    /// the verb is passed over, as its `fleet:` line is.
+    #[test]
+    fn the_reason_is_never_only_the_verbs_name() {
+        let err = anyhow::anyhow!("the seat list could not be read, so no poll ran")
+            .context(super::Stopped::verb("observe"));
+        assert_eq!(
+            super::reason(&err),
+            "the seat list could not be read, so no poll ran"
+        );
+    }
+
+    /// The matches a call parses to, through the binary's own command tree.
+    fn matched(argv: &[&str]) -> clap::ArgMatches {
+        use clap::CommandFactory;
+        crate::Cli::command()
+            .try_get_matches_from(argv)
+            .unwrap_or_else(|e| panic!("{argv:?} parses: {e}"))
+    }
+
+    /// The verb `main` names in the could-not-tell document is the subcommand
+    /// path as typed, where that verb took `--json` and was given it.
+    #[test]
+    fn the_verb_asked_for_json_is_the_subcommand_path_as_typed() {
+        for (argv, verb) in [
+            (
+                &["fleet", "seat", "add", "--agent", "--json"][..],
+                "seat add",
+            ),
+            (&["fleet", "event", "show", "an-id", "--json"], "event show"),
+            (&["fleet", "item", "list", "--ready", "--json"], "item list"),
+            (&["fleet", "doctor", "--json"], "doctor"),
+            (&["fleet", "dispatch", "t-1", "--json"], "dispatch"),
+            (&["fleet", "status", "--json"], "status"),
+        ] {
+            assert_eq!(
+                super::asked(&matched(argv)).as_deref(),
+                Some(verb),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The control: no flag, a verb that takes none, and `fleet event tail`,
+    /// which shared.output.R13 leaves out, ask for no document.
+    #[test]
+    fn no_document_is_asked_for_without_the_flag_or_by_event_tail() {
+        for argv in [
+            &["fleet", "doctor"][..],
+            &["fleet", "observe", "--once"],
+            &["fleet", "--version"],
+            &["fleet", "event", "tail", "--json"],
+        ] {
+            assert_eq!(super::asked(&matched(argv)), None, "{argv:?}");
+        }
     }
 
     /// One arm per row, both ways, so a renumbering has to be deliberate.

@@ -522,19 +522,22 @@ struct SeatOnly {
 
 // The one place a status is chosen. Every other function in this binary answers
 // in the exit table's own words, and an Err is could-not-tell: the chain says
-// which instrument could not be read and the status is 3, never 0.
+// which instrument could not be read and the status is 3, never 0. The verb and
+// its `--json` are read off the command line before the dispatch, so an error
+// that reaches here can still be answered in the envelope the call asked for.
 fn main() -> ExitCode {
-    match dispatch() {
+    let matches = Cli::command().get_matches();
+    let json = exit::asked(&matches);
+    match dispatch(&matches) {
         Ok(exit) => ExitCode::from(exit.code()),
-        Err(err) => ExitCode::from(exit::untranslated(&err).code()),
+        Err(err) => ExitCode::from(exit::untranslated(&err, json.as_deref()).code()),
     }
 }
 
-fn dispatch() -> Result<Exit> {
-    // Parsed through the matches rather than `Cli::parse`, because the gate
-    // below reads the verb as typed and its `--json` off them.
-    let matches = Cli::command().get_matches();
-    let cli = Cli::from_arg_matches(&matches)
+fn dispatch(matches: &clap::ArgMatches) -> Result<Exit> {
+    // Parsed through the matches rather than `Cli::parse`, because `main` and
+    // the gate below read the verb as typed and its `--json` off them.
+    let cli = Cli::from_arg_matches(matches)
         .map_err(|e| e.format(&mut Cli::command()))
         .unwrap_or_else(|e| e.exit());
 
@@ -560,7 +563,7 @@ fn dispatch() -> Result<Exit> {
     // and a gated prime would exit 1 the way it already does outside a checkout.
     if !matches!(family, Family::Guard { .. } | Family::Prime) {
         if let Err(why) = platform::try_machine_dir() {
-            let (verb, json) = exit::typed_verb(&matches);
+            let (verb, json) = exit::typed_verb(matches);
             return Ok(exit::refuse(&verb, Exit::Refused, &why.to_string(), json));
         }
     }
