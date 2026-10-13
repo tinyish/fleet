@@ -259,7 +259,7 @@ None.
 
 ## Open questions
 
-None.
+- [NEEDS CLARIFICATION: no verb that takes `--json` reaches shared.output.R13 today (each turns its own errors into refusals), so no scenario can cover it; it is held by unit tests until one does, or until the Definition of Done names it as an exception (fleet-iox1).]
 
 ## Definition of Done
 

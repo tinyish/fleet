@@ -108,7 +108,8 @@ verb that cannot say what happened is a third answer rather than a failure.
   cause that reads `caused by:` after its indent, and exits 3. Where the
   `fleet:` line would carry only the verb's name, fleet leaves it out: the
   verb's own `fleet <verb>:` line above it already names the verb, and the
-  causes follow that line. Under `--json` it writes the same lines and exits
+  causes follow that line. Under `--json` (other than `fleet event tail`, see
+  shared.output.R13) it writes the same lines and exits
   the same way, and also prints a refusal document whose code is
   `could_not_tell` on standard output (see shared.output).
 - **The verbs that write a line of their own to the event stream** and that
