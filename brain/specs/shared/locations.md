@@ -337,9 +337,9 @@ what fleet does today, with a `Changing:` line after each one.
   controller resolved (R2 to R6), and no `FLEET_HOME`.
 - **shared.locations.R30**: IF `FLEET_DIR` names a relative path, or
   `FLEET_DIR` is unset, `FLEET_HOME` names a relative path and R5 does not
-  apply, THEN fleet SHALL, except as R32 says, refuse (shared.exit-codes.R2) on a refusal line
-  (shared.exit-codes.R12) that names that variable and asks for an absolute
-  path.
+  apply, THEN fleet SHALL, except as R32 says, refuse (shared.exit-codes.R2)
+  on a refusal line (shared.exit-codes.R12) that names that variable and asks
+  for an absolute path.
 - **shared.locations.R31**: IF `FLEET_DIR`, `FLEET_HOME` and `HOME` are all
   unset, and on Linux `XDG_STATE_HOME` is unset too, THEN fleet SHALL, except as
   R32 says, refuse (shared.exit-codes.R2) on a refusal line
@@ -378,11 +378,13 @@ what fleet does today, with a `Changing:` line after each one.
   machine directory; the runs and routines specs say so.
 - A verb that takes `--packs-dir` reads packs from the directory it names in
   place of `packs/`; the packs area's spec says what else it moves.
-- The guards, `fleet prime` and the item verbs walk up the same way (R21 to
-  R23, R26) and fall back to a checkout the same way (R24). Where that finds
-  no fleet, `fleet prime` and the item verbs refuse (R25) and `fleet guard`
-  follows its own spec. `fleet start` and `fleet stop` do not walk up at
-  all: they act from any working directory (R28).
+- The guards, `fleet prime`, `fleet start` and the item verbs walk up the
+  same way (R21 to R23, R26). `fleet prime` and the item verbs then fall back
+  to a checkout (R24) and, where that finds no fleet, refuse (R25). `fleet
+  guard` follows its own spec where no file is found (R25). Where no file is
+  found, `fleet start` acts on `config.json`'s fleet from any working
+  directory; `fleet stop` resolves no fleet and acts from any working
+  directory (R28).
 - A seat's session is handed `FLEET_DIR` naming the machine directory (R29);
   the seats area's spec cites that clause.
 - shared.exit-codes.R23 states the exit for a verb that finds no fleet (R25).
