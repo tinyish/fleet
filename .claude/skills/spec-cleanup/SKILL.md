@@ -117,6 +117,15 @@ The report has exactly these parts, in order.
 2. **Filed:** one row per finding: item | spec | clauses | the fix he ruled.
 3. **Not filed:** each finding ruled, held, or dismissed, with its item or his reason.
 4. **Work to do:** every `Today:` item and every `### Known gaps` entry, grouped by spec: item | kind | clause | the gap in a few words. An item named by several specs is listed once, under the spec that holds its clause, and its other places are given beside it.
+5. **Prevention:** what would stop the agents who write specs from making these mistakes again. Group the findings filed, ruled and dismissed by the mistake behind them. A mistake made once, by chance, gets no entry. Each entry is one row: the mistake | the findings it caused | where the fix goes | the change.
+   - **Where the fix goes:**
+     - `scripts/check.py`, when a script can catch the mistake exactly; prefer this;
+     - `CONTRIBUTING.md` § Specs or § Change kinds, when the rule is missing or unclear there;
+     - `AGENTS.md`, for a rule spec-writing agents most often break;
+     - the brief or skill the specs were drafted from.
+     It is never `docs/`, which is the user manual.
+   - **The change:** the exact sentence to add, or the check to write. Read the place first, so you never propose a rule that is already there; where it is there and was missed, propose making it shorter or more visible instead.
+   - **Not done in the sitting:** these are recommendations only, so edit none of those files. End the report by asking Alberto which to apply.
 
 Add the report to the sitting with `bd comments add <sitting> -f <file>`,
 check that it landed, then close the sitting:
