@@ -34,8 +34,8 @@ bd update <sitting> --claim
 ```
 
 The body names the scope and HEAD's sha. Write bodies to a file and pass
-`--body-file`. Findings, rulings and dismissals go on it with `bd note` as they
-happen.
+`--body-file`. Findings, rulings and dismissals go on it as they happen, as
+comments: `bd comments add <sitting> -f <file>`.
 
 ## 2. The mechanical checks
 
@@ -118,5 +118,6 @@ The report has exactly these parts, in order.
 3. **Not filed:** each finding ruled, held, or dismissed, with its item or his reason.
 4. **Work to do:** every `Today:` item and every `### Known gaps` entry, grouped by spec: item | kind | clause | the gap in a few words. An item named by several specs is listed once, under the spec that holds its clause, and its other places are given beside it.
 
-Note the report on the sitting, then close it:
+Add the report to the sitting with `bd comments add <sitting> -f <file>`,
+check that it landed, then close the sitting:
 `bd close <sitting> --reason "<n> filed, <n> not filed"`.
