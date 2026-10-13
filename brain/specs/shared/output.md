@@ -112,7 +112,7 @@ not parse, or is a version this binary does not read, is a refusal too,
 whose code is `could_not_tell`, exiting 3. Under the flag it reads nothing
 beyond the projection, so where the page exits 3 over a section it could
 not fill, `fleet status --json` prints the projection and exits 0
-(shared.exit-codes.R1, shared.output.R18). What the projection holds is the
+(shared.output.R18, shared.output.R22). What the projection holds is the
 status area's spec.
 
 ```sh
@@ -172,6 +172,10 @@ every verb. Whether standard output is a terminal has no say over a line
 written on standard error, nor the other way round. So `fleet stop 2>log` at
 a terminal writes plain lines into `log`. Colour codes are for a person at a
 terminal; in a file or a pipe they are stray bytes a reader has to strip.
+
+Nor is a line ever coloured where the environment variable `NO_COLOR` is
+set, whatever its value, or where `TERM` is `dumb`: a person who asked for
+no colour, or a terminal that cannot show it, gets plain lines.
 
 ### Known gaps
 
@@ -264,11 +268,17 @@ terminal; in a file or a pipe they are stray bytes a reader has to strip.
   summary line `fleet doctor` writes on standard error after `doctor `,
   character for character, with no colour codes whatever the terminal.
 - **shared.output.R21**: fleet SHALL write colour codes in a line, under
-  any verb, only where the stream that line is written on is a terminal.
+  any verb, only where the stream that line is written on is a terminal,
+  the environment variable `NO_COLOR` is not set to any value, and `TERM` is
+  not `dumb`.
   Today: whether a line is coloured is decided by standard output being a
   terminal, whichever stream the line is written on, so a line on standard
   error is coloured into a file when standard output is a terminal, and
   plain on a terminal when standard output is not (fleet-nj2k).
+- **shared.output.R22**: WHEN `fleet status` called with `--json` prints
+  the document shared.output.R18 names, fleet SHALL exit 0
+  (shared.exit-codes.R1), whatever the status page would exit without the
+  flag.
 
 ## Non-functional
 
