@@ -174,8 +174,9 @@ a terminal writes plain lines into `log`. Colour codes are for a person at a
 terminal; in a file or a pipe they are stray bytes a reader has to strip.
 
 Nor is a line ever coloured where the environment variable `NO_COLOR` is
-set, whatever its value, or where `TERM` is `dumb`: a person who asked for
-no colour, or a terminal that cannot show it, gets plain lines.
+set to anything but an empty value, or where `TERM` is `dumb`: a person who
+asked for no colour, or a terminal that cannot show it, gets plain lines.
+An empty `NO_COLOR` counts as unset, as the no-color.org convention says.
 
 ### Known gaps
 
@@ -184,6 +185,8 @@ no colour, or a terminal that cannot show it, gets plain lines.
   the line is written on. `fleet stop 2>log` at a terminal writes colour
   codes into `log`, and `fleet stop >/dev/null` at a terminal writes plain
   lines to the screen.
+- **An empty `NO_COLOR` turns colour off (fleet-ojpr).** `NO_COLOR=` with no
+  value is read as set, where the convention counts it as unset.
 
 ## Behaviour
 
@@ -269,12 +272,13 @@ no colour, or a terminal that cannot show it, gets plain lines.
   character for character, with no colour codes whatever the terminal.
 - **shared.output.R21**: fleet SHALL write colour codes in a line, under
   any verb, only where the stream that line is written on is a terminal,
-  the environment variable `NO_COLOR` is not set to any value, and `TERM` is
-  not `dumb`.
+  the environment variable `NO_COLOR` is unset or empty, and `TERM` is not
+  `dumb`.
   Today: whether a line is coloured is decided by standard output being a
   terminal, whichever stream the line is written on, so a line on standard
   error is coloured into a file when standard output is a terminal, and
-  plain on a terminal when standard output is not (fleet-nj2k).
+  plain on a terminal when standard output is not (fleet-nj2k); and an
+  empty `NO_COLOR` turns colour off (fleet-ojpr).
 - **shared.output.R22**: WHEN `fleet status` called with `--json` prints
   the document shared.output.R18 names, fleet SHALL exit 0
   (shared.exit-codes.R1), whatever the status page would exit without the
