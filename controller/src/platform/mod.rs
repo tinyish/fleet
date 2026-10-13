@@ -806,6 +806,22 @@ mod tests {
         );
     }
 
+    /// R32's exemption states what the exempt verbs read: the path as given,
+    /// against the working directory.
+    #[test]
+    fn an_unresolved_directory_reads_as_it_did_before_the_refusal() {
+        let rel = || PathBuf::from("rel");
+        assert_eq!(
+            Unresolved::Relative { variable: "FLEET_DIR", value: rel() }.as_before(),
+            PathBuf::from("rel")
+        );
+        assert_eq!(
+            Unresolved::Relative { variable: "FLEET_HOME", value: rel() }.as_before(),
+            PathBuf::from("rel/.fleet")
+        );
+        assert_eq!(Unresolved::NoHome.as_before(), PathBuf::from(".fleet"));
+    }
+
     /// R31: no HOME is refused only where nothing else names the machine
     /// directory, and on macOS the state directory is not something else.
     #[test]

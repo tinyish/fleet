@@ -57,8 +57,11 @@ so it refuses nothing. Every verb refuses this way, `fleet observe` among
 them, whether or not it would have read the machine directory, and before
 it reads or writes anything. `fleet --version`, `fleet` with no command,
 and a command line that does not parse answer as shared.exit-codes says.
-`fleet guard` and `fleet prime` are the exception: they resolve as before
-(see Open questions).
+`fleet guard` and `fleet prime` are the exception: they read a relative
+`FLEET_DIR` or `FLEET_HOME` against the working directory, and with
+`FLEET_DIR`, `FLEET_HOME` and `HOME` all unset (and on Linux
+`XDG_STATE_HOME` unset) use `.fleet` under the working directory (see Open
+questions).
 
 Working out the machine directory creates nothing. A verb that only reads,
 such as `fleet prime`, leaves a machine directory that does not exist as it
@@ -337,7 +340,10 @@ what fleet does today, with a `Changing:` line after each one.
 - **shared.locations.R32**: IF R30 or R31 refuses a call, THEN fleet SHALL
   refuse it before the verb reads or writes anything, whichever verb was
   called and whether or not it reads the machine directory, except `fleet
-  guard` and `fleet prime`, which resolve as before (see Open questions).
+  guard` and `fleet prime`, which read a relative `FLEET_DIR` or
+  `FLEET_HOME` against the working directory, and with `FLEET_DIR`,
+  `FLEET_HOME` and `HOME` all unset (and on Linux `XDG_STATE_HOME` unset)
+  use `.fleet` under the working directory (see Open questions).
 
 ## Non-functional
 

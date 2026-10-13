@@ -549,13 +549,18 @@ fn a_refused_call_writes_nothing_and_what_is_not_a_verb_is_not_refused() {
 fn guard_and_prime_are_exempt_from_the_relative_refusal() {
     let machine = Machine::new("relative-exempt");
     let cwd = machine.root.join("somewhere");
-    for args in [&["guard", "shell-trap"][..], &["prime"][..]] {
-        let out = machine.run_in_env(args, &cwd, &[(FLEET_DIR, "rel")], &[]);
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(!stderr(&out).contains("a relative path"), "{args:?}: {}", stderr(&out));
-        assert!(!stdout.contains("a relative path"), "{args:?}: {stdout}");
-        assert_ne!(out.status.code(), Some(101), "{args:?} did not panic: {}", stderr(&out));
-    }
-    let out = machine.run_in_env(&["prime"], &cwd, &[(FLEET_DIR, "rel")], &[]);
+    let rel = [(FLEET_DIR, "rel")];
+    let out = machine.run_in_env(&["guard", "--check"], &cwd, &rel, &[]);
+    assert_eq!(out.status.code(), Some(3), "guard went on to read: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("not at rel/defaults"),
+        "guard read the directory as given, against the working directory: {}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("a relative path"), "{}", stderr(&out));
+
+    let out = machine.run_in_env(&["prime"], &cwd, &rel, &[]);
     assert_eq!(out.status.code(), Some(0), "prime always exits 0: {}", stderr(&out));
+    assert!(!stderr(&out).contains("a relative path"), "{}", stderr(&out));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("a relative path"));
 }
