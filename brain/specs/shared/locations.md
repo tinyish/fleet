@@ -332,7 +332,9 @@ Walking up creates nothing.
   states, on a refusal line (shared.exit-codes.R12, R13) that names the
   working directory and `fleet create`. `fleet create`, `fleet start`,
   `fleet stop` and `fleet guard` are not bound by this clause: their own
-  specs say what each does where there is no fleet.
+  specs say what each does where there is no fleet. `fleet store check` and
+  `fleet agent check` are not bound by it either: outside any fleet they read
+  the defaults and do not refuse.
 - **shared.locations.R26**: IF the directory R21 stops at holds a
   `.fleet/project.toml` and `config.json` is absent or names no policy file
   that exists, THEN fleet SHALL refuse (shared.exit-codes.R2) on a refusal
@@ -374,16 +376,16 @@ Walking up creates nothing.
   SHALL create no file beside it to lock it, and SHALL leave a
   `fleet.toml.lock` already beside it as it is.
 - **shared.locations.R35**: IF the directory R21 stops at holds a
-  `.fleet/project.toml`, `config.json` names a policy file that exists, and
-  `projects.toml` lists as a project's root neither that directory nor the
+  `.fleet/project.toml`, `config.json` names a policy file that exists,
+  `projects.toml` reads, and it lists as a project's root neither that directory nor the
   checkout the declaration's `[project] primary` names, THEN fleet SHALL
   refuse (shared.exit-codes.R2) on a refusal line (shared.exit-codes.R12,
   R13) that names that directory, `projects.toml` and
   `fleet create --standalone`, the command that registers it, where a root
   is matched as R36 says. `fleet create`, `fleet guard`, `fleet store check`,
   `fleet agent check` and the verbs R28 names are not bound by this clause.
-- **shared.locations.R36**: WHEN fleet compares a directory with a root
-  `projects.toml` lists (R22, R35), fleet SHALL count the two as one root
+- **shared.locations.R36**: WHEN fleet decides by R22 or R35 whether
+  `projects.toml` lists a directory, fleet SHALL count the two as one root
   where they name the same directory, however each is spelled.
 
 ## Non-functional
@@ -408,7 +410,8 @@ Walking up creates nothing.
 - The guards, `fleet prime`, `fleet start` and the item verbs walk up the
   same way (R21 to R23). Every verb that acts in a project refuses a declared
   project the machine has not registered (R26, R35): the item verbs,
-  `fleet prime`, `fleet doctor`, `fleet run`, the seat verbs and the
+  `fleet prime`, `fleet doctor`, `fleet run`, the seat verbs that act in a
+  project (`fleet seat add`, `spawn`, `feed`, `retire`, `nudge` and `attach`) and the
   `fleet routine` verbs among them. `fleet create`, `fleet start`,
   `fleet stop`, `fleet store check` and `fleet agent check` are not refused
   there, and the guards' spec says what a guard reads there. `fleet
