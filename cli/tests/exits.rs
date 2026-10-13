@@ -446,9 +446,15 @@ fn a_relative_fleet_dir_is_refused_under_every_verb() {
         let out = machine.run_in_env(args, &cwd, &[(FLEET_DIR, "rel")], &[]);
         assert_eq!(out.status.code(), Some(1), "{verb}: {}", stderr(&out));
         assert_eq!(stderr(&out), format!("fleet {verb}: {RELATIVE}\n"));
-        assert!(out.stdout.is_empty(), "{verb}: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(
+            out.stdout.is_empty(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
-    let left = std::fs::read_dir(&cwd).expect("the directory reads").count();
+    let left = std::fs::read_dir(&cwd)
+        .expect("the directory reads")
+        .count();
     assert_eq!(left, 0, "nothing was made where the calls stood");
 }
 
@@ -458,7 +464,12 @@ fn a_relative_fleet_dir_is_refused_under_every_verb() {
 fn a_relative_fleet_dir_under_json_is_one_refusal_document() {
     let machine = Machine::new("relative-json");
     let cwd = machine.root.join("somewhere");
-    let out = machine.run_in_env(&["event", "show", "x", "--json"], &cwd, &[(FLEET_DIR, "rel")], &[]);
+    let out = machine.run_in_env(
+        &["event", "show", "x", "--json"],
+        &cwd,
+        &[(FLEET_DIR, "rel")],
+        &[],
+    );
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     let document = one_refusal(&out, "event show");
     assert_eq!(document["refusal"]["why"], RELATIVE);
@@ -497,10 +508,18 @@ fn no_home_is_refused_only_where_nothing_else_names_the_machine_directory() {
         "fleet status: HOME is unset and nothing else names the machine directory — set HOME to \
          an absolute path\n"
     );
-    assert!(!cwd.join(".fleet").exists(), "no machine directory where the call stood");
+    assert!(
+        !cwd.join(".fleet").exists(),
+        "no machine directory where the call stood"
+    );
 
     let out = machine.run_in_env(&["event", "show", "x"], &cwd, &[], &[FLEET_HOME, HOME]);
-    assert_eq!(out.status.code(), Some(5), "FLEET_DIR alone names it: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "FLEET_DIR alone names it: {}",
+        stderr(&out)
+    );
 
     let state = machine.root.join("state").display().to_string();
     let out = machine.run_in_env(
@@ -529,7 +548,9 @@ fn a_refused_call_writes_nothing_and_what_is_not_a_verb_is_not_refused() {
     );
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(stderr(&out), format!("fleet create: {RELATIVE}\n"));
-    let left = std::fs::read_dir(&cwd).expect("the directory reads").count();
+    let left = std::fs::read_dir(&cwd)
+        .expect("the directory reads")
+        .count();
     assert_eq!(left, 0, "create wrote nothing");
 
     let out = machine.run_in_env(&["--version"], &cwd, &rel, &[]);
@@ -551,16 +572,34 @@ fn guard_and_prime_are_exempt_from_the_relative_refusal() {
     let cwd = machine.root.join("somewhere");
     let rel = [(FLEET_DIR, "rel")];
     let out = machine.run_in_env(&["guard", "--check"], &cwd, &rel, &[]);
-    assert_eq!(out.status.code(), Some(3), "guard went on to read: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "guard went on to read: {}",
+        stderr(&out)
+    );
     assert!(
         stderr(&out).contains("not at rel/defaults"),
         "guard read the directory as given, against the working directory: {}",
         stderr(&out)
     );
-    assert!(!stderr(&out).contains("a relative path"), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("a relative path"),
+        "{}",
+        stderr(&out)
+    );
 
     let out = machine.run_in_env(&["prime"], &cwd, &rel, &[]);
-    assert_eq!(out.status.code(), Some(0), "prime always exits 0: {}", stderr(&out));
-    assert!(!stderr(&out).contains("a relative path"), "{}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "prime always exits 0: {}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("a relative path"),
+        "{}",
+        stderr(&out)
+    );
     assert!(!String::from_utf8_lossy(&out.stdout).contains("a relative path"));
 }

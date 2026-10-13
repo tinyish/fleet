@@ -62,7 +62,10 @@ pub enum Unresolved {
     /// `FLEET_DIR` or `FLEET_HOME`, deciding, names a path that would be read
     /// against the working directory and so name another directory from every
     /// directory a call is made in.
-    Relative { variable: &'static str, value: PathBuf },
+    Relative {
+        variable: &'static str,
+        value: PathBuf,
+    },
     /// `HOME` is unset and no other variable names the machine directory.
     NoHome,
 }
@@ -88,7 +91,10 @@ impl Unresolved {
     /// read against the working directory. Only the verbs R32 exempts use it.
     fn as_before(&self) -> PathBuf {
         match self {
-            Unresolved::Relative { variable: "FLEET_HOME", value } => value.join(".fleet"),
+            Unresolved::Relative {
+                variable: "FLEET_HOME",
+                value,
+            } => value.join(".fleet"),
             Unresolved::Relative { value, .. } => value.clone(),
             Unresolved::NoHome => PathBuf::from(".fleet"),
         }
@@ -144,14 +150,18 @@ fn resolve_on(
     if let Some(home) = fleet_home {
         return absolute("FLEET_HOME", home).map(|home| home.join(".fleet"));
     }
-    home.map(|home| home.join(".fleet")).ok_or(Unresolved::NoHome)
+    home.map(|home| home.join(".fleet"))
+        .ok_or(Unresolved::NoHome)
 }
 
 fn absolute<'a>(variable: &'static str, path: &'a Path) -> Result<&'a Path, Unresolved> {
     if path.is_absolute() {
         Ok(path)
     } else {
-        Err(Unresolved::Relative { variable, value: path.to_path_buf() })
+        Err(Unresolved::Relative {
+            variable,
+            value: path.to_path_buf(),
+        })
     }
 }
 
@@ -745,7 +755,13 @@ mod tests {
         let h1 = Path::new("/home1");
         for state_dir in BOTH {
             assert_eq!(
-                resolve_on(state_dir, Some(d), Some(h2), Some(h1), Some(Path::new("/state"))),
+                resolve_on(
+                    state_dir,
+                    Some(d),
+                    Some(h2),
+                    Some(h1),
+                    Some(Path::new("/state"))
+                ),
                 Ok(d.to_path_buf()),
                 "FLEET_DIR is the directory itself and wins outright"
             );
@@ -754,7 +770,10 @@ mod tests {
                 Ok(h2.join(".fleet")),
                 "FLEET_HOME is the home it sits under, and beats HOME"
             );
-            assert_eq!(resolve_on(state_dir, None, None, Some(h1), None), Ok(h1.join(".fleet")));
+            assert_eq!(
+                resolve_on(state_dir, None, None, Some(h1), None),
+                Ok(h1.join(".fleet"))
+            );
         }
     }
 
@@ -764,10 +783,22 @@ mod tests {
     #[test]
     fn the_state_directory_moves_the_machine_directory_on_linux_alone() {
         let (h, s) = (Path::new("/h"), Path::new("/s"));
-        assert_eq!(resolve_on(macos::state_dir, None, None, Some(h), Some(s)), Ok(h.join(".fleet")));
-        assert_eq!(resolve_on(linux::state_dir, None, None, Some(h), Some(s)), Ok(s.join("fleet")));
         assert_eq!(
-            resolve_on(linux::state_dir, None, Some(Path::new("rel")), Some(h), Some(s)),
+            resolve_on(macos::state_dir, None, None, Some(h), Some(s)),
+            Ok(h.join(".fleet"))
+        );
+        assert_eq!(
+            resolve_on(linux::state_dir, None, None, Some(h), Some(s)),
+            Ok(s.join("fleet"))
+        );
+        assert_eq!(
+            resolve_on(
+                linux::state_dir,
+                None,
+                Some(Path::new("rel")),
+                Some(h),
+                Some(s)
+            ),
             Ok(s.join("fleet")),
             "a FLEET_HOME the state directory outranks is never read"
         );
@@ -780,11 +811,17 @@ mod tests {
         for state_dir in BOTH {
             assert_eq!(
                 resolve_on(state_dir, Some(rel), None, Some(h), None),
-                Err(Unresolved::Relative { variable: "FLEET_DIR", value: rel.to_path_buf() })
+                Err(Unresolved::Relative {
+                    variable: "FLEET_DIR",
+                    value: rel.to_path_buf()
+                })
             );
             assert_eq!(
                 resolve_on(state_dir, None, Some(rel), Some(h), None),
-                Err(Unresolved::Relative { variable: "FLEET_HOME", value: rel.to_path_buf() })
+                Err(Unresolved::Relative {
+                    variable: "FLEET_HOME",
+                    value: rel.to_path_buf()
+                })
             );
             assert_eq!(
                 resolve_on(state_dir, Some(Path::new("/d")), Some(rel), Some(h), None),
@@ -794,13 +831,20 @@ mod tests {
             assert!(
                 matches!(
                     resolve_on(state_dir, Some(Path::new("~/x")), None, Some(h), None),
-                    Err(Unresolved::Relative { variable: "FLEET_DIR", .. })
+                    Err(Unresolved::Relative {
+                        variable: "FLEET_DIR",
+                        ..
+                    })
                 ),
                 "a tilde is not expanded: ~/x is a relative path"
             );
         }
         assert_eq!(
-            Unresolved::Relative { variable: "FLEET_DIR", value: rel.to_path_buf() }.to_string(),
+            Unresolved::Relative {
+                variable: "FLEET_DIR",
+                value: rel.to_path_buf()
+            }
+            .to_string(),
             "FLEET_DIR is rel, a relative path — set FLEET_DIR to an absolute path"
         );
     }
@@ -811,11 +855,19 @@ mod tests {
     fn an_unresolved_directory_reads_as_it_did_before_the_refusal() {
         let rel = || PathBuf::from("rel");
         assert_eq!(
-            Unresolved::Relative { variable: "FLEET_DIR", value: rel() }.as_before(),
+            Unresolved::Relative {
+                variable: "FLEET_DIR",
+                value: rel()
+            }
+            .as_before(),
             PathBuf::from("rel")
         );
         assert_eq!(
-            Unresolved::Relative { variable: "FLEET_HOME", value: rel() }.as_before(),
+            Unresolved::Relative {
+                variable: "FLEET_HOME",
+                value: rel()
+            }
+            .as_before(),
             PathBuf::from("rel/.fleet")
         );
         assert_eq!(Unresolved::NoHome.as_before(), PathBuf::from(".fleet"));
@@ -827,7 +879,10 @@ mod tests {
     fn no_home_is_refused_only_where_nothing_else_names_the_machine_directory() {
         let s = Path::new("/s");
         for state_dir in BOTH {
-            assert_eq!(resolve_on(state_dir, None, None, None, None), Err(Unresolved::NoHome));
+            assert_eq!(
+                resolve_on(state_dir, None, None, None, None),
+                Err(Unresolved::NoHome)
+            );
             assert_eq!(
                 resolve_on(state_dir, Some(Path::new("/d")), None, None, None),
                 Ok(PathBuf::from("/d"))
@@ -837,8 +892,14 @@ mod tests {
                 Ok(PathBuf::from("/fh/.fleet"))
             );
         }
-        assert_eq!(resolve_on(macos::state_dir, None, None, None, Some(s)), Err(Unresolved::NoHome));
-        assert_eq!(resolve_on(linux::state_dir, None, None, None, Some(s)), Ok(s.join("fleet")));
+        assert_eq!(
+            resolve_on(macos::state_dir, None, None, None, Some(s)),
+            Err(Unresolved::NoHome)
+        );
+        assert_eq!(
+            resolve_on(linux::state_dir, None, None, None, Some(s)),
+            Ok(s.join("fleet"))
+        );
         assert_eq!(
             Unresolved::NoHome.to_string(),
             "HOME is unset and nothing else names the machine directory — set HOME to an absolute path"
