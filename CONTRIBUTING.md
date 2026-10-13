@@ -137,7 +137,9 @@ Each clause follows these rules:
   `Today: <what fleet does now> (<bead id>)` follows the clause, naming the
   `fix` or `behaviour` item that will close the gap. The item's spec change
   is deleting that line. Until then, the clause's scenarios are known
-  failures, not regressions.
+  failures, not regressions. The story lists the same gaps, in plain words,
+  under a heading `### Known gaps`, so `grep -rn '^### Known gaps'
+  brain/specs` finds every one.
 - Every behaviour the story describes has a clause, and every clause appears
   in the story. An item that changes one changes the other. If they disagree,
   the clause is what fleet is held to, and the mismatch is a `spec` item.
