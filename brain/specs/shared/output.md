@@ -8,8 +8,9 @@ Most verbs a program drives take `--json`, which asks for the outcome as a
 JSON document on standard output instead of lines a person reads. Every such
 document has the same outer shape, the envelope: whether the verb did what it
 was asked, which verb answered, and then what it did or why it refused, or,
-for a `fleet doctor` whose checks did not all pass, both. A program parses one document and learns what happened, rather than
-parsing lines written for a person.
+for a `fleet doctor` whose checks did not all pass, both. A program parses
+one document and learns what happened, rather than parsing lines written for
+a person.
 
 You meet it whenever something other than a person reads fleet's answer:
 
