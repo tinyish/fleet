@@ -736,6 +736,56 @@ fn feed_and_retire_take_the_full_id_the_short_id_and_the_machine_name() {
     );
 }
 
+/// Row 6 under `--json`: a named seat handed to the two verbs only a
+/// transient seat takes refuses with exit 6, and the document's code is
+/// the row's name, `wrong_seat_kind`, which says the seat is the wrong
+/// kind whichever way round.
+#[test]
+fn feed_and_retire_on_a_named_seat_refuse_as_wrong_seat_kind() {
+    let rig = Rig::new("wrong-kind", true);
+    rig.init_store();
+    std::fs::write(
+        rig.machine.join("config.json"),
+        format!(
+            "{{\"fleet_toml\": {policy}, \"children\": [\
+             {{\"id\": \"{NAMED_ID}\", \"name\": \"Orla\", \
+               \"worktrees\": {{\"a-project\": \"/wt/orla\"}}}}]}}\n",
+            policy = json_string(&rig.project.join("fleet.toml").display().to_string()),
+        ),
+    )
+    .expect("the seat list is written");
+
+    let turn = rig.turn.display().to_string();
+    for args in [
+        vec![
+            "seat",
+            "feed",
+            "Orla",
+            "--first-turn",
+            turn.as_str(),
+            "--json",
+        ],
+        vec!["seat", "retire", "Orla", "--json"],
+    ] {
+        let out = rig.run(&args);
+        assert_eq!(out.status.code(), Some(6), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("orla-93b9739a is a named seat"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+        let document: serde_json::Value = serde_json::from_str(stdout(&out).trim())
+            .unwrap_or_else(|e| panic!("{args:?}: one document: {e}: {}", stdout(&out)));
+        assert_eq!(document["ok"], false, "{args:?}");
+        assert_eq!(document["refusal"]["code"], "wrong_seat_kind", "{args:?}");
+    }
+    assert_eq!(
+        rig.seats()["children"].as_array().map(Vec::len),
+        Some(1),
+        "neither refusal touched the list"
+    );
+}
+
 /// What a transient seat may run without asking reaches its agent's launch in
 /// fleet's own words, and the agent's adapter renders it (reviewer call
 /// 2026-09-25, E8): the project's declared `[permissions] tool_commands`, in

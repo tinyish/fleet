@@ -48,9 +48,6 @@ use std::time::Duration;
 /// Done is not among them: a verb that answers `Ok` carries a value and not a
 /// status, and the cli turns it into 0.
 pub use fleet_core::item::{COULD_NOT_TELL, NO_SESSION, REFUSED};
-/// The row is a named seat where a transient one was required. Named seats are
-/// rung and rested; transient ones are fed and retired.
-pub const NOT_TRANSIENT: u8 = 6;
 
 /// A verb that stopped, with the status a script reads and the sentence a
 /// person does: core's [`Stop`](fleet_core::item::Stop), under the name these
@@ -244,7 +241,7 @@ impl Machine<'_> {
         };
         if !row.transient {
             return Err(Refusal {
-                code: NOT_TRANSIENT,
+                code: crate::seat::EXIT_WRONG_SEAT_KIND,
                 message: format!(
                     "{} is a named seat — named seats are rung and rested, and only a \
                      transient row is fed and retired",

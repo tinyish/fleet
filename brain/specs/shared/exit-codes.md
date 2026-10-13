@@ -29,7 +29,7 @@ fleet will not do what you asked.
 | 3 | `could_not_tell` | Something the answer needs could not be read, so fleet cannot say what happened. It is never a success. | `fleet observe --once` with no seat list |
 | 4 | `no_session` | The verb needs a seat's live session, and the seat has none. | `fleet seat attach` for a seat with no session |
 | 5 | `no_collector` | No controller is consuming the event stream: there is no event stream, no projection, or a projection older than the verb allows. | `fleet status` with no projection; `fleet event show` with no stream |
-| 6 | `transient` | The seat is the wrong kind for the verb: a transient seat where a named one is needed, or the other way round. | `fleet event rest` on a transient seat; `fleet seat retire` on a named seat |
+| 6 | `wrong_seat_kind` | The seat is the wrong kind for the verb: a transient seat where a named one is needed, or the other way round. | `fleet event rest` on a transient seat; `fleet seat retire` on a named seat |
 
 fleet exits with no other number. The one exception is `fleet seat attach`,
 which hands your terminal to tmux. From then on the exit is tmux's, because
@@ -131,8 +131,6 @@ approved change, listed after it.
 - **`fleet doctor --json` with a finding or a could-not-tell.** Today the
   document's `ok` is `true` whatever the checks said. `ok` will be `true`
   only on exit 0 (fleet-accn).
-- **Row 6's name.** The row is named `transient` even when the seat at fault
-  is a named one. It will be renamed `wrong_seat_kind` (fleet-7wyc).
 - **`fleet create`'s line with no terminal.** It reads
   `fleet create: fleet: …`, with a second prefix, and names only
   `--embedded`. It will carry one prefix and name `--embedded` and
@@ -170,9 +168,7 @@ approved change, listed after it.
   the row named `no_collector`.
 - **shared.exit-codes.R7**: IF a verb is given a seat of the wrong kind (a
   transient seat where it needs a named one, or a named seat where it needs a
-  transient one), THEN fleet SHALL exit 6, the row named `transient`.
-  Changing: fleet-7wyc: the row is renamed `wrong_seat_kind`, for either
-  direction.
+  transient one), THEN fleet SHALL exit 6, the row named `wrong_seat_kind`.
 - **shared.exit-codes.R8**: fleet SHALL exit with one of the numbers 0 to 6
   and no other, except that once `fleet seat attach` has handed the terminal
   to tmux, the exit is tmux's.

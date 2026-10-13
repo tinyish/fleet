@@ -23,7 +23,7 @@ same thing from all of them:
 | 3 | could not tell: an instrument the answer needed was unreadable; nothing changed |
 | 4 | the seat has no live session |
 | 5 | no collector is consuming the stream |
-| 6 | the row is transient where a named seat was required |
+| 6 | the seat is the wrong kind for the verb: transient where a named one is needed, or the other way round |
 
 What each verb writes, so you know what to look for afterwards:
 

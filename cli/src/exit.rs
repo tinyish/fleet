@@ -23,8 +23,9 @@ pub enum Exit {
     NoSession = 4,
     /// no collector is consuming the stream
     NoCollector = 5,
-    /// the row is transient where a named seat was required
-    Transient = 6,
+    /// the seat is the wrong kind for the verb, in either direction: a
+    /// transient seat where a named one is required, or the other way round
+    WrongSeatKind = 6,
 }
 
 impl Exit {
@@ -44,7 +45,7 @@ impl Exit {
             Exit::CouldNotTell => "could_not_tell",
             Exit::NoSession => "no_session",
             Exit::NoCollector => "no_collector",
-            Exit::Transient => "transient",
+            Exit::WrongSeatKind => "wrong_seat_kind",
         }
     }
 
@@ -61,7 +62,7 @@ impl Exit {
             3 => Exit::CouldNotTell,
             4 => Exit::NoSession,
             5 => Exit::NoCollector,
-            6 => Exit::Transient,
+            6 => Exit::WrongSeatKind,
             other => bail!("exit {other} is not a row of the exit table"),
         })
     }
@@ -115,7 +116,7 @@ mod tests {
             (Exit::CouldNotTell, 3),
             (Exit::NoSession, 4),
             (Exit::NoCollector, 5),
-            (Exit::Transient, 6),
+            (Exit::WrongSeatKind, 6),
         ] {
             assert_eq!(exit.code(), code, "{exit:?} is {code}");
             assert_eq!(
@@ -123,6 +124,23 @@ mod tests {
                 exit,
                 "status {code} reads back as {exit:?}"
             );
+        }
+    }
+
+    /// The names a `--json` refusal carries, as the spec's exit table spells
+    /// them. A script branches on these words, so each is pinned whole.
+    #[test]
+    fn every_row_is_named_as_the_table_spells_it() {
+        for (exit, name) in [
+            (Exit::Done, "done"),
+            (Exit::Refused, "refused"),
+            (Exit::Usage, "usage"),
+            (Exit::CouldNotTell, "could_not_tell"),
+            (Exit::NoSession, "no_session"),
+            (Exit::NoCollector, "no_collector"),
+            (Exit::WrongSeatKind, "wrong_seat_kind"),
+        ] {
+            assert_eq!(exit.class(), name, "{exit:?}");
         }
     }
 

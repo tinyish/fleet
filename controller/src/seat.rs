@@ -21,7 +21,7 @@ use std::path::Path;
 pub const EXIT_READ_BACK_FAILED: u8 = 2;
 pub const EXIT_NO_SESSION: u8 = 4;
 pub const EXIT_NO_COLLECTOR: u8 = 5;
-pub const EXIT_TRANSIENT: u8 = 6;
+pub const EXIT_WRONG_SEAT_KIND: u8 = 6;
 
 /// A clear-halt for a seat that is not halted. 1 rather than a status of its
 /// own: nothing about the fleet is wrong, the request simply names a seat with
@@ -152,7 +152,7 @@ fn rest_is_answerable(machine_dir: &Path, named: &Named) -> Result<(), (u8, Stri
     // `config.json` the controller parses it from.
     if named.transient {
         return Err((
-            EXIT_TRANSIENT,
+            EXIT_WRONG_SEAT_KIND,
             format!(
                 "{seat} is a transient row, and only named seats rest — use \
                  `fleet seat retire {seat}` instead"

@@ -81,7 +81,7 @@ mod tests {
             Exit::CouldNotTell,
             Exit::NoSession,
             Exit::NoCollector,
-            Exit::Transient,
+            Exit::WrongSeatKind,
         ];
         let mut seen: Vec<&str> = rows.iter().map(|row| row.class()).collect();
         assert!(

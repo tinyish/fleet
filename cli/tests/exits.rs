@@ -76,7 +76,7 @@ fn class_of(status: i32) -> &'static str {
         3 => "could_not_tell",
         4 => "no_session",
         5 => "no_collector",
-        6 => "transient",
+        6 => "wrong_seat_kind",
         other => panic!("exit {other} is not a row of the exit table"),
     }
 }
