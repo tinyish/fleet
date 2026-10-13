@@ -27,8 +27,8 @@ answer passed as a flag and no terminal attached.
 
 ### Where it writes
 
-`fleet create` writes into the working directory alone. It works inside a
-git checkout or outside one. First it walks up from the working directory as
+`fleet create` writes the fleet's file into the working directory. It works
+inside a git checkout or outside one. First it walks up from the working directory as
 every verb that acts in a project does (shared.locations.R21). Where that
 walk stops at a directory above the working directory, you stand inside an
 existing fleet: a fleet written here would be a second, nested one, and every
@@ -140,8 +140,8 @@ command that wrote it, then `[project]` with:
 - `item_prefix`: the prefix the project's store answers for its ids. Where
   the store cannot be opened or names no prefix, the line is left commented
   out for the person to fill in. A guessed prefix is one the store's own ids
-  would disagree with. The store area's spec bounds how long the store is
-  asked;
+  would disagree with. The store is given 60 s to answer, and one that has
+  not answered by then names no prefix;
 - `primary`: the working directory;
 - `worktrees`: a sibling directory, the working directory's path with
   `-worktrees` on the end.
@@ -169,11 +169,13 @@ The `worktrees` directory need not exist yet. A prefix is needed only where a
 store needs one. So a declaration whose `item_prefix` is still commented out,
 as this verb writes it where the store answers none, is registered as it
 stands: a second `fleet create --standalone` never refuses the file the first
-one wrote.
+one wrote. A store that cannot be opened when the file is read, as before its
+pack is installed, answers no prefix, so the file is not refused for lacking
+one.
 
 Until it is registered, a declared project refuses every verb that acts in
 it, and the refusal names `fleet create --standalone` (shared.locations.R26,
-R35). `fleet create` is not refused there, because it is the command that
+shared.locations.R35). `fleet create` is not refused there, because it is the command that
 registers.
 
 ### Which fleet a standalone project is declared to
@@ -284,7 +286,8 @@ so, whichever step of the call mints it.
 | The table is written | `seat:` line naming the table and the fleet's file |
 | The fleet's file already lists this identity | file left as it was, and the `seat:` line says `already listed` |
 | Standalone, the fleet's file cannot take the table | project still declared and registered; the `seat:` line says `not listed`, why, and names `fleet seat add --human`; exit 0 |
-| Embedded, the table cannot be written, or `identity.toml` cannot be read or minted | exit 3, naming `fleet seat add --human`; the fleet file stays written |
+| Embedded, the table cannot be written | exit 3, naming `fleet seat add --human`; the fleet file stays written |
+| Either mode, `identity.toml` cannot be read or minted | exit 3, naming `fleet seat add --human`; the fleet file stays written |
 
 In standalone mode, a fleet file that cannot take the table gets a line
 rather than a refusal. The project is declared and registered, and the
@@ -308,7 +311,8 @@ store. It makes no beads board. The bd pack's README says how to make one.
 
 ### What it prints
 
-Lines go to standard error, each starting with a word a person scans for:
+Every line goes to standard error, and nothing goes to standard output. Each
+line starts with a word a person scans for:
 
 | Line starts with | When |
 | --- | --- |
@@ -333,7 +337,7 @@ naming what it is about (shared.exit-codes.R13).
 
 | The case | Exit | When |
 | --- | --- | --- |
-| the variable that decides the machine directory names a relative path, or nothing names it (shared.locations.R30, R31) | 1 | before anything (shared.locations.R32) |
+| the variable that decides the machine directory names a relative path, or nothing names it (shared.locations.R30, shared.locations.R31) | 1 | before anything (shared.locations.R32) |
 | a flag `fleet create` does not take, or `--embedded` with `--standalone` or `--fleet` | 2 | before anything |
 | no mode flag, no `--fleet` and no terminal | 2 | instead of the first question |
 | `--agent` or `--store` names an answer `fleet create` does not take; `--packs-from` names no directory | 2 | before any question |
@@ -370,8 +374,9 @@ short, a `Today:` line under the clause names the item that closes the gap.
   which stay installed (fleet-b42k):
   - `--embedded` beside both a `fleet.toml` and a declaration;
   - a declaration already there that is refused.
-- **No lost edits.** Today the first write of `config.json` takes no lock, so
-  two calls writing it at once can lose one (fleet-rbwc).
+- **No lost edits** (shared.locations.R17). Today the first write of
+  `config.json` takes no lock, so two calls writing it at once can lose one
+  (fleet-rbwc).
 - **A `config.json` that does not read or parse** refuses with exit 1, where
   the call cannot tell which fleet it declares the project to and should
   exit 3 (fleet-9sr5).
@@ -413,10 +418,7 @@ short, a `Today:` line under the clause names the item that closes the gap.
 
 - **onboarding.create.R1**: WHEN `fleet create` is called, fleet SHALL write
   the fleet's file into the working directory, whether or not the working
-  directory is inside a git checkout, and only where no directory above it
-  holds a fleet (onboarding.create.R49).
-  Today: it writes a second, nested fleet below an existing one
-  (fleet-6zpk).
+  directory is inside a git checkout.
 - **onboarding.create.R49**: IF the walk shared.locations.R21 makes from the
   working directory stops at a directory above it, THEN fleet SHALL refuse
   with exit 1 (shared.exit-codes.R2) on a line naming the `fleet.toml` or
@@ -431,8 +433,6 @@ short, a `Today:` line under the clause names the item that closes the gap.
   terminal, fleet SHALL ask first whether the fleet is embedded or
   standalone, offering embedded then standalone, with embedded selected
   before a key is pressed.
-  Today: `--fleet` with no mode flag still asks, and an embedded answer drops
-  `--fleet` without a word (fleet-coog).
 - **onboarding.create.R3**: WHILE standard input is a terminal, fleet SHALL
   ask which store where no `--store` is given (offering `none` then `bd`),
   then, where the mode is embedded and no `--agent` is given, which agent
@@ -447,10 +447,9 @@ short, a `Today:` line under the clause names the item that closes the gap.
   `[agent] adapter` (`claude-code` where it names none).
 - **onboarding.create.R5**: IF `fleet create` is called with none of
   `--embedded`, `--standalone` and `--fleet`, and standard input is not a
-  terminal, THEN fleet SHALL refuse with exit 2 (shared.exit-codes.R3, R14)
+  terminal, THEN fleet SHALL refuse with exit 2 (shared.exit-codes.R3, shared.exit-codes.R14)
   on a line that carries one `fleet create:` prefix and names `--embedded`
   and `--standalone`, and write nothing.
-  Today: `--fleet` with no mode flag is refused here too (fleet-coog).
 - **onboarding.create.R6**: WHILE standard input is not a terminal, fleet
   SHALL take `none` where no `--store` is given and, where the mode is
   embedded, `none` where no `--agent` is given, without asking.
@@ -476,7 +475,8 @@ short, a `Today:` line under the clause names the item that closes the gap.
   neither `--embedded` nor `--standalone`, fleet SHALL take the mode as
   standalone and ask no mode question.
   Today: the mode question is still asked, or, with no terminal, the call is
-  refused as onboarding.create.R5 says (fleet-coog).
+  refused as onboarding.create.R5 says, and an embedded answer drops
+  `--fleet` without a word (fleet-coog).
 
 ### Clauses: refused answers and directories
 
@@ -565,6 +565,8 @@ short, a `Today:` line under the clause names the item that closes the gap.
   `<source>//adapters/agent/claude-code` at the tag this binary pins, into
   `packs/bd/` or `packs/claude-code/` (shared.locations.R7), pinned in
   `packs.lock` (shared.locations.R9), unless onboarding.create.R22 applies.
+  Where it installs both, it SHALL install the store's pack before the
+  agent's.
 - **onboarding.create.R21**: WHEN `fleet create` installs a pack, fleet SHALL
   take `<source>` as the fleet-packs source this binary pins, or, where
   `--packs-from <dir>` is given, as the full path of `<dir>` read against the
@@ -595,7 +597,7 @@ short, a `Today:` line under the clause names the item that closes the gap.
   reason and, for the store's pack, `fleet create --store none`, or, for the
   agent's pack, the `fleet pack add` command that installs it. It SHALL write
   no `fleet.toml`, `.fleet/project.toml`, `config.json`, `projects.toml` row
-  (shared.locations.R11, R13) or `identity.toml` (shared.locations.R10). A
+  (shared.locations.R11, shared.locations.R13) or `identity.toml` (shared.locations.R10). A
   fetch past its bound is onboarding.create.N1's.
 - **onboarding.create.R26**: IF a pack's install fails (onboarding.create.R25),
   THEN fleet SHALL leave installed and pinned the defaults, and every pack
@@ -661,7 +663,9 @@ short, a `Today:` line under the clause names the item that closes the gap.
   THEN fleet SHALL refuse with exit 1 (shared.exit-codes.R2) on a line naming
   the file and the key, and write nothing. A declaration whose `item_prefix`
   is commented out where the store answers none, as onboarding.create.R32
-  writes it, SHALL not be refused for it.
+  writes it, SHALL not be refused for it. A store that cannot be opened when
+  this check is made, as before its pack is installed, answers none, as
+  onboarding.create.R32 treats it.
   Today: the defaults and the store's pack this call installed before the
   refusal stay installed and pinned (fleet-b42k).
   Today: a declaration with `item_prefix` commented out is refused for
@@ -676,16 +680,10 @@ short, a `Today:` line under the clause names the item that closes the gap.
   (shared.locations.R12) a `project.registered` event whose payload carries
   the root and the name. It SHALL append none for a root already listed. The
   status area's specs say what an event carries beyond its payload.
-- **onboarding.create.R38**: WHEN `fleet create` writes the file for its mode
-  or lists the person, fleet SHALL leave no file the person did not ask for
-  (shared.locations.R34) in the project's directory or in the fleet's own:
-  in the project's, only the `fleet.toml` or `.fleet/project.toml` that
-  onboarding.create.R31 and R32 write.
-- **onboarding.create.R39**: WHEN two fleet commands write the same
-  `projects.toml`, `config.json`, `identity.toml` or fleet's `fleet.toml` at
-  once, fleet SHALL lose neither's edit (shared.locations.R17).
-  Today: `fleet create --standalone --fleet`'s first write of `config.json`
-  takes no lock, so two such writes at once can lose one (fleet-rbwc).
+- ~~**onboarding.create.R38**~~ retired 2026-10-13: it restated
+  shared.locations.R34, which the story cites.
+- ~~**onboarding.create.R39**~~ retired 2026-10-13: it restated
+  shared.locations.R17, which the story cites.
 - **onboarding.create.R40**: fleet SHALL never initialise, write into or
   rewrite the project's store.
 
@@ -720,12 +718,13 @@ short, a `Today:` line under the clause names the item that closes the gap.
 
 ### Clauses: outcome
 
+- **onboarding.create.R54**: fleet SHALL write every line `fleet create`
+  writes on standard error, and none on standard output.
 - **onboarding.create.R46**: WHEN `fleet create` has done what it was asked,
-  fleet SHALL print on standard error a line starting `created` naming the
+  fleet SHALL print a line starting `created` naming the
   mode and the file written or read, and exit 0 (shared.exit-codes.R1).
-- **onboarding.create.R47**: WHEN `fleet create` succeeds, fleet SHALL print
-  on standard error, as its last line, a line starting `next:` that names
-  `fleet start`.
+- **onboarding.create.R47**: WHEN `fleet create` succeeds, fleet SHALL print,
+  as its last line, a line starting `next:` that names `fleet start`.
 
 ### Clauses: a seat list that cannot be read
 
@@ -742,9 +741,11 @@ short, a `Today:` line under the clause names the item that closes the gap.
   (shared.exit-codes.R4) on a line naming the pack and the bound.
   Today: a fetch has no bound, and one that stalls on the network waits
   indefinitely (fleet-pwwl).
+- **onboarding.create.N2**: IF the project's store has not answered its
+  prefix within 60 s, THEN fleet SHALL stop asking and take the store as
+  answering none (onboarding.create.R32).
 
-The store area's spec bounds the ask for the prefix (onboarding.create.R32).
-onboarding.create.R39 holds the promise for two calls at once.
+shared.locations.R17 holds the promise for two calls at once.
 
 ## Interfaces
 
@@ -756,11 +757,11 @@ onboarding.create.R39 holds the promise for two calls at once.
 - The verbs that act in a project find the files written here by
   shared.locations.R21 to R23. `fleet create --standalone` is the command
   that registers a declaration: the verbs that act in a declared project the
-  machine has not registered refuse and name it (shared.locations.R26, R35),
+  machine has not registered refuse and name it (shared.locations.R26, shared.locations.R35),
   and `fleet create` is not bound by those clauses.
 - Like every verb but `fleet guard`, `fleet create` is refused before it
   reads or writes anything where the machine directory would be relative or
-  is named by nothing (shared.locations.R30 to R32).
+  is named by nothing (shared.locations.R30 to shared.locations.R32).
 - The packs area: the install is the one `fleet pack add <source> --version
   <tag>` does, including a pack's imports, and the defaults are its spec.
   Whether `fleet pack add` takes the 120 s bound of onboarding.create.N1 is
@@ -770,7 +771,8 @@ onboarding.create.R39 holds the promise for two calls at once.
 - The seats area: `fleet seat add --human` writes the person's table the same
   way, and is the command onboarding.create.R44 and R45 name.
   `identity.toml` is the seats area's identity spec.
-- The store area: the store adapter answers the prefix (onboarding.create.R32).
+- The store area: the store adapter answers the prefix (onboarding.create.R32),
+  given 60 s (onboarding.create.N2).
   The agent area: the agent adapter names the default model the embedded
   file's example row carries. A fleet whose file names no `[agent] adapter`
   opens `claude-code`, so a fleet made with the agent `none`
