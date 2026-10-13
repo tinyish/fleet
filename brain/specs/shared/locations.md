@@ -232,7 +232,9 @@ no fleet or a declared project the machine has not registered
 `projects.toml` is there but will not read (R38, shared.exit-codes.R4).
 `fleet create`, `fleet start`, `fleet stop` and `fleet guard` decide in
 their own specs what they do where there is no fleet. `fleet store check`
-and `fleet agent check` read the defaults there and do not refuse.
+and `fleet agent check` find their fleet as every verb does, the checkout
+fallback (R24) included, and only where no fleet is found at all do they
+read the defaults, without refusing.
 
 The verbs differ where no file is found above the working directory:
 
@@ -240,7 +242,7 @@ The verbs differ where no file is found above the working directory:
 | --- | --- |
 | the item verbs, `fleet doctor`, `fleet prime` | act in `config.json`'s fleet only inside a git checkout, and refuse outside one |
 | `fleet start`, `fleet stop` | act on the machine from any directory, inside a checkout or not |
-| `fleet store check`, `fleet agent check` | read the defaults where they find no fleet, and do not refuse |
+| `fleet store check`, `fleet agent check` | read the defaults where R21 to R24 find no fleet, and do not refuse |
 
 `fleet stop` resolves no fleet at all. A stop that looked for a project first
 would refuse from a bare directory while the service was loaded, and leave
@@ -384,8 +386,8 @@ closes the gap.
   that names the working directory and `fleet create`. `fleet create`,
   `fleet start`, `fleet stop` and `fleet guard` are not bound by this clause: their own
   specs say what each does where there is no fleet. `fleet store check` and
-  `fleet agent check` are not bound by it either: outside any fleet they read
-  the defaults and do not refuse.
+  `fleet agent check` are not bound by it either: where R21 to R24 find no
+  fleet they read the defaults and do not refuse.
 - **shared.locations.R26**: IF the directory R21 stops at holds a
   `.fleet/project.toml` and `config.json` is absent, or reads and names no
   policy file that exists, THEN fleet SHALL refuse (shared.exit-codes.R2) on a refusal
