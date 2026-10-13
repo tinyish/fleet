@@ -81,7 +81,7 @@ is.
 | `identity.toml` | who acts on this machine when a verb is given no `--by` and no `FLEET_ACTOR`: a person's seat id, and a name if you add one | `fleet create` |
 | `config.json` | the policy file of the fleet this machine runs, and the seats `fleet start` rendered from it | the first `fleet start`, or `fleet create --standalone --fleet <dir>` where no fleet is named yet |
 | `events.jsonl` | the machine's event stream, one event per line, oldest first | every verb and the controller, by appending |
-| `projects.toml` | each standalone project registered on this machine: its root and its name, once per root | `fleet create --standalone` |
+| `projects.toml` | each standalone project registered on this machine: its root and its name, once per root. A verb acts in a declared project only where this lists its root, or the primary checkout its declaration names | `fleet create --standalone` |
 | `service.out.log`, `service.err.log` | macOS only: what the controller's service printed on standard output and on standard error | the service, while it runs |
 | `<file>.lock` | nothing to read: an empty file left beside `projects.toml` or `config.json` once fleet has changed it | the verb that changed that file |
 | `locks/` | nothing to read: one empty file for each fleet whose `fleet.toml` fleet has changed | the verb that changed that `fleet.toml` |
@@ -168,10 +168,32 @@ filesystem. It stops at the first directory that holds either file:
 2. `fleet.toml`: an embedded fleet rooted there, with that file as its
    policy.
 
-A `.fleet/project.toml` counts whether or not `projects.toml` lists its root.
-A declaration written by hand, in a directory where `fleet create --standalone`
-never ran, is acted in all the same. So is one on a machine whose
-`config.json` is absent or names no fleet.
+A `.fleet/project.toml` counts only once this machine has registered it:
+`projects.toml` lists its directory as a project's root, and `config.json`
+names a fleet whose policy file is there. A declaration written by hand, in
+a directory where `fleet create --standalone` never ran, is refused, and so
+is one on a machine whose `config.json` is absent or names no fleet. The
+refusal names the directory, the machine's file that lacks it, and
+`fleet create --standalone`, which registers the project:
+
+```sh
+$ fleet doctor
+fleet doctor: /home/me/app declares a project that /home/me/.fleet/projects.toml does not list — `fleet create --standalone` registers it
+```
+
+A seat's worktree of a standalone project whose `.fleet/project.toml` is
+committed carries its own copy of the file. The walk stops at that copy, and
+the directory it names is the worktree, which `projects.toml` never lists.
+So a declaration also counts where `projects.toml` lists the checkout its
+`[project] primary` names: the project's primary checkout, which
+`fleet create --standalone` writes there. A root is matched as a directory,
+not as a spelling, so two paths that reach one directory are one root. A
+`projects.toml` that will not read is no answer either way: the verb cannot
+tell, and exits 3 (shared.exit-codes.R4).
+
+`fleet create` is not refused in such a directory, because it is the command
+that registers. `fleet start` and `fleet stop` act from any directory (see
+below), and `fleet guard` reads such a directory as its own spec says.
 
 The nearest directory wins. Take a `fleet.toml` in `~/work/app` and another in
 `~/work/app/tools`. A verb run in `~/work/app/tools/sub` acts in the fleet in
@@ -206,16 +228,6 @@ would refuse from a bare directory while the service was loaded, and leave
 the controller running.
 
 Walking up creates nothing.
-
-### What is changing
-
-Each of these is an approved change. Until its bead lands, the clauses state
-what fleet does today, with a `Changing:` line after each one.
-
-- **A declared project must be registered** (fleet-np9q). A verb in a
-  `.fleet/project.toml` that `projects.toml` does not list will refuse, and
-  name the command that registers it. So will a verb in a declared project on
-  a machine whose `config.json` is absent or names no fleet.
 
 ## Behaviour
 
@@ -299,13 +311,12 @@ what fleet does today, with a `Changing:` line after each one.
   the filesystem, and stop at the first that holds a `.fleet/project.toml` or
   a `fleet.toml`.
 - **shared.locations.R22**: WHEN the directory R21 stops at holds a
-  `.fleet/project.toml`, fleet SHALL act in the standalone project rooted
-  there, under the fleet whose policy file `config.json` names (R11), even
-  where a `fleet.toml` sits beside it, and whether or not `projects.toml`
-  lists that project's root.
-  Changing: fleet-np9q: where `projects.toml` does not list that root, fleet
-  refuses (shared.exit-codes.R2) on a line that names
-  `fleet create --standalone`, the command that registers it.
+  `.fleet/project.toml`, `config.json` names a policy file that exists, and
+  `projects.toml` lists that directory, or the checkout the declaration's
+  `[project] primary` names, as a project's root (R13, matched as R35 says),
+  fleet SHALL act in the standalone project rooted there, under the fleet
+  whose policy file `config.json` names (R11), even where a `fleet.toml` sits
+  beside it.
 - **shared.locations.R23**: WHEN the directory R21 stops at holds a
   `fleet.toml` and no `.fleet/project.toml`, fleet SHALL act in the embedded
   fleet rooted there, with that `fleet.toml` as its policy file.
@@ -320,11 +331,13 @@ what fleet does today, with a `Changing:` line after each one.
   working directory and `fleet create`. `fleet create`, `fleet start`,
   `fleet stop` and `fleet guard` are not bound by this clause: their own
   specs say what each does where there is no fleet.
-- **shared.locations.R26**: WHEN the directory R21 stops at holds a
+- **shared.locations.R26**: IF the directory R21 stops at holds a
   `.fleet/project.toml` and `config.json` is absent or names no policy file
-  that exists, fleet SHALL still act in the standalone project rooted there.
-  Changing: fleet-np9q: fleet refuses (shared.exit-codes.R2) on a line that
-  names `fleet create --standalone`, the command that registers it.
+  that exists, THEN fleet SHALL refuse (shared.exit-codes.R2) on a refusal
+  line (shared.exit-codes.R12, R13) that names that directory, `config.json`
+  and `fleet create --standalone`, the command that registers the project.
+  `fleet create`, `fleet guard` and the verbs R28 names are not bound by this
+  clause.
 - **shared.locations.R27**: (retired by fleet-x1qu: `fleet prime` finds its
   fleet as every verb that acts in a project does, by R21 to R26; where no
   file is found that is R24's fallback inside a checkout and R25's refusal
@@ -358,12 +371,22 @@ what fleet does today, with a `Changing:` line after each one.
 - **shared.locations.R34**: WHEN fleet changes a fleet's `fleet.toml`, fleet
   SHALL create no file beside it to lock it, and SHALL leave a
   `fleet.toml.lock` already beside it as it is.
+- **shared.locations.R35**: IF the directory R21 stops at holds a
+  `.fleet/project.toml`, `config.json` names a policy file that exists, and
+  `projects.toml` lists as a project's root neither that directory nor the
+  checkout the declaration's `[project] primary` names, THEN fleet SHALL
+  refuse (shared.exit-codes.R2) on a refusal line (shared.exit-codes.R12,
+  R13) that names that directory, `projects.toml` and
+  `fleet create --standalone`, the command that registers it. A root is
+  matched as a directory: two paths that reach the same directory are one
+  root. `fleet create`, `fleet guard` and the verbs R28 names are not bound
+  by this clause.
 
 ## Non-functional
 
 - **shared.locations.N1**: WHEN fleet resolves the machine directory (R1 to
-  R6, R30 to R32) or looks for the fleet a call acts in (R21 to R24, R26),
-  fleet SHALL create no file and no directory in doing so.
+  R6, R30 to R32) or looks for the fleet a call acts in (R21 to R24, R26,
+  R35), fleet SHALL create no file and no directory in doing so.
 
 ## Interfaces
 
@@ -379,12 +402,14 @@ what fleet does today, with a `Changing:` line after each one.
 - A verb that takes `--packs-dir` reads packs from the directory it names in
   place of `packs/`; the packs area's spec says what else it moves.
 - The guards, `fleet prime`, `fleet start` and the item verbs walk up the
-  same way (R21 to R23, R26). `fleet prime` and the item verbs then fall back
-  to a checkout (R24) and, where that finds no fleet, refuse (R25). `fleet
-  guard` follows its own spec where no file is found (R25). Where no file is
-  found, `fleet start` acts on `config.json`'s fleet from any working
-  directory; `fleet stop` resolves no fleet and acts from any working
-  directory (R28).
+  same way (R21 to R23). `fleet prime` and the item verbs refuse a declared
+  project the machine has not registered (R26, R35); `fleet start` reads it
+  all the same, and the guards' spec says what a guard reads there. `fleet
+  prime` and the item verbs then fall back to a checkout (R24) and, where
+  that finds no fleet, refuse (R25). `fleet guard` follows its own spec where
+  no file is found (R25). Where no file is found, `fleet start` acts on
+  `config.json`'s fleet from any working directory; `fleet stop` resolves no
+  fleet and acts from any working directory (R28).
 - A seat's session is handed `FLEET_DIR` naming the machine directory (R29);
   the seats area's spec cites that clause.
 - shared.exit-codes.R23 states the exit for a verb that finds no fleet (R25).

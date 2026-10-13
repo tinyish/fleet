@@ -6,9 +6,10 @@
 //! this fleet cannot resolve, a rules file that is not there and a store that
 //! will not answer each say so in their own words and the next part still
 //! prints. The fleet is found as every project verb finds it
-//! (shared.locations.R21 to R26); where it finds no fleet for this directory
-//! it refuses before anything prints, as every project verb refuses there
-//! (shared.locations.R25): exit 1, the line on stderr.
+//! (shared.locations.R21 to R26, R35); where it finds no fleet for this
+//! directory, or a declared project this machine has not registered, it
+//! refuses before anything prints, as every project verb refuses there
+//! (shared.locations.R25, R26, R35): exit 1, the line on stderr.
 //!
 //! Line 2 is the project's store as it names itself: its answer to the
 //! contract's `version`, through the opener every verb takes, and the adapter
@@ -47,11 +48,11 @@ pub fn command() -> Exit {
     let machine_dir = platform::machine_dir();
 
     // THE FLEET IS FOUND AS EVERY PROJECT VERB FINDS IT, through the one
-    // resolution they share (shared.locations.R21 to R26): an embedded
-    // fleet's own `fleet.toml`; for a declared project, the fleet's file
-    // `config.json` names; where the walk finds neither, that same file only
-    // inside a git checkout. Anywhere else that resolution's refusal is this
-    // verb's, said before anything prints.
+    // resolution they share (shared.locations.R21 to R26, R35): an embedded
+    // fleet's own `fleet.toml`; for a declared project the machine registers,
+    // the fleet's file `config.json` names; where the walk finds neither, that
+    // same file only inside a git checkout. Anywhere else that resolution's
+    // refusal is this verb's, said before anything prints.
     let fleet_toml = match fleet_controller::project::resolve_from(&cwd, machine_dir.clone(), None)
     {
         Ok(here) => here.policy_file,

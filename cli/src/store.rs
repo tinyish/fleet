@@ -93,7 +93,7 @@ fn check(adapter: Option<&str>) -> Exit {
     // The policy the store is opened with: `[store] adapter` naming what was
     // handed in; else the project's own file, where one resolves; else
     // nothing, which is the default name.
-    let here = project::resolve_at(None).ok();
+    let here = project::nearest(None);
     let mut policy = match (adapter, &here) {
         (None, Some(here)) => here.project.policy.clone(),
         _ => Default::default(),

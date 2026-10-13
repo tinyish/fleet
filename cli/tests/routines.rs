@@ -171,6 +171,7 @@ fn a_routine_run_from_a_declared_project_reads_the_fleet_the_machine_names() {
         &project.join(ROUTINES).join("stray.toml"),
         &ticking("stray.txt"),
     );
+    fleet_controller::lifecycle::register(&rig.machine(), &project, "demo").unwrap();
 
     let listed = rig.fleet_in(&project.join(ROUTINES), &["routine", "list"]);
     assert_eq!(listed.status.code(), Some(0), "{}", err(&listed));
@@ -186,10 +187,11 @@ fn a_routine_run_from_a_declared_project_reads_the_fleet_the_machine_names() {
 
 /// I5's refusal, by the way the walk ended: where the walk finds nothing and
 /// the machine names no fleet, that is a refusal, exit 1
-/// (shared.exit-codes.R23); inside a declared project it is still exit 3 until
-/// fleet-np9q. Inside a declared project the declaration wins over the
-/// `fleet.toml` beside it, so the line says the fleet is the machine's; where
-/// the walk found nothing, it says so.
+/// (shared.exit-codes.R23); inside a declared project it is the declaration's
+/// refusal, exit 1 (shared.locations.R26). Inside a declared project the
+/// declaration wins over the `fleet.toml` beside it, so the line names the
+/// declaration and the machine's `config.json`; where the walk found nothing,
+/// it says so.
 #[test]
 fn a_fleet_nobody_names_refuses_and_says_whether_a_project_was_declared() {
     let rig = Rig::new("unnamed");
@@ -203,12 +205,14 @@ fn a_fleet_nobody_names_refuses_and_says_whether_a_project_was_declared() {
     write(&project.join("fleet.toml"), "[tool]\nname = \"other\"\n");
 
     let declared = rig.fleet_in(&project, &["routine", "list"]);
-    assert_eq!(declared.status.code(), Some(3), "{}", err(&declared));
+    assert_eq!(declared.status.code(), Some(1), "{}", err(&declared));
     assert_eq!(
         err(&declared),
         format!(
-            "fleet routine list: this project is declared, so its fleet is the machine's, \
-             and none is named by {}\n",
+            "fleet routine list: {} declares a project, and {} names no fleet whose policy \
+             file is there to run it under — `fleet create --standalone --fleet <dir>` \
+             registers it with one\n",
+            std::fs::canonicalize(&project).unwrap().display(),
             config.display()
         )
     );

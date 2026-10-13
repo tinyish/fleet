@@ -1089,6 +1089,10 @@ fn line_two_reads_the_adapter_the_project_names() {
             &format!("project/{file}"),
             &naming_adapter(&text_of(&adapter)),
         );
+        if file == ".fleet/project.toml" {
+            fleet_controller::lifecycle::register(&fleet_dir, &s.dir("project"), "project")
+                .expect("the declared project is registered");
+        }
 
         let out = prime(&under, &fleet_dir, &[]);
         assert_eq!(
@@ -1107,6 +1111,66 @@ fn line_two_reads_the_adapter_the_project_names() {
             "{label}: no row names this directory: {text}"
         );
     }
+}
+
+/// shared.locations.R26, R35: a declaration on a machine that names no fleet,
+/// and then one the machine's register does not list, is refused under the
+/// verb's name on stderr, exit 1, with nothing on stdout. The same tree
+/// registered is primed.
+#[test]
+fn a_declared_project_the_machine_does_not_register_is_refused() {
+    let s = Scratch::new("declared-unregistered");
+    s.shipped_defaults();
+    let project = s.dir("project");
+    let fleet_dir = s.dir("fleet-dir");
+    s.write(
+        "project/.fleet/project.toml",
+        "[project]\nname = \"project\"\n",
+    );
+    let here = std::fs::canonicalize(&project).expect("the project resolves");
+
+    let out = prime(&project, &fleet_dir, &[]);
+    let said = utf8(out.stderr.clone());
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout)
+    );
+    assert!(
+        said.starts_with(&format!(
+            "fleet prime: {} declares a project, and {} names no fleet whose policy file is \
+             there to run it under — `fleet create --standalone --fleet <dir>` registers it \
+             with one",
+            here.display(),
+            fleet_dir.join("config.json").display()
+        )),
+        "{said}"
+    );
+
+    a_named_fleet(&s);
+    let out = prime(&project, &fleet_dir, &[]);
+    let said = utf8(out.stderr.clone());
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout)
+    );
+    assert!(
+        said.starts_with(&format!(
+            "fleet prime: {} declares a project that {} does not list — \
+             `fleet create --standalone` registers it",
+            here.display(),
+            fleet_dir.join("projects.toml").display()
+        )),
+        "{said}"
+    );
+
+    fleet_controller::lifecycle::register(&fleet_dir, &project, "project")
+        .expect("the project is registered");
+    let out = prime(&project, &fleet_dir, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", utf8(out.stderr));
 }
 
 /// fleet-wpf0.3: a store that cannot be opened, or will not answer, is line

@@ -1176,12 +1176,9 @@ fn a_fleet_root_inside_an_embedded_fleet_is_that_directory() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// I5: a directory declaring itself a project is the machine's fleet's, even
-/// where a `fleet.toml` some other tool wrote sits beside the declaration.
-#[test]
-fn a_fleet_root_inside_a_declared_project_is_the_fleet_the_machine_names() {
-    let dir = scratch("root-declared");
-    let (machine, fleet) = a_machine_naming_a_fleet(&dir);
+/// A declared project at `project` under `dir`, with a `fleet.toml` some other
+/// tool wrote beside the declaration and an `orders` directory to start from.
+fn a_declared_project(dir: &Path) -> PathBuf {
     let project = dir.join("project");
     write(
         &project.join(".fleet").join("project.toml"),
@@ -1189,11 +1186,42 @@ fn a_fleet_root_inside_a_declared_project_is_the_fleet_the_machine_names() {
     );
     write(&project.join("fleet.toml"), "[tool]\nname = \"other\"\n");
     std::fs::create_dir_all(project.join("orders")).unwrap();
+    project
+}
+
+/// I5: a directory declaring itself a project the machine registers is the
+/// machine's fleet's, even where a `fleet.toml` some other tool wrote sits
+/// beside the declaration.
+#[test]
+fn a_fleet_root_inside_a_declared_project_is_the_fleet_the_machine_names() {
+    let dir = scratch("root-declared");
+    let (machine, fleet) = a_machine_naming_a_fleet(&dir);
+    let project = a_declared_project(&dir);
+    fleet_controller::lifecycle::register(&machine, &project, "demo").unwrap();
 
     assert_eq!(
         load::fleet_root(Some(&project.join("orders")), &machine),
         Ok(fleet)
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// shared.locations.R35: a declared project the machine does not register is
+/// refused, exit 1, naming the declaration's directory, and is never the
+/// machine's fleet.
+#[test]
+fn a_fleet_root_inside_an_unregistered_declaration_is_refused() {
+    let dir = scratch("root-unregistered");
+    let (machine, _) = a_machine_naming_a_fleet(&dir);
+    let project = a_declared_project(&dir);
+
+    match load::fleet_root(Some(&project.join("orders")), &machine) {
+        Err(load::NoFleet::Refused(1, why)) => assert!(
+            why.starts_with(&format!("{} declares a project that ", project.display())),
+            "{why}"
+        ),
+        other => panic!("the declaration is refused: {other:?}"),
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

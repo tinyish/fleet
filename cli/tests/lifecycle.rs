@@ -3182,6 +3182,42 @@ fn start_runs_outside_every_project_when_the_seat_list_names_a_fleet() {
     assert!(stderr(&out).contains("fleet create"), "{}", stderr(&out));
 }
 
+/// shared.locations.R28: `fleet start` acts from any directory, and the
+/// register's refusal of a declared project (R35) is the project verbs', not
+/// its: run from a declaration the machine has not registered, it starts and
+/// keys its rows on that declaration, as it always has.
+#[test]
+fn start_from_a_declaration_the_machine_does_not_register_still_starts() {
+    let rig = Rig::new("start-unregistered");
+    rig.created();
+    assert_eq!(code(&rig.run(&["start"])), 0);
+    assert_eq!(code(&rig.run(&["stop"])), 0);
+
+    let by_hand = rig.root.join("by-hand");
+    let worktrees = rig.root.join("by-hand-elsewhere");
+    write(
+        &by_hand.join(".fleet/project.toml"),
+        &standalone_text("by-hand", Some("bh"), &by_hand, &worktrees),
+    );
+    let out = rig
+        .command(&["start"])
+        .current_dir(&by_hand)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!("rows keyed on by-hand at {}", worktrees.display())),
+        "the rows are keyed on the declaration: {}",
+        stderr(&out)
+    );
+    let stopped = rig
+        .command(&["stop"])
+        .current_dir(&by_hand)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+}
+
 /// An embedded fleet INSIDE a registered project renders its seat rows under
 /// THAT project and not under the fleet's own directory.
 ///

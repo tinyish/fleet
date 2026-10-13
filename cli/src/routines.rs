@@ -116,8 +116,9 @@ struct Fleet {
 
 /// Resolve the machine and load every routine on it. `Err` is the exit and the
 /// line, never an empty registry: a fleet nothing on this box names is a
-/// refusal (shared.exit-codes.R23); a declared project whose fleet is unnamed,
-/// and a policy that will not read, are could-not-tell.
+/// refusal (shared.exit-codes.R23); a declared project the machine does not
+/// run is the gate's refusal (shared.locations.R26, R35); a policy that will
+/// not read is could-not-tell.
 fn resolve() -> Result<Fleet, (Exit, String)> {
     let machine_dir = platform::machine_dir();
     let fleet_root = match load::fleet_root(None, &machine_dir) {
@@ -131,15 +132,7 @@ fn resolve() -> Result<Fleet, (Exit, String)> {
                 ),
             ))
         }
-        Err(load::NoFleet::Declared) => {
-            return Err((
-                Exit::CouldNotTell,
-                format!(
-                "this project is declared, so its fleet is the machine's, and none is named by {}",
-                config::path_in(&machine_dir).display()
-            ),
-            ))
-        }
+        Err(load::NoFleet::Refused(code, why)) => return Err((Exit::of(code), why)),
     };
     let seats = config::read(&config::path_in(&machine_dir))
         .map(|machine| machine.seats)

@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use fleet_controller::lifecycle::{self, FirstRun, Mode, ProjectAt};
-use fleet_controller::project::{derived_worktrees_dir, resolve_at, resolve_from};
+use fleet_controller::project::{derived_worktrees_dir, nearest, nearest_from};
 use fleet_core::agent::{self, Agent};
 
 use fleet_controller::{clock, config, events, platform, policy as controller};
@@ -1144,8 +1144,8 @@ struct Fleet {
 }
 
 impl Fleet {
-    /// EMBEDDED FIRST, then standalone, then neither — the same order the item
-    /// verbs and the guards resolve in.
+    /// EMBEDDED FIRST, then standalone, registered or not ([`nearest`], R28),
+    /// then neither — the same order the item verbs and the guards resolve in.
     ///
     /// THE REFUSAL IS A CONJUNCTION. A directory that resolves to no project is
     /// not by itself a fleetless one: a standalone fleet's policy is the file
@@ -1153,7 +1153,7 @@ impl Fleet {
     /// is no policy file above the cwd AND no seat list naming one.
     fn resolve() -> Result<Fleet, Stop> {
         let machine_dir = platform::machine_dir();
-        let here = resolve_at(None).ok();
+        let here = nearest(None);
         let embedded = here
             .as_ref()
             .map(|here| here.project.root.join(lifecycle::FLEET_TOML))
@@ -1197,9 +1197,9 @@ impl Fleet {
 /// directory is not a containing one — that is the standalone case the cwd
 /// already answers.
 ///
-/// A registered root is matched by its spelling as the register holds it, so a
-/// root reached through a symlink the register does not spell is one this reader
-/// will not match.
+/// A registered root is matched by the register's spelling (a symlink it does
+/// not spell is not matched), and read as [`nearest_from`] reads it: a machine
+/// naming no fleet never refuses the start that only borrows its key.
 fn host_project(machine_dir: &Path, fleet_toml: &Path) -> Result<Option<(String, PathBuf)>, Stop> {
     let Some(dir) = fleet_toml.parent() else {
         return Ok(None);
@@ -1214,7 +1214,7 @@ fn host_project(machine_dir: &Path, fleet_toml: &Path) -> Result<Option<(String,
     let Some(root) = containing else {
         return Ok(None);
     };
-    let there = resolve_from(&root, machine_dir.to_path_buf(), None)?;
+    let there = nearest_from(&root, machine_dir.to_path_buf(), None)?;
     Ok(Some((there.project.name.clone(), there.worktrees_dir()?)))
 }
 

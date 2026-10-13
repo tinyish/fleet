@@ -1204,6 +1204,8 @@ fn a_declaration_beside_a_fleet_toml_resolves_standalone() {
         ),
     )
     .expect("the declaration is written");
+    fleet_controller::lifecycle::register(&rig.machine, &rig.project, "a-declared-project")
+        .expect("the declaration is registered, as `fleet create --standalone` registers it");
 
     let spawned = rig.run(&[
         "seat",

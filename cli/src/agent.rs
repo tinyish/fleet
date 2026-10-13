@@ -188,12 +188,12 @@ fn check(
     // the packs that project's machine installs; else this machine's, and no
     // setting, which is the default name.
     let machine_dir = platform::machine_dir();
-    let mut setting = match project::resolve_at(None) {
-        Ok(here) => match here.agent_setting() {
+    let mut setting = match project::nearest(None) {
+        Some(here) => match here.agent_setting() {
             Ok(setting) => setting,
             Err(why) => return say("agent check", Exit::CouldNotTell, why),
         },
-        Err(_) => agent::Setting::of(
+        None => agent::Setting::of(
             Default::default(),
             &scratch.dir.join("fleet.toml"),
             &machine_dir,

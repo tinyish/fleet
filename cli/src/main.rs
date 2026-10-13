@@ -376,8 +376,8 @@ session-start hook that fails closed takes the session down with it, so a part
 that cannot be read says so in its own line and the next part still prints.
 
 Where it finds no fleet for this directory (outside a git checkout, the
-machine's fleet is not one) it refuses with exit 1, on stderr, and prints
-nothing.")]
+machine's fleet is not one), or a declared project this machine has not
+registered, it refuses with exit 1, on stderr, and prints nothing.")]
     Prime,
 }
 

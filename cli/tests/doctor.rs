@@ -1287,29 +1287,192 @@ fn a_packs_entry_does_not_shadow_a_built_in_row() {
     assert!(!marker.exists(), "the pack's entry did not run");
 }
 
-/// A declared project on a machine that names no fleet: the agent row could
-/// not tell, saying why the fleet's own file does not read, and the store,
-/// which the project's own file names, still answers.
+/// shared.locations.R26: a declared project on a machine that names no fleet
+/// is refused before any check runs, naming the directory, the machine's
+/// `config.json` and the command that registers the project.
 #[test]
-fn a_project_with_no_fleet_could_not_tell_the_agent() {
+fn a_declared_project_on_a_machine_that_names_no_fleet_is_refused() {
     let rig = Rig::new("no-fleet", CONFIGURED);
     let declared = rig.root.join("declared");
     write(&declared.join(".fleet/project.toml"), CONFIGURED);
     common::take_a_store(&declared);
 
     let out = rig.doctor_in(&declared, &["store-adapter", "agent-adapter"]);
-    let said = stdout(&out);
-    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
-    let missing = rig.machine.join("fleet.toml");
-    assert!(
-        row(&said, "agent-adapter (built-in)").starts_with(&format!(
-            "could not tell agent-adapter (built-in) — {} could not be read",
-            missing.display()
-        )),
-        "{said}"
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
     );
+    assert!(stdout(&out).is_empty(), "no check ran: {}", stdout(&out));
+    let here = std::fs::canonicalize(&declared).expect("the declared project resolves");
+    assert!(
+        stderr(&out).starts_with(&format!(
+            "fleet doctor: {} declares a project, and {} names no fleet whose policy file \
+             is there to run it under — `fleet create --standalone --fleet <dir>` registers \
+             it with one",
+            here.display(),
+            rig.machine.join("config.json").display()
+        )),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// A machine `config.json` naming the rig's own policy file: a fleet is named,
+/// so what decides a declared project is the register.
+fn names_the_rigs_fleet(rig: &Rig) {
+    write(
+        &rig.machine.join("config.json"),
+        &format!(
+            "{{\"fleet_toml\": {}, \"children\": []}}",
+            serde_json::Value::String(rig.project.join("fleet.toml").display().to_string())
+        ),
+    );
+}
+
+/// The R35 refusal line for a declaration at `here`, as `fleet doctor` says it.
+fn unregistered_line(rig: &Rig, here: &Path) -> String {
+    format!(
+        "fleet doctor: {} declares a project that {} does not list — \
+         `fleet create --standalone` registers it",
+        here.display(),
+        rig.machine.join("projects.toml").display()
+    )
+}
+
+/// shared.locations.R22, R35: a declared project the machine's register does
+/// not list is refused, naming the register and the command that registers
+/// it, under --json as one refusal; the same project registered is checked.
+/// On macOS the register holds the temp dir's `/var` spelling and the walk
+/// reads `/private/var`, so the registered arm is also the check that one
+/// directory under two spellings is one root.
+#[test]
+fn a_declared_project_is_checked_only_once_the_machine_registers_it() {
+    let rig = Rig::new("unregistered", CONFIGURED);
+    names_the_rigs_fleet(&rig);
+    let declared = rig.root.join("declared");
+    write(&declared.join(".fleet/project.toml"), CONFIGURED);
+    common::take_a_store(&declared);
+    let here = std::fs::canonicalize(&declared).expect("the declared project resolves");
+
+    let out = rig.doctor_in(&declared, &["store-adapter"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).is_empty(), "no check ran: {}", stdout(&out));
+    assert!(
+        stderr(&out).starts_with(&unregistered_line(&rig, &here)),
+        "{}",
+        stderr(&out)
+    );
+
+    let json = rig.doctor_in(&declared, &["store-adapter", "--json"]);
+    assert_eq!(json.status.code(), Some(1), "{}", stderr(&json));
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout(&json)).expect("the document parses");
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["refusal"]["code"], "refused");
+
+    fleet_controller::lifecycle::register(&rig.machine, &declared, "declared")
+        .expect("the project is registered, as `fleet create --standalone` registers it");
+    let out = rig.doctor_in(&declared, &["store-adapter"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
     assert!(
         row(&said, "store-adapter (built-in)").starts_with("pass "),
         "{said}"
+    );
+}
+
+/// shared.locations.R22, R35: a seat's worktree carries its own copy of a
+/// committed declaration, and the register lists the primary checkout and
+/// never the worktree. The copy is admitted where the register lists the
+/// `[project] primary` it names, matched as a directory (the declaration
+/// names it canonically, the register by the temp dir's spelling); it is
+/// refused, naming the worktree, where that primary is not listed, and where
+/// the declaration names no primary at all.
+#[test]
+fn a_worktree_s_declaration_is_admitted_by_the_primary_it_names() {
+    let rig = Rig::new("worktree-copy", CONFIGURED);
+    names_the_rigs_fleet(&rig);
+    let primary = rig.root.join("primary");
+    let elsewhere = rig.root.join("elsewhere");
+    std::fs::create_dir_all(&primary).expect("the primary is made");
+    std::fs::create_dir_all(&elsewhere).expect("the other checkout is made");
+    fleet_controller::lifecycle::register(&rig.machine, &primary, "primary")
+        .expect("the primary is registered");
+    let canonical = |dir: &Path| std::fs::canonicalize(dir).expect("the directory resolves");
+
+    for (label, named, admitted) in [
+        ("registered", Some(canonical(&primary)), true),
+        ("unregistered", Some(canonical(&elsewhere)), false),
+        ("none", None, false),
+    ] {
+        let worktree = rig.root.join(format!("worktree-{label}"));
+        let line = named.map_or(String::new(), |dir| {
+            format!(
+                "primary = {}\n",
+                serde_json::Value::String(dir.display().to_string())
+            )
+        });
+        write(
+            &worktree.join(".fleet/project.toml"),
+            &format!("{CONFIGURED}{line}"),
+        );
+        common::take_a_store(&worktree);
+
+        let out = rig.doctor_in(&worktree, &["store-adapter"]);
+        if admitted {
+            let said = stdout(&out);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{label}: {said}{}",
+                stderr(&out)
+            );
+            assert!(
+                row(&said, "store-adapter (built-in)").starts_with("pass "),
+                "{label}: {said}"
+            );
+        } else {
+            assert_eq!(out.status.code(), Some(1), "{label}: {}", stderr(&out));
+            assert!(
+                stderr(&out).starts_with(&unregistered_line(&rig, &canonical(&worktree))),
+                "{label}: {}",
+                stderr(&out)
+            );
+        }
+    }
+}
+
+/// A register that does not read is not an answer either way: could not
+/// tell (shared.exit-codes.R4), naming why.
+#[test]
+fn a_register_that_does_not_read_could_not_tell() {
+    let rig = Rig::new("register-unread", CONFIGURED);
+    names_the_rigs_fleet(&rig);
+    write(&rig.machine.join("projects.toml"), "[[project]\nnot toml");
+    let declared = rig.root.join("declared");
+    write(&declared.join(".fleet/project.toml"), CONFIGURED);
+
+    let out = rig.doctor_in(&declared, &["store-adapter"]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out)
+            .starts_with("fleet doctor: the projects this machine registers could not be read: "),
+        "{}",
+        stderr(&out)
     );
 }

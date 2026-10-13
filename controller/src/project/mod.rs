@@ -48,8 +48,7 @@ impl Here {
     /// a different directory per call.
     pub fn primary(&self) -> Result<PathBuf, Stop> {
         let named = fleet_core::policy::read("project", "primary", &self.project.policy);
-        Ok(self
-            .under_root("primary", named)?
+        Ok(under_root(&self.project.root, "primary", named)?
             .unwrap_or_else(|| self.project.root.clone()))
     }
 
@@ -58,8 +57,7 @@ impl Here {
     /// with `-worktrees` appended.
     pub fn worktrees_dir(&self) -> Result<PathBuf, Stop> {
         let named = fleet_core::policy::read("project", "worktrees", &self.project.policy);
-        Ok(self
-            .under_root("worktrees", named)?
+        Ok(under_root(&self.project.root, "worktrees", named)?
             .unwrap_or_else(|| derived_worktrees_dir(&self.project.root)))
     }
 
@@ -79,48 +77,48 @@ impl Here {
             ..setting
         })
     }
+}
 
-    /// One census answer as a path, with each of the reader's three answers kept
-    /// apart.
-    ///
-    /// An `Err` is the CENSUS refusing the pair, which is a defect in this
-    /// call site and never a value — so it is could-not-tell rather than the
-    /// derived fallback. A value that is present and is not a usable string is
-    /// a refusal naming the key: a `[project]` that declares a worktrees
-    /// directory and has it silently ignored cuts a seat's checkout somewhere
-    /// other than where the project says it goes. Only ABSENT falls back.
-    ///
-    /// A blank string is no value, and a relative one is read against the
-    /// project root: the file it is written in sits there, so reading it against
-    /// the caller's cwd would name a different directory per call.
-    fn under_root(
-        &self,
-        key: &str,
-        value: Result<Option<&fleet_core::policy::Value>, fleet_core::policy::Unlisted>,
-    ) -> Result<Option<PathBuf>, Stop> {
-        let value = value.map_err(|unlisted| Stop::could_not_tell(unlisted.to_string()))?;
-        let Some(value) = value else {
-            return Ok(None);
-        };
-        let Some(named) = value.as_str() else {
-            return Err(Stop::refused(format!(
-                "`[project] {key}` in {} is {}, and a path has to be a string — this verb will \
-                 not fall back to a directory the project did not name",
-                self.project.root.display(),
-                value.type_str()
-            )));
-        };
-        let named = named.trim();
-        if named.is_empty() {
-            return Ok(None);
-        }
-        let path = PathBuf::from(named);
-        Ok(Some(if path.is_absolute() {
-            path
-        } else {
-            self.project.root.join(path)
-        }))
+/// One census answer as a path under a project `root`, with each of the
+/// reader's three answers kept apart.
+///
+/// An `Err` is the CENSUS refusing the pair, which is a defect in this
+/// call site and never a value — so it is could-not-tell rather than the
+/// derived fallback. A value that is present and is not a usable string is
+/// a refusal naming the key: a `[project]` that declares a worktrees
+/// directory and has it silently ignored cuts a seat's checkout somewhere
+/// other than where the project says it goes. Only ABSENT falls back.
+///
+/// A blank string is no value, and a relative one is read against the
+/// project root: the file it is written in sits there, so reading it against
+/// the caller's cwd would name a different directory per call.
+fn under_root(
+    root: &Path,
+    key: &str,
+    value: Result<Option<&fleet_core::policy::Value>, fleet_core::policy::Unlisted>,
+) -> Result<Option<PathBuf>, Stop> {
+    let value = value.map_err(|unlisted| Stop::could_not_tell(unlisted.to_string()))?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(named) = value.as_str() else {
+        return Err(Stop::refused(format!(
+            "`[project] {key}` in {} is {}, and a path has to be a string — this verb will \
+             not fall back to a directory the project did not name",
+            root.display(),
+            value.type_str()
+        )));
+    };
+    let named = named.trim();
+    if named.is_empty() {
+        return Ok(None);
     }
+    let path = PathBuf::from(named);
+    Ok(Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }))
 }
 
 /// Where a seat's worktree goes when no `[project] worktrees` names one: a
@@ -228,35 +226,87 @@ pub fn resolve_at(chosen_packs_dir: Option<PathBuf>) -> Result<Here, Stop> {
     resolve_from(&cwd, platform::machine_dir(), chosen_packs_dir)
 }
 
+/// The project this directory reads as, REGISTERED OR NOT, or none: for the
+/// verbs that act without a project and only borrow one's settings where it
+/// is here. `fleet start` keys its seat rows on it (it acts from any
+/// directory, shared.locations.R28), and `fleet store check` and
+/// `fleet agent check` read its adapter. A declaration the machine has not
+/// registered refuses the verbs that act in a project (R26, R35), and none of
+/// these is one, so each reads the directory as it always has.
+pub fn nearest(chosen_packs_dir: Option<PathBuf>) -> Option<Here> {
+    let cwd = std::env::current_dir().ok()?;
+    nearest_from(&cwd, platform::machine_dir(), chosen_packs_dir).ok()
+}
+
+/// [`nearest`]'s reading from a directory and a machine directory the caller
+/// names: `fleet start` reads the registered project its fleet sits inside
+/// this way, so a start is never refused for the project it only borrows.
+pub fn nearest_from(
+    cwd: &Path,
+    machine_dir: PathBuf,
+    chosen_packs_dir: Option<PathBuf>,
+) -> Result<Here, Stop> {
+    walk_from(cwd, machine_dir, chosen_packs_dir, Admit::Any)
+}
+
+/// Whether the walk holds a declared project to the machine's register.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Admit {
+    /// Every verb that acts in a project (shared.locations.R22, R26, R35).
+    Registered,
+    /// A verb that only borrows a project's settings where one is here.
+    Any,
+}
+
 /// The same walk, from a directory and a machine directory the CALLER names
 /// rather than from its own.
 ///
 /// The tick takes this one: a controller started as a service has no working
 /// directory to resolve a project from, and the directory it names is one the
-/// machine registers.
+/// machine registers. A declared project is admitted only where the machine
+/// registers it ([`admit_declared`]).
 ///
 /// THE MACHINE DIRECTORY IS AN ARGUMENT AND NOT AN ENVIRONMENT READ. Everything
 /// this walk derives from it — the machine config, the guards, the policy file,
 /// the seats and the packs directory — is the CALLER's machine directory, so a
 /// caller that already holds one (the [`crate::runs::Engine`] does) resolves
 /// under that one and not under whatever `FLEET_DIR` this process happens to
-/// carry. `resolve_at` above is the single site that asks the environment.
+/// carry. `resolve_at` and [`nearest`] are the only sites that ask the
+/// environment.
 pub fn resolve_from(
     cwd: &Path,
     machine_dir: PathBuf,
     chosen_packs_dir: Option<PathBuf>,
+) -> Result<Here, Stop> {
+    walk_from(cwd, machine_dir, chosen_packs_dir, Admit::Registered)
+}
+
+fn walk_from(
+    cwd: &Path,
+    machine_dir: PathBuf,
+    chosen_packs_dir: Option<PathBuf>,
+    admit: Admit,
 ) -> Result<Here, Stop> {
     let cwd = cwd.to_path_buf();
     let machine = config::read(&config::path_in(&machine_dir));
 
     if let Some(found) = walk_up_config(&cwd) {
         if let Some(dir) = found.root() {
-            return Ok(match &found {
-                Found::Declared(_) => declared_at(dir, &machine, &machine_dir, &chosen_packs_dir),
-                Found::Embedded(file) => {
-                    embedded_at(dir, file, &machine, &machine_dir, &chosen_packs_dir)
+            return match &found {
+                Found::Declared(_) => {
+                    if admit == Admit::Registered {
+                        admit_declared(dir, &machine_dir)?;
+                    }
+                    Ok(declared_at(dir, &machine, &machine_dir, &chosen_packs_dir))
                 }
-            });
+                Found::Embedded(file) => Ok(embedded_at(
+                    dir,
+                    file,
+                    &machine,
+                    &machine_dir,
+                    &chosen_packs_dir,
+                )),
+            };
         }
     }
 
@@ -297,6 +347,68 @@ pub fn resolve_from(
         "no `{FLEET_TOML}` and no `{PROJECT_TOML}` above {} — `fleet create` writes one",
         cwd.display()
     )))
+}
+
+/// A declared project is acted in only where this machine runs a fleet for
+/// it and registers it: `config.json` names a policy file that is there
+/// (shared.locations.R26), and `projects.toml` lists the directory as a
+/// project's root (R35). Each refusal names the file that lacks it and the
+/// command that registers the project; a register that will not read is
+/// could-not-tell (shared.exit-codes.R4), never a guess either way.
+///
+/// A SEAT'S WORKTREE IS ADMITTED BY ITS PRIMARY. A committed declaration is
+/// copied into every worktree cut from the project, and the register lists
+/// the primary checkout, never the worktree, so the copy counts where the
+/// register lists the `[project] primary` it names (R22). A primary that is
+/// not a usable path names no checkout here.
+///
+/// THE ROOT IS MATCHED AS A DIRECTORY, NOT A SPELLING: the register holds the
+/// spelling `fleet create` was run under, and one directory reached two ways
+/// is one project. Canonicalizing reads and creates nothing (N1).
+pub fn admit_declared(dir: &Path, machine_dir: &Path) -> Result<(), Stop> {
+    let seat_list = config::path_in(machine_dir);
+    let named = config::read(&seat_list).is_ok_and(|machine| machine.fleet_toml.is_file());
+    if !named {
+        return Err(Stop::refused(format!(
+            "{} declares a project, and {} names no fleet whose policy file is there to run \
+             it under — `fleet create --standalone --fleet <dir>` registers it with one",
+            dir.display(),
+            seat_list.display()
+        )));
+    }
+    let registered = crate::lifecycle::registered(machine_dir).map_err(|why| {
+        Stop::could_not_tell(format!(
+            "the projects this machine registers could not be read: {why}"
+        ))
+    })?;
+    let declaration = table_at(&dir.join(PROJECT_TOML));
+    let primary = fleet_core::policy::read("project", "primary", &declaration);
+    let primary = under_root(dir, "primary", primary).ok().flatten();
+    let listed = registered.iter().any(|project| {
+        let root = Path::new(&project.root);
+        same_dir(root, dir)
+            || primary
+                .as_deref()
+                .is_some_and(|primary| same_dir(root, primary))
+    });
+    if !listed {
+        return Err(Stop::refused(format!(
+            "{} declares a project that {} does not list — `fleet create --standalone` \
+             registers it",
+            dir.display(),
+            machine_dir.join(crate::lifecycle::PROJECTS).display()
+        )));
+    }
+    Ok(())
+}
+
+/// One directory, however it is spelled.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 /// A project that declares itself. THE GUARDS ARE THE FLEET'S DECLARATION AND
