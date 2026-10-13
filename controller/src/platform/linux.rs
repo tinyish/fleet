@@ -47,11 +47,18 @@ pub const SERVICE_BIN: &str = "systemctl";
 /// the gate reads `ok` without probing (lessons claude-code D4).
 pub const GRANT_IS_GATED: bool = false;
 
-/// The unit file under the user's own unit directory. It always tells the
+/// The unit file under the user's own unit directory, which follows
+/// `XDG_CONFIG_HOME` where it is set. It always tells the
 /// service the machine directory (`FLEET_DIR`), and no `PATH` is written: the
 /// controller constructs its children's search path, and one frozen here at
 /// install time is what every later session inherits (lessons claude-code D1).
-pub fn service_file(home: &Path, label: &str, exe: &Path, machine_dir: &Path) -> ServiceFile {
+pub fn service_file(
+    home: &Path,
+    config_home: Option<&Path>,
+    label: &str,
+    exe: &Path,
+    machine_dir: &Path,
+) -> ServiceFile {
     // Always, and quoted: see the macOS writer for why the directory is told,
     // and `assignment_value` for why it is quoted.
     let environment = format!(
@@ -75,13 +82,19 @@ pub fn service_file(home: &Path, label: &str, exe: &Path, machine_dir: &Path) ->
         machine = machine_dir.display(),
     );
     ServiceFile {
-        path: home
-            .join(".config")
-            .join("systemd")
-            .join("user")
-            .join(format!("{label}.service")),
+        path: unit_dir(home, config_home).join(format!("{label}.service")),
         text,
     }
+}
+
+/// Where the user's own service manager reads a user's units: under
+/// `XDG_CONFIG_HOME` where it is set, under the home's `.config` where it is
+/// not (shared.locations R19).
+fn unit_dir(home: &Path, config_home: Option<&Path>) -> PathBuf {
+    config_home
+        .map_or_else(|| home.join(".config"), Path::to_path_buf)
+        .join("systemd")
+        .join("user")
 }
 
 /// A path inside a double-quoted `Environment=` assignment: a backslash and a

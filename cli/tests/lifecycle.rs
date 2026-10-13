@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::hermetic::Hermetic;
-use common::hermetic::{FLEET_DIR, FLEET_HOME, XDG_STATE_HOME};
+use common::hermetic::{FLEET_DIR, FLEET_HOME, XDG_CONFIG_HOME, XDG_STATE_HOME};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -2323,6 +2323,54 @@ fn a_start_under_xdg_state_home_tells_the_service_what_this_platform_resolved() 
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = std::fs::read_to_string(rig.service_file()).expect("the service file reads");
     assert!(sets_fleet_dir(&text, &rig.machine), "{text}");
+}
+
+/// shared.locations R18, R19: the service file follows XDG_CONFIG_HOME on
+/// Linux and only there. Each box asserts its own platform's answer.
+#[test]
+fn the_service_file_follows_xdg_config_home_on_linux_alone() {
+    let rig = Rig::new("xdg-config");
+    rig.created();
+    let config = rig.root.join("config");
+    let out = rig.run_in_env(&["start"], &[(XDG_CONFIG_HOME, &config)], &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let unit = config.join("systemd/user/dev.fleet.controller.service");
+    if cfg!(target_os = "linux") {
+        assert!(
+            unit.is_file(),
+            "the unit is under XDG_CONFIG_HOME: {}",
+            unit.display()
+        );
+        assert!(
+            !rig.home
+                .join(".config/systemd/user/dev.fleet.controller.service")
+                .exists(),
+            "no unit under the home's .config while XDG_CONFIG_HOME is set"
+        );
+    } else {
+        assert!(
+            rig.home
+                .join("Library/LaunchAgents/dev.fleet.controller.plist")
+                .is_file(),
+            "the agent file is under HOME whatever XDG_CONFIG_HOME says"
+        );
+        assert!(
+            !config.exists(),
+            "nothing is written under XDG_CONFIG_HOME on macOS"
+        );
+    }
+}
+
+/// shared.locations R1 for XDG_CONFIG_HOME: spaces only counts as unset, so
+/// the file is where it is with no XDG_CONFIG_HOME at all, under the home.
+#[test]
+fn a_blank_xdg_config_home_counts_as_unset() {
+    let rig = Rig::new("xdg-config-blank");
+    rig.created();
+    let out = rig.run_in_env(&["start"], &[(XDG_CONFIG_HOME, Path::new("  "))], &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let file = rig.service_file();
+    assert!(file.starts_with(&rig.home), "{}", file.display());
 }
 
 /// The first run's own idempotence: a second start repeats none of it and says

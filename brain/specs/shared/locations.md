@@ -107,15 +107,17 @@ user's journal instead of a file, so the machine directory holds no
 
 `fleet start` installs the controller as a user service, in the directory
 where the platform's service manager looks for a user's own services. That
-directory is under `HOME`, whatever the machine directory is:
+directory never moves with the machine directory:
 
 | Platform | Service file |
 | --- | --- |
 | macOS | `Library/LaunchAgents/dev.fleet.controller.plist` under `HOME` |
-| Linux | `.config/systemd/user/dev.fleet.controller.service` under `HOME` |
+| Linux | `systemd/user/dev.fleet.controller.service` under `XDG_CONFIG_HOME` where it is set, else `.config/systemd/user/dev.fleet.controller.service` under `HOME` |
 
-The Linux path ignores `XDG_CONFIG_HOME`, even though a user service manager
-with `XDG_CONFIG_HOME` set elsewhere does not look there.
+On Linux the user's service manager reads its units from under
+`XDG_CONFIG_HOME` when that is set, so the unit goes there. A relative
+`XDG_CONFIG_HOME` counts as unset, because the service manager ignores one
+too. macOS has no such variable: its agents directory is always under `HOME`.
 
 The service file always sets `FLEET_DIR` for the service, to the machine
 directory the `fleet start` that wrote it resolved, whichever variable
@@ -198,14 +200,12 @@ what fleet does today, with a `Changing:` line after each one.
   directory. Only `fleet prime` changes.
 - **No lock file in a checkout** (fleet-hn6e). The locks for a project's files
   live in the machine directory, keyed by the project.
-- **On Linux, the unit follows `XDG_CONFIG_HOME`** (fleet-r0xz), where it is
-  set.
 
 ## Behaviour
 
-- **shared.locations.R1**: IF `FLEET_DIR`, `FLEET_HOME`, `HOME` or
-  `XDG_STATE_HOME` is set to an empty value or to spaces only, THEN fleet
-  SHALL treat it as unset everywhere in this spec.
+- **shared.locations.R1**: IF `FLEET_DIR`, `FLEET_HOME`, `HOME`,
+  `XDG_STATE_HOME` or `XDG_CONFIG_HOME` is set to an empty value or to spaces
+  only, THEN fleet SHALL treat it as unset everywhere in this spec.
 - **shared.locations.R2**: WHILE `FLEET_DIR` is set, fleet SHALL use the
   directory it names as the machine directory, whatever `FLEET_HOME`, `HOME`
   and `XDG_STATE_HOME` say.
@@ -270,10 +270,11 @@ what fleet does today, with a `Changing:` line after each one.
   `FLEET_DIR` and `FLEET_HOME` say.
 - **shared.locations.R19**: WHERE the platform is Linux, WHEN `fleet start`
   installs the controller's service, fleet SHALL write its file at
-  `.config/systemd/user/dev.fleet.controller.service` under `HOME`, whatever
-  `FLEET_DIR`, `FLEET_HOME`, `XDG_STATE_HOME` and `XDG_CONFIG_HOME` say.
-  Changing: fleet-r0xz: where `XDG_CONFIG_HOME` is set, the file is
-  `systemd/user/dev.fleet.controller.service` under `XDG_CONFIG_HOME`.
+  `systemd/user/dev.fleet.controller.service` under `XDG_CONFIG_HOME` where it
+  is set to an absolute path, and at
+  `.config/systemd/user/dev.fleet.controller.service` under `HOME` where it is
+  not (a relative `XDG_CONFIG_HOME` counts as not set, as the service manager
+  ignores one), whatever `FLEET_DIR`, `FLEET_HOME` and `XDG_STATE_HOME` say.
 - **shared.locations.R20**: WHEN `fleet start` writes the service file, fleet
   SHALL set `FLEET_DIR` for the service to the machine directory that
   `fleet start` resolved, whichever of R2 to R6 produced it.

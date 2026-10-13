@@ -33,6 +33,12 @@ pub const HOME: &str = "HOME";
 /// that removes `FLEET_DIR` would otherwise resolve the state directory of the
 /// shell the suite runs from. An arm whose subject is it sets it after the block.
 pub const XDG_STATE_HOME: &str = "XDG_STATE_HOME";
+/// The config home a Linux user's service manager reads units from, and so
+/// where `fleet start` writes its unit when it is set. STRIPPED, never set: a
+/// suite run from a shell that has it would otherwise write the unit into
+/// that shell's real config directory. An arm whose subject is it sets it
+/// after the block.
+pub const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 /// The tmux binary every host call runs (`fleet_controller::host::tmux`). A
 /// rig with no tmux stub of its own gets the refusing one, so no arm reaches
 /// the operator's tmux, and so never the live fleet's own socket on it.
@@ -75,6 +81,7 @@ pub fn vars(home: &Path, machine: &Path) -> Vec<(&'static str, Option<OsString>)
         (FLEET_HOME, Some(home.as_os_str().to_owned())),
         (FLEET_DIR, Some(machine.as_os_str().to_owned())),
         (XDG_STATE_HOME, None),
+        (XDG_CONFIG_HOME, None),
         (TMUX_BIN, Some(refusing_tmux().into_os_string())),
         (HERMETIC, Some(OsString::from("1"))),
         (FLEET_ACTOR, None),

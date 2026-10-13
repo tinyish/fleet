@@ -39,7 +39,7 @@ mod linux;
 use linux as sys;
 
 // The OTHER platform's half, compiled FOR THE ARMS ALONE. The service file is a
-// pure writer from four arguments to bytes, and a text only its own platform can
+// pure writer from five arguments to bytes, and a text only its own platform can
 // compile is a text nobody reads until that platform builds — which is the
 // second half of the table above going unwatched. Nothing here is wired to
 // `sys`: the selection above is still the one `cfg` on the target.
@@ -168,6 +168,17 @@ fn absolute<'a>(variable: &'static str, path: &'a Path) -> Result<&'a Path, Unre
 /// The user's home, which the constructed `PATH` is built off.
 pub fn home_dir() -> PathBuf {
     env_dir("HOME").unwrap_or_default()
+}
+
+/// The user's config home, where the Linux manager reads a user's units;
+/// `None` where it is unset, empty, spaces only or relative (shared.locations
+/// R1, R19: the manager ignores a relative one).
+pub fn config_home() -> Option<PathBuf> {
+    absolute_dir(env_dir("XDG_CONFIG_HOME"))
+}
+
+fn absolute_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    dir.filter(|d| d.is_absolute())
 }
 
 fn env_dir(key: &str) -> Option<PathBuf> {
@@ -426,6 +437,7 @@ impl Service {
     /// shell's. `bin_override` is the seam, and it is an absolute path.
     pub fn resolve(
         home: &Path,
+        config_home: Option<&Path>,
         machine_dir: &Path,
         exe: &Path,
         bin_override: Option<&str>,
@@ -451,7 +463,7 @@ impl Service {
             })?,
         };
         Ok(Service {
-            file: sys::service_file(home, SERVICE_LABEL, exe, machine_dir),
+            file: sys::service_file(home, config_home, SERVICE_LABEL, exe, machine_dir),
             bin,
             child_path,
         })
@@ -979,7 +991,7 @@ mod tests {
         }
     }
 
-    /// The macOS service file, from the four arguments and nothing else.
+    /// The macOS service file, from its arguments and nothing else.
     ///
     /// The last two assertions are the ones a mutant reaches: the user's whole
     /// `PATH` baked into the file is the defect lessons claude-code D1 names,
@@ -990,6 +1002,7 @@ mod tests {
     fn the_macos_service_file_names_the_executable_and_bakes_in_no_path() {
         let file = macos::service_file(
             Path::new("/h"),
+            None,
             "a.label",
             Path::new("/bin/fleet"),
             Path::new("/m"),
@@ -1045,6 +1058,7 @@ mod tests {
         // value is the argument and not a constant this writer always emits.
         let elsewhere = macos::service_file(
             Path::new("/h"),
+            None,
             "a.label",
             Path::new("/bin/fleet"),
             Path::new("/m&n"),
@@ -1061,6 +1075,7 @@ mod tests {
         // parse as one.
         let marked = macos::service_file(
             Path::new("/h"),
+            None,
             "a.label",
             Path::new("/bin/a&b"),
             Path::new("/m"),
@@ -1072,11 +1087,50 @@ mod tests {
         );
     }
 
+    /// shared.locations R18, R19: the unit goes where the user's manager reads
+    /// units (under XDG_CONFIG_HOME where it is set, under the home's .config
+    /// where it is not), and the agent file on macOS ignores it. Both writers
+    /// are read on whichever box this runs on.
+    #[test]
+    fn the_unit_follows_xdg_config_home_and_the_agent_file_does_not() {
+        let (h, cfg) = (Path::new("/h"), Path::new("/cfg"));
+        let exe = Path::new("/bin/fleet");
+        let unit = |config: Option<&Path>| {
+            linux::service_file(h, config, "a.label", exe, Path::new("/m")).path
+        };
+        assert_eq!(
+            unit(Some(cfg)),
+            PathBuf::from("/cfg/systemd/user/a.label.service")
+        );
+        assert_eq!(
+            unit(None),
+            PathBuf::from("/h/.config/systemd/user/a.label.service")
+        );
+        let agent = macos::service_file(h, Some(cfg), "a.label", exe, Path::new("/m"));
+        assert_eq!(
+            agent.path,
+            PathBuf::from("/h/Library/LaunchAgents/a.label.plist")
+        );
+    }
+
+    /// shared.locations R19: a relative config home is not one the manager
+    /// reads, so it counts as unset, as does none at all.
+    #[test]
+    fn a_relative_config_home_counts_as_unset() {
+        assert_eq!(
+            absolute_dir(Some(PathBuf::from("/cfg"))),
+            Some(PathBuf::from("/cfg"))
+        );
+        assert_eq!(absolute_dir(Some(PathBuf::from("cfg"))), None);
+        assert_eq!(absolute_dir(None), None);
+    }
+
     /// The Linux unit, read on whichever box this suite runs on.
     #[test]
     fn the_linux_unit_names_the_executable_restarts_and_wants_the_default_target() {
         let file = linux::service_file(
             Path::new("/h"),
+            None,
             "a.label",
             Path::new("/bin/fleet"),
             Path::new("/m"),
@@ -1112,6 +1166,7 @@ mod tests {
         // manager does not read a specifier.
         let elsewhere = linux::service_file(
             Path::new("/h"),
+            None,
             "a.label",
             Path::new("/bin/fleet"),
             Path::new("/a b%c"),

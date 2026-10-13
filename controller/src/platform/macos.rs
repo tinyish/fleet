@@ -61,8 +61,16 @@ fn domain() -> String {
 /// directory. It always tells the service the machine directory (`FLEET_DIR`),
 /// and the user's `PATH` is never baked in: the controller constructs its
 /// children's search path, and a path frozen here at install time is the one
-/// every later session inherits (lessons claude-code D1).
-pub fn service_file(home: &Path, label: &str, exe: &Path, machine_dir: &Path) -> ServiceFile {
+/// every later session inherits (lessons claude-code D1). The agents directory
+/// is under the home whatever `XDG_CONFIG_HOME` says (shared.locations R18), so
+/// the second argument is not a shape this platform reads.
+pub fn service_file(
+    home: &Path,
+    _config_home: Option<&Path>,
+    label: &str,
+    exe: &Path,
+    machine_dir: &Path,
+) -> ServiceFile {
     // The machine directory THIS CALL RESOLVED, always (shared.locations R20):
     // the manager starts the service with its own environment, which carries
     // neither the caller's FLEET_HOME nor its XDG_STATE_HOME, so a controller

@@ -1299,6 +1299,7 @@ mod tests {
         let policy = policy::parse("").expect("an empty policy parses");
         let service = platform::Service::resolve(
             &dir,
+            None,
             &machine_dir,
             Path::new("/usr/local/bin/fleet"),
             Some("/bin/sh"),

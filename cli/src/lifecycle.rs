@@ -1232,6 +1232,7 @@ fn no_fleet(machine_dir: &Path) -> Stop {
 fn service(machine_dir: &Path) -> Result<platform::Service, Stop> {
     platform::Service::resolve(
         &platform::home_dir(),
+        platform::config_home().as_deref(),
         machine_dir,
         &exe()?,
         std::env::var(platform::SERVICE_BIN_ENV).ok().as_deref(),
