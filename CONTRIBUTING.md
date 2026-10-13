@@ -122,15 +122,22 @@ It has five patterns, and they combine (`WHERE …, WHEN …, fleet SHALL …`):
 
 Each clause follows these rules:
 
+- A clause states intended behaviour: what a person decided fleet does, not
+  whatever the code happens to do. A spec never makes a bug look like design.
+- A clause states the promise the behaviour serves, not the mechanism that
+  keeps it: "two commands editing the same file never lose an edit", not
+  which file gets a lock.
 - One observable outcome per clause.
 - Exact values: exit codes, event types, paths relative to the machine
   directory, bounds in seconds.
 - Another spec's clause is cited by its id, never restated.
 - Only text a script or a person depends on is quoted, never a whole
   message.
-- A clause says what fleet does now. Where an approved `behaviour` item will
-  change it, a line `Changing: <bead id>: <the new behaviour>` follows the
-  clause until that item lands.
+- Where today's binary falls short of a clause, a line
+  `Today: <what fleet does now> (<bead id>)` follows the clause, naming the
+  `fix` or `behaviour` item that will close the gap. The item's spec change
+  is deleting that line. Until then, the clause's scenarios are known
+  failures, not regressions.
 - Every behaviour the story describes has a clause, and every clause appears
   in the story. An item that changes one changes the other. If they disagree,
   the clause is what fleet is held to, and the mismatch is a `spec` item.
@@ -171,8 +178,8 @@ The land gate checks the kind:
 
 | Kind | When | The feature spec | Scenarios |
 | --- | --- | --- | --- |
-| `behaviour` | something observable changes | changes first; the item cites the changed clauses | fleet-dtu adds or updates the scenarios for those clauses |
-| `fix` | the code broke a clause that already exists | does not change; the item cites the broken clause | fleet-dtu adds a scenario that would have caught it |
+| `behaviour` | something observable changes | changes first; the item cites the changed clauses, or deletes the `Today:` line a ruling left for it | fleet-dtu adds or updates the scenarios for those clauses |
+| `fix` | the code broke a clause that already exists | does not change, except that the item deletes the `Today:` line naming it, if there is one; the item cites the broken clause | fleet-dtu adds a scenario that would have caught it |
 | `internal` | comments, refactors, speed, dependencies | does not change | every scenario passes unchanged |
 | `spec` | the feature spec is written or reworded to say what fleet already does | changes; the item cites the clauses it wrote or reworded | fleet-dtu adds or updates the scenarios for those clauses; the code does not change |
 
@@ -290,8 +297,9 @@ item is squash-landed. It:
 - runs the guards;
 - runs the scenarios through the bridge. That is the cited clauses'
   scenarios for `behaviour` and `fix` items, and those of every area whose
-  modules it touched for an `internal` item. It refuses on any failure, and
-  on a cited clause no scenario covers.
+  modules it touched for an `internal` item. It refuses on any failure,
+  except a known failure of a clause that still has a `Today:` line, and on a
+  cited clause no scenario covers.
 
 `fleet land` may call the same gate once fleet builds itself.
 
@@ -381,15 +389,26 @@ walks. `shared` is not converted on its own: each of its features is specced
 with the first area that needs it (the exit codes, locations and output with
 onboarding).
 
-**Converting an area starts from what fleet does today.** An agent drafts
-each feature spec from fleet's observable behaviour: it runs fleet, and
-reads the area's docs and code. It writes only what a user or a neighbouring
-component can observe. Anything that looks accidental or wrong is written
-`[NEEDS CLARIFICATION: …]` for a person to rule on, never kept silently. The
-person reads and edits each feature spec before it is committed. The
-scenarios then pass against today's binary, except where a ruling changes
-behaviour; each such ruling is a `behaviour` item, and the clause it will
-change carries its `Changing:` line until it lands.
+**Converting an area looks at what fleet does today, but writes down only
+what was meant.** An agent drafts each feature spec from fleet's observable
+behaviour: it runs fleet, and reads the area's docs and code. It writes only
+what a user or a neighbouring component can observe, as the promise each
+behaviour serves. It then sorts every clause by the evidence that the
+behaviour was intended:
+
+- **evidenced**: a code comment giving the reason, a `brain/` note, a test
+  that asserts it on purpose, or a person's earlier ruling;
+- **apparent**: consistent and plausible, but nothing says why;
+- **doubtful**: looks accidental, inconsistent or wrong. It is written
+  `[NEEDS CLARIFICATION: …]`, never kept silently.
+
+The sorting, with each clause's evidence, goes in a review note on the spec
+item's bead, never in the spec. The person confirms the apparent clauses,
+rules on each doubtful one, and reads and edits the feature spec before it
+is committed. A clause nobody can vouch for stays out. Where a ruling or a
+found bug leaves today's binary short of a clause, the clause states the
+intent and carries a `Today:` line naming the `behaviour` or `fix` item that
+will close the gap.
 
 An area is **converted** when every clause has a scenario, its scenarios pass
 in fleet-dtu, its docs are regenerated from its feature specs, and its unit
