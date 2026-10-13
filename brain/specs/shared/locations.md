@@ -61,11 +61,12 @@ directory, and before it reads or writes anything. `fleet --version`,
 `fleet` with no command, and a command line that does not parse answer as
 shared.exit-codes says.
 
-`fleet guard` is the one exception, on purpose. A guard runs as a hook, and
-a hook that exits 1 lets the tool call it was asked to judge go through
-unjudged. So a guard reads a relative deciding variable against the working
-directory, and with `FLEET_DIR`, `FLEET_HOME` and `HOME` all unset (and on
-Linux `XDG_STATE_HOME` unset) it uses `.fleet` under the working directory.
+Among the verbs, `fleet guard` is the one exception, on purpose. A guard
+runs as a hook, and a hook that exits 1 lets the tool call it was asked to
+judge go through unjudged. So a guard reads a relative deciding variable
+against the working directory, and with `FLEET_DIR`, `FLEET_HOME` and `HOME`
+all unset (and on Linux `XDG_STATE_HOME` unset) it uses `.fleet` under the
+working directory.
 
 Working out the machine directory creates nothing. A verb that only reads,
 such as `fleet prime`, leaves a machine directory that does not exist as it
@@ -227,10 +228,11 @@ no file, `config.json` naming a policy file that exists (R24). Otherwise it
 refuses (R25, R26, R35), and a session outside every checkout is told there
 is no fleet there. `fleet prime` exits as every verb does: 1 where it finds
 no fleet or a declared project the machine has not registered
-(shared.exit-codes.R2, R23), and 3 where `config.json` or `projects.toml` is
-there but will not read (R38, shared.exit-codes.R4).
+(shared.exit-codes.R2, shared.exit-codes.R23), and 3 where `config.json` or
+`projects.toml` is there but will not read (R38, shared.exit-codes.R4).
 `fleet create`, `fleet start`, `fleet stop` and `fleet guard` decide in
-their own specs what they do where there is no fleet.
+their own specs what they do where there is no fleet. `fleet store check`
+and `fleet agent check` read the defaults there and do not refuse.
 
 The verbs differ where no file is found above the working directory:
 
@@ -238,6 +240,7 @@ The verbs differ where no file is found above the working directory:
 | --- | --- |
 | the item verbs, `fleet doctor`, `fleet prime` | act in `config.json`'s fleet only inside a git checkout, and refuse outside one |
 | `fleet start`, `fleet stop` | act on the machine from any directory, inside a checkout or not |
+| `fleet store check`, `fleet agent check` | read the defaults where they find no fleet, and do not refuse |
 
 `fleet stop` resolves no fleet at all. A stop that looked for a project first
 would refuse from a bare directory while the service was loaded, and leave
@@ -377,17 +380,18 @@ closes the gap.
   the project's root.
 - **shared.locations.R25**: IF a verb that acts in a project finds no fleet by
   R21 to R24, THEN fleet SHALL refuse with the exit shared.exit-codes.R23
-  states, on a refusal line (shared.exit-codes.R12, R13) that names the
-  working directory and `fleet create`. `fleet create`, `fleet start`,
-  `fleet stop` and `fleet guard` are not bound by this clause: their own
+  states, on a refusal line (shared.exit-codes.R12, shared.exit-codes.R13)
+  that names the working directory and `fleet create`. `fleet create`,
+  `fleet start`, `fleet stop` and `fleet guard` are not bound by this clause: their own
   specs say what each does where there is no fleet. `fleet store check` and
   `fleet agent check` are not bound by it either: outside any fleet they read
   the defaults and do not refuse.
 - **shared.locations.R26**: IF the directory R21 stops at holds a
   `.fleet/project.toml` and `config.json` is absent, or reads and names no
   policy file that exists, THEN fleet SHALL refuse (shared.exit-codes.R2) on a refusal
-  line (shared.exit-codes.R12, R13) that names that directory, `config.json`
-  and `fleet create --standalone`, the command that registers the project.
+  line (shared.exit-codes.R12, shared.exit-codes.R13) that names that
+  directory, `config.json` and `fleet create --standalone`, the command that
+  registers the project.
   `fleet create`, `fleet guard`, `fleet store check`, `fleet agent check` and
   the verbs R28 names are not bound by this clause.
 - ~~**shared.locations.R27**~~ retired 2026-10-12: it stated `fleet prime`'s
@@ -404,27 +408,28 @@ closes the gap.
   SHALL hand the session `FLEET_DIR` set to the machine directory the
   controller resolved (R2 to R6), and no `FLEET_HOME`.
 - **shared.locations.R30**: IF the variable that decides the machine
-  directory by R2 to R6 (`FLEET_DIR`; on Linux, `XDG_STATE_HOME`;
-  `FLEET_HOME`; or `HOME`) names a relative path, THEN fleet SHALL, except
-  as R32 says, refuse (shared.exit-codes.R2) on a refusal line
+  directory by R2 to R6 names a relative path, THEN fleet SHALL, except as
+  R32 says, refuse (shared.exit-codes.R2) on a refusal line
   (shared.exit-codes.R12) that names that variable and asks for an absolute
   path.
   Today: a deciding `HOME`, or on Linux `XDG_STATE_HOME`, that names a
   relative path is read against the working directory, and `fleet start`
   writes the relative machine directory it gives into the service file
   (fleet-8s9z).
-- **shared.locations.R31**: IF `FLEET_DIR`, `FLEET_HOME` and `HOME` are all
-  unset, and on Linux `XDG_STATE_HOME` is unset too, THEN fleet SHALL, except as
-  R32 says, refuse (shared.exit-codes.R2) on a refusal line
-  (shared.exit-codes.R12) that names `HOME` and asks for an absolute path.
+- **shared.locations.R31**: IF no variable that could decide the machine
+  directory by R2 to R6 is set, THEN fleet SHALL, except as R32 says,
+  refuse (shared.exit-codes.R2) on a refusal line (shared.exit-codes.R12)
+  that names `HOME` and asks for an absolute path.
 - **shared.locations.R32**: IF R30 or R31 refuses a call, THEN fleet SHALL
   refuse it before the verb reads or writes anything, whichever verb was
-  called and whether or not it reads the machine directory, except
-  `fleet guard`, which reads a relative deciding variable against the
-  working directory, and with `FLEET_DIR`, `FLEET_HOME` and `HOME` all unset
-  (and on Linux `XDG_STATE_HOME` unset) uses `.fleet` under the working
-  directory, because a guard hook that exits 1 lets the tool call through
-  unjudged.
+  called and whether or not it reads the machine directory, except for
+  four calls. `fleet --version` (shared.exit-codes.R1), `fleet` with no
+  command (shared.exit-codes.R16) and a command line that does not parse
+  (shared.exit-codes.R15) each answer as that clause says. `fleet guard`
+  reads the variable that decides the machine directory by R2 to R6 against
+  the working directory where it names a relative path, and where R31 would
+  refuse uses `.fleet` under the working directory, because a guard hook
+  that exits 1 lets the tool call through unjudged.
   Today: `fleet prime` is exempt as well: it reads the machine directory as
   `fleet guard` does and does not refuse (fleet-bxch).
 - ~~**shared.locations.R33**~~ retired 2026-10-12: it named where the lock on
@@ -438,7 +443,7 @@ closes the gap.
   `projects.toml` reads, and it lists as a project's root neither that directory nor the
   checkout the declaration's `[project] primary` names, THEN fleet SHALL
   refuse (shared.exit-codes.R2) on a refusal line (shared.exit-codes.R12,
-  R13) that names that directory, `projects.toml` and
+  shared.exit-codes.R13) that names that directory, `projects.toml` and
   `fleet create --standalone`, the command that registers it, where a root
   is matched as R36 says. `fleet create`, `fleet guard`, `fleet store check`,
   `fleet agent check` and `fleet stop` are not bound by this clause;
@@ -460,8 +465,9 @@ closes the gap.
   `fleet start` starts, or which fleet `fleet create --standalone` declares a
   project to, and that
   file is there but cannot be read or does not parse, THEN fleet SHALL exit 3
-  (shared.exit-codes.R4) on a line (shared.exit-codes.R12, R13) that names
-  that file, and act in, write or load nothing.
+  (shared.exit-codes.R4) on a line (shared.exit-codes.R12,
+  shared.exit-codes.R13) that names that file, and act in, write or load
+  nothing.
   Today: a `config.json` that does not parse gets the no-fleet refusal, exit
   1, in three places (fleet-9sr5): the verbs that find their fleet, with
   R26's refusal in a declared project and R25's where the walk finds no file
