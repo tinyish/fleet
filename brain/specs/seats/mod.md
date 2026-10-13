@@ -106,7 +106,8 @@ attach`.
 - `controller/src/seat.rs` — Writes the seat events (woke, rest, handed off,
   exited) that tell the controller where a seat is in its life.
   Depends on: `controller/src/config.rs`, `controller/src/events.rs`,
-  `controller/src/projection.rs`, `core/src/seat/identity.rs`.
+  `controller/src/projection.rs`, `core/src/item/mod.rs`,
+  `core/src/seat/identity.rs`.
 - `controller/src/sessions.rs` — Keeps `sessions.json`, the controller's record
   of the sessions it started.
   Depends on: `controller/src/clock.rs`, `controller/src/decide.rs`,
@@ -118,8 +119,9 @@ attach`.
   `controller/src/events.rs`, `controller/src/host/mod.rs`,
   `controller/src/platform/mod.rs`, `controller/src/policy.rs`,
   `controller/src/projection.rs`, `controller/src/runs.rs`,
-  `controller/src/sessions.rs`, `core/src/agent/mod.rs`, `core/src/item/mod.rs`,
-  `core/src/process.rs`, `core/src/seat/actor.rs`, `core/src/seat/identity.rs`,
+  `controller/src/seat.rs`, `controller/src/sessions.rs`,
+  `core/src/agent/mod.rs`, `core/src/item/mod.rs`, `core/src/process.rs`,
+  `core/src/seat/actor.rs`, `core/src/seat/identity.rs`,
   `core/src/seat/retire.rs`, `core/src/store/mod.rs`.
 - `core/src/seat/actor.rs` — Defines who acts: a seat, a run, a routine or the
   controller, as one typed `<kind>:<id>`.
