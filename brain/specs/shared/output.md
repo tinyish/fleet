@@ -177,7 +177,8 @@ refusal document like any verb, with no `data`.
   `true` and a `data` key, whose content the verb's own spec states, and no
   `refusal` key.
 - **shared.output.R7**: IF a verb called with `--json` refuses (a check's
-  finding is not a refusal, shared.exit-codes.R2), THEN fleet SHALL print a
+  finding or could-not-tell is not a refusal, shared.exit-codes.R2; `fleet
+  doctor` answers as shared.output.R19 says), THEN fleet SHALL print a
   document carrying `ok` as `false` and a `refusal` key, and no `data` key.
 - **shared.output.R8**: IF a verb called with `--json` refuses, THEN fleet
   SHALL make the document's `refusal` a JSON object carrying `code`, which
@@ -185,7 +186,8 @@ refusal document like any verb, with no `data`.
 - **shared.output.R9**: IF a verb called with `--json` refuses, THEN fleet
   SHALL set the `refusal`'s `why` to the text of its refusal line on standard
   error after `fleet <verb>: `, character for character
-  (shared.exit-codes.R12, shared.exit-codes.R13).
+  (shared.exit-codes.R12, shared.exit-codes.R13), except in the document
+  shared.output.R19 names.
 - **shared.output.R10**: IF a verb called with `--json` refuses, THEN fleet
   SHALL still write its refusal line on standard error, as it does without
   the flag (shared.exit-codes.R12).
@@ -225,7 +227,7 @@ refusal document like any verb, with no `data`.
 - **shared.output.R19**: WHEN `fleet doctor` called with `--json` has run its
   checks and exits 1 or 3, fleet SHALL print a document carrying `ok` as
   `false`, a `refusal` whose `code` is the name of the row it exits with
-  (shared.exit-codes.R11), and a `data` key whose content is the same as on
+  (shared.exit-codes.R11), and a `data` key whose content the verb's own spec states, as on
   exit 0.
 - **shared.output.R20**: WHEN fleet prints the document shared.output.R19
   names, fleet SHALL set its `refusal`'s `why` to the text of the summary
