@@ -800,15 +800,25 @@ fn create_standalone_names_the_fleet_and_one_start_renders_the_seat() {
     );
 }
 
-/// A question put to a pipe is a usage error naming the flag that answers it,
-/// never a wait for an answer that cannot come.
+/// A question put to a pipe is a usage error under the verb's one prefix,
+/// naming every flag that answers it, never a wait for an answer that cannot
+/// come.
 #[test]
-fn create_refuses_a_question_it_cannot_ask_and_names_the_flag() {
+fn create_refuses_a_question_it_cannot_ask_and_names_every_flag() {
     let rig = Rig::new("piped");
     let out = rig.run(&["create"]);
     assert_eq!(code(&out), 2, "{}", stderr(&out));
-    assert!(stderr(&out).contains("--embedded"), "{}", stderr(&out));
-    assert!(stderr(&out).contains("not a terminal"), "{}", stderr(&out));
+    let printed = stderr(&out);
+    assert!(
+        printed.lines().any(|line| line
+            == "fleet create: embedded or standalone? — stdin is not a terminal; \
+                answer it with --embedded or --standalone"),
+        "one prefix, and both flags that answer: {printed}"
+    );
+    assert!(
+        !printed.contains("fleet create: fleet:"),
+        "no second prefix: {printed}"
+    );
 
     assert!(
         !rig.project.join("fleet.toml").exists(),

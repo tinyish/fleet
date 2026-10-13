@@ -79,8 +79,14 @@ standard output, and exits 2. A caller that reached fleet meant something, so
 the exit says the call was incomplete rather than a quiet 0.
 
 A verb that would ask a question refuses instead when standard input is not
-a terminal, so a prompt never waits on a script. The refusal line names a
-flag that answers the question, and the call exits 2.
+a terminal, so a prompt never waits on a script. The refusal line carries
+the verb's one `fleet <verb>:` prefix and names every flag that answers the
+question, and the call exits 2:
+
+```sh
+$ fleet create < /dev/null
+fleet create: embedded or standalone? — stdin is not a terminal; answer it with --embedded or --standalone
+```
 
 ### Could not tell, and refused
 
@@ -130,10 +136,6 @@ approved change, listed after it.
 - **`fleet doctor --json` with a finding or a could-not-tell.** Today the
   document's `ok` is `true` whatever the checks said. `ok` will be `true`
   only on exit 0 (fleet-accn).
-- **`fleet create`'s line with no terminal.** It reads
-  `fleet create: fleet: …`, with a second prefix, and names only
-  `--embedded`. It will carry one prefix and name `--embedded` and
-  `--standalone` (fleet-uqul).
 
 ## Behaviour
 
@@ -179,11 +181,9 @@ approved change, listed after it.
   refusal is about: the item, seat, event id, flag, service, or the file or
   directory it looked at.
 - **shared.exit-codes.R14**: IF a verb would ask a question and standard input
-  is not a terminal, THEN fleet SHALL refuse with a line that names a flag
+  is not a terminal, THEN fleet SHALL refuse with one line, carrying the one
+  `fleet <verb>:` prefix shared.exit-codes.R12 names, that names every flag
   that answers the question.
-  Changing: fleet-uqul: the line carries one `fleet <verb>:` prefix and names
-  every flag that answers; `fleet create` names `--embedded` and
-  `--standalone`.
 - **shared.exit-codes.R15**: IF the command line does not parse (a missing,
   unknown or invalid argument, an unknown command or flag, or two flags that
   cannot go together), THEN fleet SHALL write a block on standard error whose

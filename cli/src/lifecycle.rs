@@ -154,7 +154,7 @@ fn create(ui: &Ui, args: &CreateArgs) -> Result<Exit, Stop> {
                 "embedded — one fleet.toml at this project's root",
                 "standalone — declare this project to the fleet this machine runs",
             ],
-            "--embedded",
+            &["--embedded", "--standalone"],
         ) {
             Ok(0) => Mode::Embedded,
             Ok(_) => Mode::Standalone,
