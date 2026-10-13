@@ -379,7 +379,10 @@ what fleet does today, with a `Changing:` line after each one.
 - A verb that takes `--packs-dir` reads packs from the directory it names in
   place of `packs/`; the packs area's spec says what else it moves.
 - The guards, `fleet prime` and the item verbs walk up the same way (R21 to
-  R23). They differ only where no file is found (R24, R25, R28).
+  R23, R26) and fall back to a checkout the same way (R24). Where that finds
+  no fleet, `fleet prime` and the item verbs refuse (R25) and `fleet guard`
+  follows its own spec. `fleet start` and `fleet stop` do not walk up at
+  all: they act from any working directory (R28).
 - A seat's session is handed `FLEET_DIR` naming the machine directory (R29);
   the seats area's spec cites that clause.
 - shared.exit-codes.R23 states the exit for a verb that finds no fleet (R25).
