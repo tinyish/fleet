@@ -131,13 +131,15 @@ fn resolve() -> Result<Fleet, (Exit, String)> {
                 ),
             ))
         }
-        Err(load::NoFleet::Declared) => return Err((
-            Exit::CouldNotTell,
-            format!(
+        Err(load::NoFleet::Declared) => {
+            return Err((
+                Exit::CouldNotTell,
+                format!(
                 "this project is declared, so its fleet is the machine's, and none is named by {}",
                 config::path_in(&machine_dir).display()
             ),
-        )),
+            ))
+        }
     };
     let seats = config::read(&config::path_in(&machine_dir))
         .map(|machine| machine.seats)
