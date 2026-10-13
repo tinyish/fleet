@@ -37,11 +37,13 @@ Both lines are on standard error. `fleet stop` prints nothing on standard
 output, and takes no argument and no flag but `--help` or `-h`.
 
 1. **It finds out whether a controller is running** for the machine
-   directory the stop was called for (shared.locations.R2 to R6), by the
-   status query `fleet start` makes (onboarding.start.R7 and its
-   Interfaces). Where the manager answers that it does not know the label,
-   no service is loaded and stop refuses: unloading a service nobody loaded
-   is a refusal on the record and not a quiet no-op. Any other non-zero
+   directory the stop was called for (shared.locations.R2 to
+   shared.locations.R6), by the status query `fleet start` makes
+   (onboarding.start.R7 and its Interfaces). Where no controller runs for
+   that machine directory, stop refuses, the manager answering that it does
+   not know the label being one such case: stopping a controller that is not
+   there is a refusal on the record and not a quiet no-op. The one exception
+   is a service loaded with no controller running, below. Any other non-zero
    answer means the query could not tell, and stop exits 3 with nothing
    unloaded (onboarding.start.R35 reads the query the same way).
 2. **It has the service manager unload the service,** once. The unload also
@@ -69,13 +71,13 @@ and exits 0. It waits for no `controller.stopped`, since no controller is
 there to write one. Without this, nothing would take down a controller that
 keeps crashing.
 
-The first word of each line, `stopped` and `seats:`, is coloured only when
-standard error, the stream the lines are written on, is a terminal
-(shared.output.R21), and neither `NO_COLOR` nor `TERM=dumb` says otherwise.
-Otherwise the lines carry no colour codes, so a script or a test that
-captures standard error reads them starting with those words. Today the
-colour follows standard output, so `fleet stop 2>log` at a terminal writes
-colour codes into `log` (fleet-nj2k).
+The first word of each line, `stopped` and `seats:`, is coloured as every
+verb's lines are (shared.output.R21): only when standard error, the stream
+the lines are written on, is a terminal, and neither `NO_COLOR` nor
+`TERM=dumb` says otherwise. Otherwise the lines carry no colour codes, so a
+script or a test that captures standard error reads them starting with
+those words. Today the colour follows standard output, so `fleet stop 2>log`
+at a terminal writes colour codes into `log` (fleet-nj2k).
 
 ### Outcomes
 
@@ -83,13 +85,13 @@ colour codes into `log` (fleet-nj2k).
 | --- | --- | --- |
 | a controller running for this machine directory, and a fresh `controller.stopped` on its stream within 30 s of the unload | 0 (shared.exit-codes.R1) | a line whose first word is `stopped`, naming `dev.fleet.controller` and the event's sequence; then a line whose first word is `seats:`, saying the sessions are still running |
 | the service loaded with no controller running, and the unload accepted | 0 (shared.exit-codes.R1) | a line naming `dev.fleet.controller` and saying it was unloaded with no controller running; then the `seats:` line; no event is waited for |
-| the manager answers that it does not know the label: nothing is loaded for this machine directory | 1 (shared.exit-codes.R2) | `fleet stop:` and a line naming `dev.fleet.controller` and saying there is nothing to stop; nothing is unloaded |
+| no controller running for this machine directory, such as where the manager answers that it does not know the label, other than the service loaded with no controller running | 1 (shared.exit-codes.R2) | `fleet stop:` and a line naming `dev.fleet.controller` and saying there is nothing to stop; nothing is unloaded |
 | the status query exits non-zero with any other answer | 3 (shared.exit-codes.R4) | `fleet stop:` and a line naming the query and its answer; nothing is unloaded |
-| the service unloaded, and no fresh `controller.stopped` within 30 s | 3 (shared.exit-codes.R4, R9) | `fleet stop:` and a line naming `controller.stopped`, the bound, the event stream's path, and where the service's output is read |
-| the service manager is unusable as onboarding.start.R6 says, or the query does not return within onboarding.start.N2's bound | 3 (shared.exit-codes.R4) | `fleet stop:` and the line onboarding.start.R6 or N2 describes; nothing is unloaded |
+| the service unloaded, and no fresh `controller.stopped` within 30 s | 3 (shared.exit-codes.R4, shared.exit-codes.R9) | `fleet stop:` and a line naming `controller.stopped`, the bound, the event stream's path, and where the service's output is read |
+| the service manager is unusable as onboarding.start.R6 says, or the query does not return within onboarding.start.N2's bound | 3 (shared.exit-codes.R4) | `fleet stop:` and the line onboarding.start.R6 or onboarding.start.N2 describes; nothing is unloaded |
 | the unload exits non-zero, or does not return within 60 s | 3 (shared.exit-codes.R4) | `fleet stop:` and a line naming the unload command and how it ended; no event is waited for |
 | an argument, or a flag other than `--help` or `-h` | 2 (shared.exit-codes.R3) | the `error:` block (shared.exit-codes.R15) |
-| a machine directory fleet cannot name: a relative deciding variable, or no `HOME` | 1, before anything is asked or unloaded (shared.locations.R30 to R32) | `fleet stop:` and the line those clauses describe |
+| a machine directory fleet cannot name: a relative deciding variable, or no `HOME` | 1, before anything is asked or unloaded (shared.locations.R30 to shared.locations.R32) | `fleet stop:` and the line those clauses describe |
 
 Exit 3 after the unload is not a success. The service is unloaded, but fleet
 did not read back that the controller ended, so a script treats the outcome
@@ -124,8 +126,9 @@ unset, as that clause says too.
 not (shared.locations.R28). It needs no fleet at all: not the policy file,
 not a project's declaration, not `config.json`. Nor is it refused in a
 declared project the machine has not registered, as the verbs that act in a
-project are (shared.locations.R26, R35). All it needs is the service
-manager and the machine directory's event stream (shared.locations.R12). A
+project are (shared.locations.R26, shared.locations.R35). All it needs is
+the service manager and the machine directory's event stream
+(shared.locations.R12). A
 stop that looked for a project first would refuse from a bare directory, or
 from a project whose `fleet.toml` was moved or deleted, while the service
 was still loaded, and leave the controller running.
@@ -133,7 +136,7 @@ was still loaded, and leave the controller running.
 It does need a machine directory it can name. Where the variable that
 decides it names a relative path, or none of them is set, stop is refused
 before it asks the manager anything, as every verb but `fleet guard` is
-(shared.locations.R30 to R32).
+(shared.locations.R30 to shared.locations.R32).
 
 ### What stop leaves alone
 
@@ -145,7 +148,7 @@ before it asks the manager anything, as every verb but `fleet guard` is
   in. If it does, the unit changes so that the promise holds; it has not
   been observed on Linux either way (fleet-pz6x).
 - **The service file.** It stays where `fleet start` wrote it
-  (shared.locations.R18, R19), so a later `fleet start` finds it already
+  (shared.locations.R18, shared.locations.R19), so a later `fleet start` finds it already
   written. Stop keeps the file but stops the service coming back by itself:
   the controller stays down across logins until the next `fleet start`. A
   stop that lasted only until the next login would bring back, unasked, a
@@ -177,7 +180,7 @@ before it asks the manager anything, as every verb but `fleet guard` is
 - **On Linux, sessions may not survive a stop** (fleet-pz6x). Unobserved
   either way; the fix must show on Linux that they do.
 - **Colour follows standard output,** not standard error, the stream the
-  lines are on (fleet-nj2k).
+  lines are on. The gap is shared.output.R21's, for every verb (fleet-nj2k).
 
 ## Behaviour
 
@@ -186,17 +189,18 @@ before it asks the manager anything, as every verb but `fleet guard` is
   or not a fleet is found from it, whether or not the fleet's policy file, a
   project's declaration or `config.json` exists or reads, and whether or not
   the machine has registered that declaration.
-- **onboarding.stop.R2**: IF the status query answers that the manager does
-  not know `dev.fleet.controller` (onboarding.start.R9), so that no service
-  is loaded for the machine directory `fleet stop` resolved
-  (shared.locations.R2 to R6), THEN fleet SHALL refuse with exit 1
+- **onboarding.stop.R2**: IF no controller runs for the machine directory
+  `fleet stop` resolved (shared.locations.R2 to shared.locations.R6), the
+  status query answering that the manager does not know
+  `dev.fleet.controller` (onboarding.start.R9) among those cases, THEN fleet
+  SHALL, except as onboarding.stop.R22 says, refuse with exit 1
   (shared.exit-codes.R2) and unload nothing.
   Today: fleet counts a controller running under `dev.fleet.controller` for
   any machine directory as running, unloads it, and exits 3 after 30 seconds
   when that controller writes to another stream (fleet-rvct).
 - **onboarding.stop.R3**: IF fleet refuses as onboarding.stop.R2 says, THEN
   fleet SHALL name `dev.fleet.controller` on its refusal line
-  (shared.exit-codes.R12, R13).
+  (shared.exit-codes.R12, shared.exit-codes.R13).
 - **onboarding.stop.R4**: WHEN a controller is running for the machine
   directory `fleet stop` resolved, fleet SHALL have the service manager
   unload its service, once.
@@ -226,17 +230,13 @@ before it asks the manager anything, as every verb but `fleet guard` is
   write on standard error, after the line onboarding.stop.R9 or
   onboarding.stop.R22 names, a line whose first word is `seats:` and which
   says the seats' sessions are still running.
-- **onboarding.stop.R11**: WHILE standard error is not a terminal, or
-  `NO_COLOR` is set, or `TERM` is `dumb`, fleet SHALL write the lines
-  onboarding.stop.R9, R10 and R22 name with no colour codes
-  (shared.output.R21), so that the first two start with `stopped` and
-  `seats:`.
-  Today: whether the lines are coloured follows standard output, though
-  they are written on standard error (fleet-nj2k).
+- ~~**onboarding.stop.R11**~~ retired 2026-10-13: shared.output.R21 states
+  when a line is coloured, `NO_COLOR` and `TERM=dumb` included, for every
+  verb's lines, stop's among them (fleet-xgk2).
 - **onboarding.stop.R12**: IF no confirming `controller.stopped` is on the
   stream within the bound onboarding.stop.N1 gives, THEN fleet SHALL name on
-  its refusal line `controller.stopped` and the path of the event stream it
-  read.
+  its refusal line `controller.stopped`, that bound and the path of the
+  event stream it read.
 - **onboarding.stop.R13**: WHERE the platform is macOS, IF no confirming
   `controller.stopped` arrives in time, THEN fleet SHALL name on its refusal
   line `service.err.log` in the machine directory (shared.locations.R15).
@@ -254,14 +254,15 @@ before it asks the manager anything, as every verb but `fleet guard` is
   systemd's default stops every process in the unit's control group, which
   may hold the tmux server the seats' sessions run in (fleet-pz6x).
 - **onboarding.stop.R17**: WHEN `fleet stop` is called, fleet SHALL leave the
-  service file (shared.locations.R18, R19) in place, unchanged.
+  service file (shared.locations.R18, shared.locations.R19) in place,
+  unchanged.
 - **onboarding.stop.R18**: WHEN `fleet stop` is called, fleet SHALL append no
   event of its own to the event stream.
 - **onboarding.stop.R19**: WHEN `fleet stop` is called with no argument and
   no flag, fleet SHALL print nothing on standard output.
 - **onboarding.stop.R20**: IF `fleet stop` is given an argument, or a flag
   other than `--help` or `-h`, THEN fleet SHALL exit 2 as
-  shared.exit-codes.R3 and R15 say. `fleet stop` takes no `--json`.
+  shared.exit-codes.R3 and shared.exit-codes.R15 say. `fleet stop` takes no `--json`.
 - **onboarding.stop.R21**: IF the status query exits non-zero with any
   answer but that the manager does not know `dev.fleet.controller`, THEN
   fleet SHALL exit 3 (shared.exit-codes.R4) on a line naming the query and
@@ -287,7 +288,8 @@ before it asks the manager anything, as every verb but `fleet guard` is
 
 - **onboarding.stop.N1**: IF no confirming `controller.stopped`
   (onboarding.stop.R7) is on the stream within 30 seconds of the unload,
-  THEN fleet SHALL stop waiting and exit 3 (shared.exit-codes.R4, R9), the
+  THEN fleet SHALL stop waiting and exit 3 (shared.exit-codes.R4,
+  shared.exit-codes.R9), the
   service already unloaded.
 - **onboarding.stop.N2**: IF the status query has not returned within the
   bound onboarding.start.N2 gives it, THEN fleet SHALL exit 3
@@ -300,11 +302,11 @@ before it asks the manager anything, as every verb but `fleet guard` is
 
 - **The service manager.** onboarding.start owns the label
   `dev.fleet.controller`, the `FLEET_SERVICE_BIN` seam and the status query
-  with what its answer means (onboarding.start.R5, R6, R7, N2 and its
-  Interfaces). Stop adds one call, the unload (onboarding.stop.R4), which a
-  stand-in named by `FLEET_SERVICE_BIN` must answer too. `<uid>` is the
-  calling user's uid. Stop relies on the manager ending the controller with
-  a signal the controller answers.
+  with what its answer means (onboarding.start.R5, onboarding.start.R6,
+  onboarding.start.R7, onboarding.start.N2 and onboarding.start
+  Interfaces). Stop adds one call, the unload (onboarding.stop.R4).
+  `<uid>` is the calling user's uid. Stop relies on the manager ending the
+  controller with a signal the controller answers.
 
   | Act | macOS: `launchctl` with | Linux: `systemctl` with | What fleet reads back |
   | --- | --- | --- | --- |
@@ -314,7 +316,7 @@ before it asks the manager anything, as every verb but `fleet guard` is
   next login, which onboarding.stop.R23 rules out, so the unload changes
   with fleet-yb2a. `fleet start` makes the same unload for a service loaded
   and not running, and for one whose start was not confirmed
-  (onboarding.start.R36, N1).
+  (onboarding.start.R36, onboarding.start.N1).
 
 - **The controller** (`fleet observe`, which the service runs): stop relies on
   it appending `controller.stopped` to `events.jsonl` when SIGTERM or SIGINT
@@ -323,13 +325,16 @@ before it asks the manager anything, as every verb but `fleet guard` is
 - **`fleet start`**: writes the service file and loads the service that stop
   asks about and unloads. Stop leaves that file for the next start
   (onboarding.stop.R17).
-- **fleet-dtu**: puts a stub manager in place of the platform's through
-  `FLEET_SERVICE_BIN` (onboarding.stop.R6). No real controller runs there,
-  so the stub answers the query, records the unload, and appends the
-  `controller.stopped` a controller would have written.
-- **shared.locations**: the machine directory (R2 to R6), the refusal where
-  none can be named (R30 to R32), its event stream (R12) and where the
-  service's output is read (R15, R16).
+- **A stand-in manager** named by `FLEET_SERVICE_BIN` (onboarding.stop.R6)
+  must answer the status query as onboarding.start Interfaces says and the
+  unload as onboarding.stop.R4 and onboarding.stop.N3 say, and must have
+  something write `controller.stopped` on the machine directory's stream
+  after the unload, or the stop exits 3 (onboarding.stop.N1).
+- **shared.locations**: the machine directory (shared.locations.R2 to
+  shared.locations.R6), the refusal where none can be named
+  (shared.locations.R30 to shared.locations.R32), its event stream
+  (shared.locations.R12) and where the service's output is read
+  (shared.locations.R15, shared.locations.R16).
 
 ## Open questions
 
