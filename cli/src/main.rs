@@ -522,13 +522,7 @@ struct SeatOnly {
 fn main() -> ExitCode {
     match dispatch() {
         Ok(exit) => ExitCode::from(exit.code()),
-        Err(err) => {
-            eprintln!("fleet: {err}");
-            for cause in err.chain().skip(1) {
-                eprintln!("  caused by: {cause}");
-            }
-            ExitCode::from(Exit::CouldNotTell.code())
-        }
+        Err(err) => ExitCode::from(exit::untranslated(&err).code()),
     }
 }
 
@@ -605,14 +599,15 @@ pub fn observe_loop(once: bool) -> u8 {
 fn observe(once: bool) -> Result<Exit> {
     let status = observe_loop(once);
     // The loop's own could-not-tell: it printed which instrument it could not
-    // read, and the chain names the verb that could not run because of it.
+    // read under the verb's own name, so the chain carries the verb as a
+    // context `main` does not say twice.
     if status == run::EXIT_NO_POLICY {
         return Err(anyhow::anyhow!(
             "the seat list could not be read, so no poll ran"
         ))
-        .context("fleet observe");
+        .context(exit::Stopped::verb("observe"));
     }
-    Exit::from_status(status).context("fleet observe")
+    Exit::from_status(status).context(exit::Stopped::verb("observe"))
 }
 
 // The four seat events. This is argv and nothing else: which event a
@@ -648,7 +643,8 @@ fn event_command(verb: &EventVerb) -> Result<Exit> {
         Ok(row) => row.id,
         Err(stop) => {
             eprintln!("fleet event {name}: {}", stop.message);
-            return Exit::from_status(stop.code).with_context(|| format!("fleet event {name}"));
+            return Exit::from_status(stop.code)
+                .with_context(|| exit::Stopped::verb(format!("event {name}")));
         }
     };
     match seat::record(&machine_dir, kind, &seat, reason) {
@@ -658,7 +654,7 @@ fn event_command(verb: &EventVerb) -> Result<Exit> {
         }
         Err((status, why)) => {
             eprintln!("fleet event {name}: {why}");
-            Exit::from_status(status).with_context(|| format!("fleet event {name}"))
+            Exit::from_status(status).with_context(|| exit::Stopped::verb(format!("event {name}")))
         }
     }
 }

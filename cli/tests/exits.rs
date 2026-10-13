@@ -169,8 +169,9 @@ fn a_usage_error_is_two() {
 
 /// Row 3, and the one arm that proves an error's whole path: the seat list is
 /// the instrument `observe` needs, an empty machine directory holds none, and
-/// what comes back is the chain — the verb named by the cli's own context, then
-/// the cause under it — with the status the table gives an error and no other.
+/// what comes back is the verb's own line, then the cause under it with no
+/// `fleet:` line naming the verb again, with the status the table gives an
+/// error and no other.
 #[test]
 fn an_unreadable_instrument_is_three_and_prints_the_chain() {
     let machine = Machine::new("could-not-tell");
@@ -178,13 +179,19 @@ fn an_unreadable_instrument_is_three_and_prints_the_chain() {
     let out = machine.run(&["observe", "--once"]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     let printed = stderr(&out);
+    let lines: Vec<&str> = printed.lines().collect();
     assert!(
-        printed.contains("fleet: fleet observe"),
-        "the chain's first line names the verb: {printed}"
+        !lines.iter().any(|line| line.starts_with("fleet:")),
+        "no `fleet:` line that carries only the verb's name: {printed}"
     );
-    assert!(
-        printed.contains("caused by: the seat list could not be read"),
-        "the chain carries its cause: {printed}"
+    let verb_line = lines
+        .iter()
+        .position(|line| line.starts_with("fleet observe: cannot read the seat list at "))
+        .unwrap_or_else(|| panic!("the verb says its own line: {printed}"));
+    assert_eq!(
+        lines.get(verb_line + 1).copied(),
+        Some("  caused by: the seat list could not be read, so no poll ran"),
+        "the cause follows the verb's own line: {printed}"
     );
 
     // The control the arm needs: the same verb over a machine directory that

@@ -102,9 +102,105 @@ pub fn say(verb: &str, exit: Exit, why: impl std::fmt::Display) -> Exit {
     exit
 }
 
+/// The verb an error stopped, put on the error as its outermost context.
+///
+/// A `fleet:` line that would carry this and nothing more is left out
+/// (shared.exit-codes.R17): the verb has already said its own
+/// `fleet <verb>:` line, and the causes follow that line.
+#[derive(Debug)]
+pub struct Stopped(String);
+
+impl Stopped {
+    /// The verb as typed, without `fleet`: `observe`, `event rest`.
+    pub fn verb(name: impl Into<String>) -> Stopped {
+        Stopped(name.into())
+    }
+}
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fleet {}", self.0)
+    }
+}
+
+/// Whether the error's outermost message is a [`Stopped`] and nothing else.
+fn verb_only(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Stopped>()
+        .is_some_and(|stopped| stopped.to_string() == err.to_string())
+}
+
+/// The lines an error no verb turned into a refusal is said in: `fleet:` and
+/// the error, unless it names only the verb, then one `caused by:` line per
+/// cause.
+pub(crate) fn untranslated_lines(err: &anyhow::Error) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !verb_only(err) {
+        lines.push(format!("fleet: {err}"));
+    }
+    lines.extend(
+        err.chain()
+            .skip(1)
+            .map(|cause| format!("  caused by: {cause}")),
+    );
+    lines
+}
+
+/// An error no verb turned into a refusal: its lines on stderr, and the row
+/// it answers, which is could-not-tell and never 0.
+pub fn untranslated(err: &anyhow::Error) -> Exit {
+    for line in untranslated_lines(err) {
+        eprintln!("{line}");
+    }
+    Exit::CouldNotTell
+}
+
 #[cfg(test)]
 mod tests {
     use super::Exit;
+
+    /// A context that names only the verb is not said again as a `fleet:`
+    /// line: the verb said its own line above, and the causes follow it.
+    #[test]
+    fn untranslated_lines_leave_out_a_line_that_names_only_the_verb() {
+        let err = anyhow::anyhow!("the seat list could not be read, so no poll ran")
+            .context(super::Stopped::verb("observe"));
+        assert_eq!(
+            super::untranslated_lines(&err),
+            vec![String::from(
+                "  caused by: the seat list could not be read, so no poll ran"
+            )]
+        );
+    }
+
+    /// The control: an error that says more than the verb keeps its `fleet:`
+    /// line, with or without causes, and a verb context under another one does
+    /// not hide the outer line.
+    #[test]
+    fn untranslated_lines_keep_a_line_that_says_more_than_the_verb() {
+        let plain = anyhow::anyhow!("the declared guard classes: no pack");
+        assert_eq!(
+            super::untranslated_lines(&plain),
+            vec![String::from("fleet: the declared guard classes: no pack")]
+        );
+        let wrapped = anyhow::anyhow!("inner")
+            .context(super::Stopped::verb("observe"))
+            .context("outer");
+        assert_eq!(
+            super::untranslated_lines(&wrapped),
+            vec![
+                String::from("fleet: outer"),
+                String::from("  caused by: fleet observe"),
+                String::from("  caused by: inner"),
+            ]
+        );
+    }
+
+    /// Both shapes answer could-not-tell.
+    #[test]
+    fn an_untranslated_error_is_could_not_tell() {
+        let err = anyhow::anyhow!("x").context(super::Stopped::verb("observe"));
+        assert_eq!(super::untranslated(&err), Exit::CouldNotTell);
+    }
 
     /// One arm per row, both ways, so a renumbering has to be deliberate.
     #[test]

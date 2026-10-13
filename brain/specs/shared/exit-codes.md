@@ -98,8 +98,11 @@ verb that cannot say what happened is a third answer rather than a failure.
   `[permissions] tool_commands` in `fleet.toml` is not a list of single
   command words.
 - **When fleet stops on an error it did not turn into a refusal,** it writes
-  a line starting `fleet:`, then one indented line per cause that reads
-  `caused by:` after its indent, and exits 3.
+  a line starting `fleet:` that gives the error, then one indented line per
+  cause that reads `caused by:` after its indent, and exits 3. Where the
+  `fleet:` line would carry only the verb's name, fleet leaves it out: the
+  verb's own `fleet <verb>:` line above it already names the verb, and the
+  causes follow that line.
 - **A verb that writes a line of its own to the event stream** exits 3 when
   it cannot append it: the `fleet event` writers (`woke`, `rest`,
   `handed-off`, `exited`, `clear-halt` and `step`), `fleet seat nudge` and
@@ -110,7 +113,6 @@ For example, `fleet observe --once` with no seat list exits 3:
 ```sh
 $ fleet observe --once
 fleet observe: cannot read the seat list at <machine-dir>/config.json: …
-fleet: fleet observe
   caused by: the seat list could not be read, so no poll ran
 ```
 
@@ -132,8 +134,6 @@ approved change, listed after it.
   `fleet create: fleet: …`, with a second prefix, and names only
   `--embedded`. It will carry one prefix and name `--embedded` and
   `--standalone` (fleet-uqul).
-- **The bare `fleet: fleet observe` line.** It carries only the verb's name,
-  after the line that gives the reason. It will be dropped (fleet-mc5q).
 
 ## Behaviour
 
@@ -192,11 +192,10 @@ approved change, listed after it.
   family and no verb (such as `fleet pack`), THEN fleet SHALL print that
   level's help on standard error and nothing on standard output.
 - **shared.exit-codes.R17**: IF fleet stops on an error it did not turn into a
-  refusal, THEN fleet SHALL write a line on standard error that starts with
-  `fleet:`, followed by one indented line for each cause, which reads
+  refusal, THEN fleet SHALL write on standard error a line that starts with
+  `fleet:` and gives the error, unless that line would carry only the verb's
+  name, followed by one indented line for each cause, which reads
   `caused by:` after its indent, and exit 3.
-  Changing: fleet-mc5q: where the `fleet:` line would carry only the verb's
-  name (today `fleet: fleet observe`), that line is dropped.
 - **shared.exit-codes.R18**: IF `fleet event woke`, `rest`, `handed-off`,
   `exited`, `clear-halt` or `step` has written its line and the stream's last
   line is not that line, THEN fleet SHALL exit 3.
