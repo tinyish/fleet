@@ -114,17 +114,17 @@ fleet: fleet observe
   caused by: the seat list could not be read, so no poll ran
 ```
 
-Exit 1 is different: fleet could tell, and the answer is no.
+Exit 1 is different: fleet could tell, and the answer is no. A verb that
+works on a project and finds no fleet for the working directory answers
+so: nothing was unreadable, and the fleet the verb needs is absent, so it
+refuses with exit 1, as `fleet start` always has. shared.locations says
+where fleet looks for a fleet.
 
 ### Where today's exits do not fit their row
 
 Some of today's exits do not match the meaning in the table. Each one has an
 approved change, listed after it.
 
-- **A verb run outside any fleet.** A verb that works on a project and finds
-  no fleet for the working directory exits 3. `fleet start` exits 1 instead.
-  Nothing was unreadable, so every such verb will exit 1 (fleet-m19v).
-  shared.locations says where fleet looks for a fleet.
 - **`fleet doctor --json` with a finding or a could-not-tell.** Today the
   document's `ok` is `true` whatever the checks said. `ok` will be `true`
   only on exit 0 (fleet-accn).
@@ -149,9 +149,7 @@ approved change, listed after it.
   `usage`.
 - **shared.exit-codes.R4**: IF something the answer needs cannot be read, so
   fleet cannot say what happened, THEN fleet SHALL exit 3, the row named
-  `could_not_tell`. Exit 3 also answers a verb run outside any fleet
-  (shared.exit-codes.R23), where nothing was unreadable.
-  Changing: fleet-m19v: outside any fleet exits 1.
+  `could_not_tell`.
 - **shared.exit-codes.R5**: IF a verb needs a seat's live session and the seat
   has none, THEN fleet SHALL exit 4, the row named `no_session`.
 - **shared.exit-codes.R6**: IF a verb needs a controller consuming the event
@@ -213,10 +211,10 @@ approved change, listed after it.
 - **shared.exit-codes.R22**: IF `fleet seat nudge` or
   `fleet seat attach --write` cannot append its line to the event stream,
   THEN fleet SHALL exit 3.
-- **shared.exit-codes.R23**: IF a verb that works on a project finds no fleet
-  for the working directory (shared.locations says where it looks), THEN
-  fleet SHALL exit 3, except `fleet start`, which exits 1.
-  Changing: fleet-m19v: every such verb exits 1, as `fleet start` does.
+- **shared.exit-codes.R23**: IF a verb that works on a project refuses
+  because it finds no fleet for the working directory (shared.locations.R25
+  says where it looks and which verbs refuse), THEN fleet SHALL exit 1, the
+  row named `refused`.
 - **shared.exit-codes.R24**: WHEN `fleet doctor --json` has run its checks,
   fleet SHALL print a document whose `ok` is `true` whether it exits 0, 1 or
   3 (see shared.output).

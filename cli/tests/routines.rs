@@ -184,12 +184,14 @@ fn a_routine_run_from_a_declared_project_reads_the_fleet_the_machine_names() {
     );
 }
 
-/// I5's refusal, by the way the walk ended: a machine that names no fleet is
-/// exit 3 either way, and the line says why. Inside a declared project the
-/// declaration wins over the `fleet.toml` beside it, so the line says the fleet
-/// is the machine's; where the walk found nothing, it says so.
+/// I5's refusal, by the way the walk ended: where the walk finds nothing and
+/// the machine names no fleet, that is a refusal, exit 1
+/// (shared.exit-codes.R23); inside a declared project it is still exit 3 until
+/// fleet-np9q. Inside a declared project the declaration wins over the
+/// `fleet.toml` beside it, so the line says the fleet is the machine's; where
+/// the walk found nothing, it says so.
 #[test]
-fn a_fleet_nobody_names_is_exit_3_and_the_refusal_says_whether_a_project_was_declared() {
+fn a_fleet_nobody_names_refuses_and_says_whether_a_project_was_declared() {
     let rig = Rig::new("unnamed");
     let config = rig.machine().join("config.json");
     std::fs::remove_file(&config).unwrap();
@@ -215,7 +217,7 @@ fn a_fleet_nobody_names_is_exit_3_and_the_refusal_says_whether_a_project_was_dec
     let nowhere = rig.root.join("nowhere");
     std::fs::create_dir_all(&nowhere).unwrap();
     let nothing = rig.fleet_in(&nowhere, &["routine", "list"]);
-    assert_eq!(nothing.status.code(), Some(3), "{}", err(&nothing));
+    assert_eq!(nothing.status.code(), Some(1), "{}", err(&nothing));
     assert_eq!(
         err(&nothing),
         format!(

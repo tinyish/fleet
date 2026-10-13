@@ -948,7 +948,7 @@ fn a_seat_worktree_beside_an_uncommitted_policy_delivers_through_the_machine_con
 /// AC2's control arm, on the same fixture: with no machine config there is no
 /// second answer, and every item verb is the walk's own refusal.
 #[test]
-fn with_no_machine_config_the_item_verbs_still_refuse_at_three() {
+fn with_no_machine_config_the_item_verbs_still_refuse_at_one() {
     let rig = Rig::new("no-config");
     let item = rig.an_item_ordered_to_the_seat();
     let seat = rig.init_repo_in_a_linked_worktree(false);
@@ -981,7 +981,7 @@ fn with_no_machine_config_the_item_verbs_still_refuse_at_three() {
             .collect();
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = rig.run_from(&seat, &borrowed);
-        assert_eq!(out.status.code(), Some(3), "{args:?}: {}", stderr(&out));
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
         assert!(
             stderr(&out).contains(&format!(
                 "no `fleet.toml` and no `.fleet/project.toml` above {}",

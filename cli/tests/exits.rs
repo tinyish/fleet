@@ -320,11 +320,12 @@ fn an_event_read_with_no_stream_refuses_as_no_collector() {
 }
 
 /// The nudge's line, under its own verb.
+/// No fleet is a refusal, row 1 (shared.exit-codes.R23).
 #[test]
 fn a_nudge_with_no_project_says_so_under_its_verb() {
     let machine = Machine::new("nudge");
     let out = machine.run_nowhere(&["seat", "nudge", "Orla", "--text", "x"]);
-    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
         stderr(&out).starts_with("fleet seat nudge: "),
         "{}",
@@ -333,11 +334,12 @@ fn a_nudge_with_no_project_says_so_under_its_verb() {
 }
 
 /// The attach's line, under its own verb.
+/// No fleet is a refusal, row 1 (shared.exit-codes.R23).
 #[test]
 fn an_attach_with_no_project_says_so_under_its_verb() {
     let machine = Machine::new("attach");
     let out = machine.run_nowhere(&["seat", "attach", "Orla"]);
-    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
         stderr(&out).starts_with("fleet seat attach: "),
         "{}",
@@ -346,25 +348,47 @@ fn an_attach_with_no_project_says_so_under_its_verb() {
 }
 
 /// An enveloped item verb's refusal: the line, then the one document.
+/// No fleet is a refusal, row 1 (shared.exit-codes.R23).
 #[test]
 fn a_land_with_no_project_refuses_in_one_envelope() {
     let machine = Machine::new("land");
     let out = machine.run_nowhere(&["land", "fx-1", "abc1234", "--json"]);
-    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).starts_with("fleet land: "), "{}", stderr(&out));
     one_refusal(&out, "land");
 }
 
 /// A transient verb's refusal: the line, then the one document.
+/// No fleet is a refusal, row 1 (shared.exit-codes.R23).
 #[test]
 fn a_spawn_with_no_project_refuses_in_one_envelope() {
     let machine = Machine::new("spawn");
     let out = machine.run_nowhere(&["seat", "spawn", "--first-turn", "/nonexistent", "--json"]);
-    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
         stderr(&out).starts_with("fleet seat spawn: "),
         "{}",
         stderr(&out)
     );
     one_refusal(&out, "seat spawn");
+}
+
+/// The control on the four arms above: a fleet IS found here, and what it
+/// needs cannot be read (the machine directory holds no `defaults/`, so the
+/// pack layers do not resolve). That is still could-not-tell, row 3
+/// (shared.exit-codes.R4): only the walk's no-fleet answer moved to 1.
+#[test]
+fn a_fleet_whose_packs_do_not_resolve_is_still_three() {
+    let machine = Machine::new("found-unresolved");
+    let project = machine.root.join("a-project");
+    std::fs::create_dir_all(&project).expect("the project is created");
+    std::fs::write(project.join("fleet.toml"), "").expect("the policy is written");
+    let out = Command::new(env!("CARGO_BIN_EXE_fleet"))
+        .args(["doctor", "--json"])
+        .current_dir(&project)
+        .hermetic(&machine.root.join("home"), &machine.root)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    one_refusal(&out, "doctor");
 }

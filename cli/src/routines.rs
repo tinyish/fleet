@@ -114,25 +114,30 @@ struct Fleet {
     registry: Registry,
 }
 
-/// Resolve the machine and load every routine on it. `Err` is a fleet root
-/// nothing on this box names, which is could-not-tell and never an empty
-/// registry.
-fn resolve() -> Result<Fleet, String> {
+/// Resolve the machine and load every routine on it. `Err` is the exit and the
+/// line, never an empty registry: a fleet nothing on this box names is a
+/// refusal (shared.exit-codes.R23); a declared project whose fleet is unnamed,
+/// and a policy that will not read, are could-not-tell.
+fn resolve() -> Result<Fleet, (Exit, String)> {
     let machine_dir = platform::machine_dir();
     let fleet_root = match load::fleet_root(None, &machine_dir) {
         Ok(root) => root,
         Err(load::NoFleet::Nothing) => {
-            return Err(format!(
-                "no `fleet.toml` above this directory and none named by {}",
-                config::path_in(&machine_dir).display()
+            return Err((
+                Exit::Refused,
+                format!(
+                    "no `fleet.toml` above this directory and none named by {}",
+                    config::path_in(&machine_dir).display()
+                ),
             ))
         }
-        Err(load::NoFleet::Declared) => {
-            return Err(format!(
+        Err(load::NoFleet::Declared) => return Err((
+            Exit::CouldNotTell,
+            format!(
                 "this project is declared, so its fleet is the machine's, and none is named by {}",
                 config::path_in(&machine_dir).display()
-            ))
-        }
+            ),
+        )),
     };
     let seats = config::read(&config::path_in(&machine_dir))
         .map(|machine| machine.seats)
@@ -147,7 +152,12 @@ fn resolve() -> Result<Fleet, String> {
     // policy file is a refusal nobody asked for.
     let policy = policy::load(&fleet_toml)
         .or_else(|_| policy::parse(""))
-        .map_err(|why| format!("the policy could not be read: {why}"))?;
+        .map_err(|why| {
+            (
+                Exit::CouldNotTell,
+                format!("the policy could not be read: {why}"),
+            )
+        })?;
     // A file that will not read names no adapter, as it names no policy
     // above: the agent's default opens.
     let setting = agent::Setting::of(table, &fleet_toml, &machine_dir);
@@ -251,9 +261,9 @@ fn machine_of<'a>(
 fn list() -> Exit {
     let fleet = match resolve() {
         Ok(fleet) => fleet,
-        Err(why) => {
+        Err((exit, why)) => {
             eprintln!("fleet routine list: {why}");
-            return Exit::CouldNotTell;
+            return exit;
         }
     };
     let (state, why) = state::read(&fleet.machine_dir);
@@ -301,9 +311,9 @@ fn check(name: &str, now_at: Option<&str>, last_fired: Option<&str>) -> Exit {
 
     let fleet = match resolve() {
         Ok(fleet) => fleet,
-        Err(why) => {
+        Err((exit, why)) => {
             eprintln!("fleet routine check: {why}");
-            return Exit::CouldNotTell;
+            return exit;
         }
     };
     let Some(routine) = known(&fleet, name, "check") else {
@@ -362,9 +372,9 @@ fn stamp_or(text: Option<&str>, fallback: u64) -> Result<u64, String> {
 fn run(name: &str, force: bool, dry_run: bool) -> Exit {
     let fleet = match resolve() {
         Ok(fleet) => fleet,
-        Err(why) => {
+        Err((exit, why)) => {
             eprintln!("fleet routine run: {why}");
-            return Exit::CouldNotTell;
+            return exit;
         }
     };
     let Some(routine) = known(&fleet, name, "run") else {

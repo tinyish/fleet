@@ -289,7 +289,11 @@ pub fn resolve_from(
         }
     }
 
-    Err(Stop::could_not_tell(format!(
+    // NO FLEET IS A REFUSAL, NOT A COULD-NOT-TELL: nothing the answer needed
+    // was unreadable; the fleet the verb needs is absent (shared.exit-codes.R2,
+    // R23). `fleet start` has always answered this way, and now every verb that
+    // resolves through here does.
+    Err(Stop::refused(format!(
         "no `{FLEET_TOML}` and no `{PROJECT_TOML}` above {} — `fleet create` writes one",
         cwd.display()
     )))

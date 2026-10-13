@@ -843,19 +843,19 @@ fn json_carries_every_row_and_the_exit_carries_the_aggregate() {
     );
 }
 
-/// No project under --json: the verb's own refusal, not a report.
+/// No project under --json: the verb's own refusal, row 1, not a report.
 #[test]
-fn json_with_no_project_is_a_could_not_tell_refusal() {
+fn json_with_no_project_is_a_refused_refusal() {
     let rig = Rig::new("json-nowhere", CONFIGURED);
     let elsewhere = rig.root.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("the directory is made");
     let out = rig.doctor_in(&elsewhere, &["--json"]);
     let said = stdout(&out);
-    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
     let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
     assert_eq!(document["ok"], false);
     assert_eq!(document["verb"], "doctor");
-    assert_eq!(document["refusal"]["code"], "could_not_tell");
+    assert_eq!(document["refusal"]["code"], "refused");
 }
 
 /// A name no layer carries under --json: the usage refusal.
@@ -873,12 +873,12 @@ fn json_with_a_name_no_layer_carries_is_a_usage_refusal() {
 // ---- 8. no project ----------------------------------------------------------
 
 #[test]
-fn no_project_is_could_not_tell() {
+fn no_project_is_refused() {
     let rig = Rig::new("nowhere", CONFIGURED);
     let elsewhere = rig.root.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("the directory is made");
     let out = rig.doctor_in(&elsewhere, &[]);
-    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
         stderr(&out).starts_with("fleet doctor: no `fleet.toml`"),
         "{}",
