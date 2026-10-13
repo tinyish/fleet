@@ -134,7 +134,8 @@ Each clause follows these rules:
   another, cites that clause by its full id and never restates it.
 - Where two clauses' triggers can both hold, the broader clause names the
   narrower one as its exception ("except as <id> says"), so every case meets
-  exactly one clause.
+  exactly one clause. A refusal (`IF …, THEN fleet SHALL refuse …`) always
+  wins over the clause it blocks, and that clause need not name it.
 - Only text a script or a person depends on is quoted, never a whole
   message.
 - Where today's binary falls short of a clause, a line
