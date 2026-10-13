@@ -79,7 +79,8 @@ is.
 | `events.jsonl` | the machine's event stream, one event per line, oldest first | every verb and the controller, by appending |
 | `projects.toml` | each standalone project registered on this machine: its root and its name, once per root | `fleet create --standalone` |
 | `service.out.log`, `service.err.log` | macOS only: what the controller's service printed on standard output and on standard error | the service, while it runs |
-| `<file>.lock` | nothing to read: an empty file left beside `projects.toml`, `config.json` or a fleet's `fleet.toml` once fleet has changed it | the verb that changed that file |
+| `<file>.lock` | nothing to read: an empty file left beside `projects.toml` or `config.json` once fleet has changed it | the verb that changed that file |
+| `locks/` | nothing to read: one empty file for each fleet whose `fleet.toml` fleet has changed | the verb that changed that `fleet.toml` |
 
 `packs.lock` records the source as you typed it, because that is what a later
 `fleet pack add` of the same source matches on. It records the commit as what
@@ -93,10 +94,25 @@ before or after it. Registering the same project again adds no second
 A `.lock` file exists so that two `fleet` processes changing the same file at
 once do not overwrite each other: two registrations that each read the same
 `projects.toml` would leave one row. fleet leaves the lock file in place.
-Removing it would let a second process take a lock that guards nothing. A
-project's own file gets its lock beside it too, so `fleet create --embedded`
-leaves a `fleet.toml.lock` in your checkout, where git lists it as untracked.
-That is changing (see below).
+Removing it would let a second process take a lock that guards nothing.
+
+A fleet's `fleet.toml` is locked the same way, but its lock is kept in
+`locks/` in the machine directory and never beside the file. The `fleet.toml`
+sits in your project, or in a standalone fleet's own directory, and a lock
+file there is one git lists as untracked and you never asked for. So
+`fleet create --embedded` and `fleet seat add` leave nothing in your checkout
+but the `fleet.toml` they write. The lock is keyed by the directory that
+holds the `fleet.toml`: the project's root for an embedded fleet, the fleet's
+own directory for a standalone one. Every project declared to one standalone
+fleet edits that one file, so they share its one lock. The lock file's name
+is fleet's own, and nothing in it is for a person to read.
+
+The lock keeps out the `fleet` processes that use the same machine
+directory. Two processes under two machine directories, such as one with a
+scratch `FLEET_DIR` and one without, take two different locks on the same
+`fleet.toml`. A `fleet.toml.lock` that an older fleet left beside a
+`fleet.toml` stays where it is: fleet neither reads it nor removes it, and
+you can delete it.
 
 On Linux, the service manager collects what the service prints into the
 user's journal instead of a file, so the machine directory holds no
@@ -198,8 +214,6 @@ what fleet does today, with a `Changing:` line after each one.
   items, `fleet doctor`, `fleet prime`) fall back only inside a checkout, and
   refuse outside one. Machine verbs (`fleet start`, `fleet stop`) act from any
   directory. Only `fleet prime` changes.
-- **No lock file in a checkout** (fleet-hn6e). The locks for a project's files
-  live in the machine directory, keyed by the project.
 
 ## Behaviour
 
@@ -258,12 +272,11 @@ what fleet does today, with a `Changing:` line after each one.
   service prints, fleet SHALL leave what it printed in the user's journal,
   read with `journalctl --user -u dev.fleet.controller.service`, and write no
   `service.out.log` or `service.err.log`.
-- **shared.locations.R17**: WHEN fleet has changed `projects.toml`,
-  `config.json` or a fleet's `fleet.toml`, fleet SHALL leave an empty file
-  beside that file, named after it with `.lock` appended (such as
-  `projects.toml.lock`), which holds nothing a person reads.
-  Changing: fleet-hn6e: the lock for a project's file is kept in the machine
-  directory, keyed by the project, and no lock file appears in a checkout.
+- **shared.locations.R17**: WHEN fleet has changed `projects.toml` or
+  `config.json`, fleet SHALL leave an empty file beside that file, named
+  after it with `.lock` appended (such as `projects.toml.lock`), which holds
+  nothing a person reads. A fleet's `fleet.toml` is locked as R33 and R34
+  say.
 - **shared.locations.R18**: WHERE the platform is macOS, WHEN `fleet start`
   installs the controller's service, fleet SHALL write its file at
   `Library/LaunchAgents/dev.fleet.controller.plist` under `HOME`, whatever
@@ -339,6 +352,13 @@ what fleet does today, with a `Changing:` line after each one.
   `FLEET_HOME` against the working directory, and with `FLEET_DIR`,
   `FLEET_HOME` and `HOME` all unset (and on Linux `XDG_STATE_HOME` unset)
   use `.fleet` under the working directory (see Open questions).
+- **shared.locations.R33**: WHEN fleet has changed a fleet's `fleet.toml`,
+  fleet SHALL leave an empty file in `locks/` in the machine directory, one
+  for each directory that holds a `fleet.toml` fleet has changed, which holds
+  nothing a person reads.
+- **shared.locations.R34**: WHEN fleet changes a fleet's `fleet.toml`, fleet
+  SHALL create no file beside it to lock it, and SHALL leave a
+  `fleet.toml.lock` already beside it as it is.
 
 ## Non-functional
 

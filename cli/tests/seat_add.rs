@@ -488,3 +488,54 @@ fn the_json_flag_prints_one_envelope_for_an_add_and_for_a_refusal() {
     assert_eq!(document["verb"], "seat add");
     assert_eq!(document["refusal"]["code"], "refused");
 }
+
+/// A fleet's `fleet.toml` is locked in the machine directory and never beside
+/// it (shared.locations R33, R34): `create --embedded` and `seat add` leave no
+/// lock file in the checkout, and one empty lock in the machine's `locks/`.
+#[test]
+fn the_policy_files_lock_is_in_the_machine_directory_and_not_the_checkout() {
+    let rig = Rig::new("lock-home");
+    let out = rig.add(&["--agent"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let in_checkout: Vec<_> = std::fs::read_dir(&rig.project)
+        .expect("the checkout reads")
+        .map(|entry| entry.expect("an entry").file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".lock"))
+        .collect();
+    assert!(
+        in_checkout.is_empty(),
+        "no lock file in the checkout: {in_checkout:?}"
+    );
+
+    let locks: Vec<PathBuf> = std::fs::read_dir(rig.machine.join("locks"))
+        .expect("the machine directory holds locks/")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    assert_eq!(locks.len(), 1, "one lock for the one fleet: {locks:?}");
+    assert!(
+        locks[0].extension().is_some_and(|e| e == "lock"),
+        "{locks:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(&locks[0]).expect("the lock reads").len(),
+        0,
+        "and it holds nothing"
+    );
+}
+
+/// A `fleet.toml.lock` an older fleet left beside the file is neither read nor
+/// removed (shared.locations R34).
+#[test]
+fn an_old_lock_beside_the_policy_file_is_left_as_it_is() {
+    let rig = Rig::new("lock-old");
+    let old = rig.project.join("fleet.toml.lock");
+    write(&old, "left by an older fleet\n");
+
+    let out = rig.add(&["--agent"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&old).expect("the old lock is still there"),
+        "left by an older fleet\n"
+    );
+}

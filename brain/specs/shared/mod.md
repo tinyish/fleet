@@ -67,7 +67,8 @@ share, the crate roots, and the fakes and stubs the tests drive.
 - `controller/src/platform/mod.rs` — Supplies what the operating system owns:
   the machine directory, process reads, the load average, the child `PATH` and
   the service manager.
-  Depends on: `core/src/fs.rs`, `core/src/process.rs`.
+  Depends on: `core/src/digest.rs`, `core/src/fs.rs`,
+  `core/src/process.rs`.
 - `controller/src/policy.rs` — Reads `fleet.toml` into the controller's policy,
   and keeps the last good one when a change does not parse.
   Depends on: `core/src/agent/mod.rs`, `core/src/item/run.rs`.

@@ -162,7 +162,8 @@ fn add(args: &AddArgs) -> Result<Added, Stop> {
     // refused while nothing is written, rather than after the seat is listed.
     let worktrees = here.worktrees_dir()?.display().to_string();
 
-    let _held = platform::lock_beside(path).map_err(Stop::could_not_tell)?;
+    let _held =
+        platform::lock_policy_file(&here.machine_dir, path).map_err(Stop::could_not_tell)?;
     let (body, seats) = read_roster(path)?;
     if let Some(name) = &name {
         not_held(&seats, name)?;
@@ -205,7 +206,8 @@ pub(crate) fn list_human(
     machine_dir: &Path,
     name: Option<String>,
 ) -> Result<Listed, Stop> {
-    let _held = platform::lock_beside(policy_file).map_err(Stop::could_not_tell)?;
+    let _held =
+        platform::lock_policy_file(machine_dir, policy_file).map_err(Stop::could_not_tell)?;
     let (body, seats) = read_roster(policy_file)?;
     if let Some(name) = &name {
         not_held(&seats, name)?;
@@ -238,7 +240,7 @@ pub(crate) fn list_human(
 
 /// The file's text and the seats it lists.
 ///
-/// READ UNDER THE LOCK the caller holds (`platform::lock_beside`), because an
+/// READ UNDER THE LOCK the caller holds (`platform::lock_policy_file`), because an
 /// add is a read-modify-write and the atomic rename under it is not: two adds
 /// that each read the same file would leave one row.
 fn read_roster(path: &Path) -> Result<(String, Vec<Seat>), Stop> {

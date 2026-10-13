@@ -272,7 +272,47 @@ pub const LOCK_SUFFIX: &str = ".lock";
 pub fn lock_beside(path: &Path) -> Result<std::fs::File, String> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(LOCK_SUFFIX);
-    let lock = path.with_file_name(name);
+    lock_at(&path.with_file_name(name))
+}
+
+/// The directory in the machine directory that holds the locks on fleets' own
+/// `fleet.toml` files (shared.locations R33).
+pub const POLICY_LOCKS: &str = "locks";
+
+/// The lock that guards a read-modify-write of a fleet's own `fleet.toml`,
+/// held for as long as the returned handle lives: [`lock_beside`]'s
+/// discipline, kept in the machine directory and NEVER BESIDE THE FILE
+/// (shared.locations R34), because the file sits in a person's checkout and a
+/// lock there is an untracked file they never asked for.
+pub fn lock_policy_file(machine_dir: &Path, policy_file: &Path) -> Result<std::fs::File, String> {
+    lock_at(&policy_lock_path(machine_dir, policy_file)?)
+}
+
+/// Where [`lock_policy_file`] locks: `locks/<sha-256 of the root>.lock` under
+/// the machine directory, the root being the directory that holds the file.
+///
+/// KEYED BY THE FILE'S ROOT, not by the project a call stands in: every
+/// project declared to one standalone fleet edits that fleet's one file, and a
+/// lock per caller would let two of them write over each other. CANONICAL, so
+/// two spellings of one directory (a symlinked temp dir) take one lock. It
+/// reads the file system to canonicalize, and writes nothing.
+pub fn policy_lock_path(machine_dir: &Path, policy_file: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = match policy_file.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let root = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut digest = fleet_core::digest::Sha256::new();
+    digest.update(root.as_os_str().as_bytes());
+    Ok(machine_dir
+        .join(POLICY_LOCKS)
+        .join(format!("{}{LOCK_SUFFIX}", digest.hex())))
+}
+
+/// The lock file at `lock`, its directory made and the file created where
+/// they are not there, LEFT in place, and held.
+fn lock_at(lock: &Path) -> Result<std::fs::File, String> {
     if let Some(dir) = lock.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -280,7 +320,7 @@ pub fn lock_beside(path: &Path) -> Result<std::fs::File, String> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&lock)
+        .open(lock)
         .map_err(|e| format!("{}: {e}", lock.display()))?;
     handle
         .lock()
@@ -1366,5 +1406,66 @@ mod tests {
             Some(false),
             "a reaped pid is gone, not unknown"
         );
+    }
+
+    /// A fleet's `fleet.toml` is locked under `locks/` in the machine
+    /// directory, keyed by the canonical directory that holds it: one lock
+    /// whatever spelling reaches the file, two for two fleets, and nothing
+    /// written beside the file (shared.locations R33, R34).
+    #[test]
+    fn a_policy_files_lock_is_one_per_fleet_root_in_the_machine_directory() {
+        let root = std::env::temp_dir().join(format!("fleet-policy-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (one, two, machine) = (root.join("one"), root.join("two"), root.join("machine"));
+        for dir in [&one, &two] {
+            std::fs::create_dir_all(dir).expect("the fleet's directory is made");
+            std::fs::write(dir.join("fleet.toml"), "").expect("its policy file is written");
+        }
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&one, &link).expect("a second spelling of one is made");
+        let at = |dir: &Path| {
+            policy_lock_path(&machine, &dir.join("fleet.toml")).expect("the lock is placed")
+        };
+
+        assert_eq!(
+            at(&one),
+            at(&link),
+            "one fleet, one lock, whatever spelling reaches it"
+        );
+        assert_ne!(at(&one), at(&two), "two fleets, two locks");
+        assert_eq!(
+            at(&one).parent(),
+            Some(machine.join(POLICY_LOCKS).as_path()),
+            "the lock is in the machine directory's locks/"
+        );
+
+        let held = lock_policy_file(&machine, &one.join("fleet.toml")).expect("the lock is taken");
+        let other = std::fs::OpenOptions::new()
+            .write(true)
+            .open(at(&link))
+            .expect("the lock file was created and left");
+        assert!(
+            matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "the second spelling waits on the first"
+        );
+        drop(held);
+        assert!(
+            other.try_lock().is_ok(),
+            "and takes it once the first lets go"
+        );
+        assert_eq!(
+            std::fs::metadata(at(&one))
+                .expect("the lock file reads")
+                .len(),
+            0,
+            "it holds nothing"
+        );
+
+        let beside: Vec<_> = std::fs::read_dir(&one)
+            .expect("the fleet's directory reads")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(beside, ["fleet.toml"], "nothing is written beside the file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
