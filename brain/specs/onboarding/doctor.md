@@ -34,14 +34,16 @@ $ fleet doctor --packs-dir <DIR>   # read the packs from <DIR>
 ```
 
 `fleet doctor` acts in a project, which it finds from the working directory
-as shared.locations says (R21 to R24). Where it finds no fleet, or the
-directory declares a project this machine has not registered, it refuses
-before any check runs (shared.locations.R25, R26, R35), with exit 1. Where
+as shared.locations says (shared.locations.R21 to shared.locations.R24).
+Where it finds no fleet, or the directory declares a project this machine
+has not registered, it refuses before any check runs (shared.locations.R25,
+shared.locations.R26, shared.locations.R35), with exit 1. Where
 the machine's `config.json` or `projects.toml` is there but will not read,
 it cannot tell which fleet it is in, and exits 3 without running a check
 (shared.locations.R38). Like every verb but `fleet guard`, it refuses a
 machine directory named by a relative path, or no home at all, before it
-reads anything (shared.locations.R30 to R32). Every check runs from the
+reads anything (shared.locations.R30 to shared.locations.R32). Every check
+runs from the
 project's root.
 
 `--packs-dir <DIR>` reads the installed packs from `<DIR>` in place of
@@ -201,8 +203,8 @@ Each call `store-adapter` makes is given 60 s. Each call `agent-adapter`
 makes is given the agent's bound, 20 s unless `FLEET_AGENT_TIMEOUT_MS` sets
 another; the agent area owns that variable.
 
-An installed agent version that is not among the versions the adapter was
-measured against still passes. Its line names the installed version and the
+Where the adapter otherwise passes, an installed agent version that is not
+among the versions the adapter was measured against still passes. Its line names the installed version and the
 measured ones, and says to re-measure. A finding there would gate whatever
 consults the doctor.
 
@@ -226,8 +228,9 @@ found nothing. A finding is not a refusal: it is reported in rows, not on a
 
 `fleet doctor --json` prints the envelope shared.output describes. Once its
 checks have run, the document on exit 0 is shared.output.R6's, and the
-document on exit 1 or 3 is the one shared.output.R19 and R20 describe, with
-every row in `data` either way (shared.exit-codes.R24). The rows, their
+document on exit 1 or 3 is the one shared.output.R19 and shared.output.R20
+describe, with every row in `data` either way (shared.output.R6,
+shared.output.R19). The rows, their
 indented lines and the summary move to standard error (shared.output.R15). A
 refusal before any check runs prints a refusal document (shared.output.R7).
 The exit is the same with the flag as without it (shared.exit-codes.R10).
@@ -256,17 +259,17 @@ Each object in `checks` holds:
 ### When fleet doctor refuses
 
 A refusal comes before any check runs, on a `fleet doctor:` line
-(shared.exit-codes.R12, R13).
+(shared.exit-codes.R12, shared.exit-codes.R13).
 
 | Case | Exit |
 | --- | --- |
 | no fleet for the working directory | 1 (shared.locations.R25, shared.exit-codes.R23) |
-| a declared project this machine has not registered, or a `config.json` that names no fleet for it | 1 (shared.locations.R26, R35) |
+| a declared project this machine has not registered, or a `config.json` that names no fleet for it | 1 (shared.locations.R26, shared.locations.R35) |
 | `config.json` or `projects.toml` is there but will not read | 3 (shared.locations.R38) |
-| a machine directory named by a relative path, or no home at all | 1 (shared.locations.R30 to R32) |
+| a machine directory named by a relative path, or no home at all | 1 (shared.locations.R30 to shared.locations.R32) |
 | a check name no layer carries | 2 (shared.exit-codes.R3) |
 | the pack layers do not resolve, such as with no defaults directory | 3 (shared.exit-codes.R4) |
-| the command line does not parse | 2 (shared.exit-codes.R3, R15) |
+| the command line does not parse | 2 (shared.exit-codes.R3, shared.exit-codes.R15) |
 
 ### What the doctor writes
 
@@ -298,7 +301,8 @@ Each gap is held by an open item, and the clause cited carries its
 
 - **onboarding.doctor.R1**: IF `fleet doctor` finds no fleet for the working
   directory (shared.locations.R25), or the directory declares a project this
-  machine has not registered (shared.locations.R26, R35), or a file that
+  machine has not registered (shared.locations.R26, shared.locations.R35),
+  or a file that
   decides its fleet will not read (shared.locations.R38), THEN fleet SHALL
   run no check.
 - **onboarding.doctor.R2**: IF the pack layers do not resolve, such as when
@@ -396,7 +400,8 @@ Each gap is held by an open item, and the clause cited carries its
 - **onboarding.doctor.R31**: WHEN the agent adapter answers a non-null
   `version` and capabilities that validate, fleet SHALL give `agent-adapter`
   the verdict `pass`.
-- **onboarding.doctor.R32**: WHEN the agent adapter's installed version is not
+- **onboarding.doctor.R32**: WHEN the agent adapter answers a non-null
+  `version` and capabilities that validate, and its installed version is not
   among the versions its capabilities say it was measured against, fleet
   SHALL still give `agent-adapter` the verdict `pass`, with a line that names
   the installed version and the measured ones and says to re-measure.
@@ -417,7 +422,8 @@ Each gap is held by an open item, and the clause cited carries its
   error, with the whitespace around it trimmed.
 - **onboarding.doctor.R37**: IF a check that ran printed no non-blank line,
   THEN fleet SHALL end its row with a line that says so and names its exit
-  code, or says it was killed by a signal.
+  code, or says it was killed by a signal. A check stopped at its bound is
+  onboarding.doctor.N3's.
 - **onboarding.doctor.R38**: IF a row's verdict is not `pass`, THEN fleet
   SHALL print after it every non-blank line the check printed, untrimmed,
   those on standard output first and then those on standard error, each
@@ -491,10 +497,12 @@ Each gap is held by an open item, and the clause cited carries its
   `fleet agent check` prove the rest of each contract.
 - Scripts, agents and skills read the exit (R41 to R43) and the `--json`
   document's `data` (R44, R45), inside the envelope shared.output states.
-- `fleet doctor` is one of the verbs that shared.output.R7, R15, R19 and
-  R20, shared.exit-codes.R23 and R24, and shared.locations.R25, R26, R30 to
-  R32, R35 and R38 cover. shared.locations.R30 and R38 carry the `Today:`
-  lines that reach it (fleet-8s9z, fleet-9sr5).
+- `fleet doctor` is one of the verbs that shared.output.R6, shared.output.R7,
+  shared.output.R15, shared.output.R19 and shared.output.R20,
+  shared.exit-codes.R23, and shared.locations.R25, shared.locations.R26,
+  shared.locations.R30 to shared.locations.R32, shared.locations.R35 and
+  shared.locations.R38 cover. shared.locations.R30 and shared.locations.R38
+  carry the `Today:` lines that reach it (fleet-8s9z, fleet-9sr5).
 
 ## Open questions
 
