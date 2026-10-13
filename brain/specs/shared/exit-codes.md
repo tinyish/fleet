@@ -48,11 +48,12 @@ number is already on `$?`, so the document names the row rather than
 spelling the number a second time. Asking for `--json` never changes the
 exit: the same refusal exits with the same number with the flag and without
 it. `fleet status --json` is the exception, because it reads nothing beyond
-the projection; the status area's spec says what it exits.
+the projection: once it prints the projection it exits 0, whatever the page
+would exit (shared.output.R22).
 
 The document never reads as a success that the exit does not back:
 `fleet doctor --json` says `ok` is `true` only when it exits 0, and `false`
-when it exits 1 or 3.
+when it exits 1 or 3 (shared.output.R6, shared.output.R19).
 
 A verb whose exit means something narrower, such as `fleet doctor` or
 `fleet guard`, says so in its own spec. It still exits only with a number
@@ -222,10 +223,10 @@ closes it.
   act took effect, THEN fleet SHALL exit 3 and never 0.
 - **shared.exit-codes.R10**: WHEN a verb that takes `--json` is called with
   it, fleet SHALL exit with the same number it exits with without the flag,
-  except for `fleet status --json`, whose exit the status area's spec states.
-- **shared.exit-codes.R11**: IF a verb refuses under `--json`, THEN fleet
-  SHALL print a refusal document whose code is the name of the row it exits
-  with (see shared.output).
+  except as shared.output.R22 says for `fleet status --json`.
+- **shared.exit-codes.R11**: WHEN a verb called with `--json` prints a
+  refusal document, fleet SHALL set its `code` to the name of the row the
+  verb exits with.
 - **shared.exit-codes.R12**: IF a verb refuses after its arguments parse (a
   refusal, not a check's finding), THEN fleet SHALL write a line on standard
   error that starts with `fleet`, the verb as typed without its arguments,
@@ -250,28 +251,27 @@ closes it.
   `--json`, a line that starts with `fleet:` and gives the error, unless that
   line would carry only the verb's name, followed by one indented line for
   each cause, which reads `caused by:` after its indent, and exit 3.
-- **shared.exit-codes.R18**: IF `fleet event woke`, `rest`, `handed-off`,
-  `exited`, `clear-halt` or `step` has written its line and the stream's last
-  line is not that line, THEN fleet SHALL exit 3.
+- ~~**shared.exit-codes.R18**~~ retired 2026-10-13: it was
+  shared.exit-codes.R9 applied to the `fleet event` writers, which
+  shared.exit-codes.R9 already binds (fleet-mjni).
 - **shared.exit-codes.R19**: IF `fleet event show` is given an id that is on
   more than one line of the stream, THEN fleet SHALL exit 3.
 - **shared.exit-codes.R20**: IF `fleet seat spawn`, or `fleet dispatch` with no
   `--to`, finds that `[permissions] tool_commands` in `fleet.toml` is not a
   list of single command words, THEN fleet SHALL exit 3.
-- **shared.exit-codes.R21**: IF `fleet event woke`, `rest`, `handed-off`,
-  `exited`, `clear-halt` or `step` cannot append its line to the event
-  stream, THEN fleet SHALL exit 3.
-- **shared.exit-codes.R22**: IF `fleet seat nudge` or
-  `fleet seat attach --write` cannot append its line to the event stream,
-  THEN fleet SHALL exit 3.
+- ~~**shared.exit-codes.R21**~~ retired 2026-10-13: shared.exit-codes.R25
+  gives every verb exit 3 on a failed append, the `fleet event` writers among
+  them (fleet-mjni).
+- ~~**shared.exit-codes.R22**~~ retired 2026-10-13: shared.exit-codes.R25
+  gives every verb exit 3 on a failed append, `fleet seat nudge` and
+  `fleet seat attach --write` among them (fleet-mjni).
 - **shared.exit-codes.R23**: IF a verb that works on a project refuses
   because it finds no fleet for the working directory (shared.locations.R25
   says where it looks and which verbs refuse), THEN fleet SHALL exit 1, the
   row named `refused`.
-- **shared.exit-codes.R24**: WHEN `fleet doctor --json` has run its checks,
-  fleet SHALL print a document whose `ok` is `true` only where it exits 0,
-  and `false` where it exits 1 or 3 (see shared.output.R6 and
-  shared.output.R19).
+- ~~**shared.exit-codes.R24**~~ retired 2026-10-13: it restated
+  shared.output.R6 and shared.output.R19, which state `fleet doctor --json`'s
+  `ok` (fleet-vd0k).
 - **shared.exit-codes.R25**: IF a verb cannot append a line of its own to
   the event stream, other than `fleet observe` polling in a loop
   (shared.exit-codes.R26), THEN fleet SHALL exit 3, the row named
