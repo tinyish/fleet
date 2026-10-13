@@ -45,7 +45,9 @@ pub const COLLECTOR_STALE_POLLS: u64 = 3;
 ///
 /// THE WRITE IS READ BACK BEFORE THIS ANSWERS 0. A caller acting on a 0 stops
 /// working and waits for a successor, so "it was written" has to be a reading of
-/// the file and not of this process's own intent.
+/// the file and not of this process's own intent. A line that cannot be
+/// appended is could-not-tell too: nothing was written, and the caller cannot
+/// act on that as a refusal.
 ///
 /// The line's actor is the seat, `{seat, <id>}`, and the read-back compares the
 /// typed actor; the projection row a refusal reads is keyed on the same id.
@@ -89,7 +91,10 @@ pub fn record(
     let mut log = EventLog::open(&stream);
     let actor = ActorRef::seat(&key);
     if let Err(e) = log.append(kind, &actor, payload) {
-        return Err((1, format!("could not append to {}: {e}", stream.display())));
+        return Err((
+            COULD_NOT_TELL,
+            format!("could not append to {}: {e}", stream.display()),
+        ));
     }
     match events::read_after(&stream, log.seq().saturating_sub(1)).last() {
         Some(record) if record.kind == kind && record.actor == actor => {

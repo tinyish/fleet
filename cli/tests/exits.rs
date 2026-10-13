@@ -232,6 +232,33 @@ fn no_collector_is_five() {
     );
 }
 
+/// Row 3, for a record that cannot be appended (R21): the stream's path is a
+/// directory, so the open fails and nothing is written. `rest` and
+/// `clear-halt` take the same append, after a projection check this machine
+/// directory would refuse first, so the three writers that need no
+/// projection stand for all five.
+#[test]
+fn a_seat_record_that_cannot_be_appended_is_three() {
+    let machine = Machine::new("append");
+    machine.list_orla();
+    let stream = machine.root.join("events.jsonl");
+    std::fs::create_dir_all(&stream).expect("the stream's path is a directory");
+    for verb in ["woke", "handed-off", "exited"] {
+        let out = machine.run(&["event", verb, "Orla"]);
+        assert_eq!(out.status.code(), Some(3), "{verb}: {}", stderr(&out));
+        assert!(
+            stderr(&out).starts_with(&format!("fleet event {verb}: could not append to ")),
+            "{verb}: {}",
+            stderr(&out)
+        );
+    }
+
+    // The control: with the path free, the same writer appends and exits 0.
+    std::fs::remove_dir(&stream).expect("the directory is removed");
+    let out = machine.run(&["event", "woke", "Orla"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
 /// Row 3, for a record that does not read back (R18): the stream ends in
 /// half a line, so the line a seat writer appends joins it and no line the
 /// stream carries is the one written. The writer acted and cannot say it

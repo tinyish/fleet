@@ -8,7 +8,8 @@
 //!
 //! The append is the seat events' own: the machine directory's stream, the
 //! controller's `EventLog`, and a read-back of the last line before the exit
-//! reads 0 — a workflow that takes a 0 as "recorded" and moves to its next
+//! reads 0; an append that fails, or a read-back that does not find the line,
+//! exits 3 — a workflow that takes a 0 as "recorded" and moves to its next
 //! step must be reading the file and not this process's intent.
 
 use crate::exit::Exit;
@@ -99,7 +100,7 @@ pub fn record(args: &StepArgs) -> Exit {
             "fleet event step: could not append to {}: {e}",
             stream.display()
         );
-        return Exit::Refused;
+        return Exit::CouldNotTell;
     }
     match events::read_after(&stream, log.seq().saturating_sub(1)).last() {
         Some(record)

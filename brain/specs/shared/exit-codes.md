@@ -100,6 +100,10 @@ verb that cannot say what happened is a third answer rather than a failure.
 - **When fleet stops on an error it did not turn into a refusal,** it writes
   a line starting `fleet:`, then one indented line per cause that reads
   `caused by:` after its indent, and exits 3.
+- **A verb that writes a line of its own to the event stream** exits 3 when
+  it cannot append it: the `fleet event` writers (`woke`, `rest`,
+  `handed-off`, `exited`, `clear-halt` and `step`), `fleet seat nudge` and
+  `fleet seat attach --write`.
 
 For example, `fleet observe --once` with no seat list exits 3:
 
@@ -117,9 +121,6 @@ Exit 1 is different: fleet could tell, and the answer is no.
 Some of today's exits do not match the meaning in the table. Each one has an
 approved change, listed after it.
 
-- **A failed append to the event stream.** The `fleet event` writers and
-  `fleet event step` exit 1. `fleet seat nudge` and
-  `fleet seat attach --write` exit 3. All of them will exit 3 (fleet-6dn4).
 - **A verb run outside any fleet.** A verb that works on a project and finds
   no fleet for the working directory exits 3. `fleet start` exits 1 instead.
   Nothing was unreadable, so every such verb will exit 1 (fleet-m19v).
@@ -140,9 +141,7 @@ approved change, listed after it.
   write it made reads back, fleet SHALL exit 0, the row named `done`.
 - **shared.exit-codes.R2**: IF the thing a verb names is absent, is not in the
   state the verb needs, or already is so, or a check the verb runs answers
-  no, THEN fleet SHALL exit 1, the row named `refused`. Exit 1 also answers
-  the failed append in shared.exit-codes.R21.
-  Changing: fleet-6dn4: a failed append exits 3.
+  no, THEN fleet SHALL exit 1, the row named `refused`.
 - **shared.exit-codes.R3**: IF the call itself is wrong (a missing, unknown or
   invalid command, argument or flag; two flags that cannot go together; no
   command, or a family with no verb; or a question fleet would have to ask
@@ -210,8 +209,7 @@ approved change, listed after it.
   list of single command words, THEN fleet SHALL exit 3.
 - **shared.exit-codes.R21**: IF `fleet event woke`, `rest`, `handed-off`,
   `exited`, `clear-halt` or `step` cannot append its line to the event
-  stream, THEN fleet SHALL exit 1.
-  Changing: fleet-6dn4: exits 3, as every verb whose append fails does.
+  stream, THEN fleet SHALL exit 3.
 - **shared.exit-codes.R22**: IF `fleet seat nudge` or
   `fleet seat attach --write` cannot append its line to the event stream,
   THEN fleet SHALL exit 3.

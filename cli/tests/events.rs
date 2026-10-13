@@ -953,6 +953,37 @@ fn the_step_writer_appends_both_halves_on_the_run_and_the_json_tail_reads_the_cl
     );
 }
 
+/// R21 for the step writer: the stream's path is a directory, so the
+/// append fails and the exit is 3.
+#[test]
+fn a_step_that_cannot_be_appended_is_three() {
+    let args = [
+        "event",
+        "step",
+        "started",
+        "--run",
+        "fleet-run-9",
+        "--n",
+        "1",
+        "--name",
+        "a",
+    ];
+    let rig = Rig::new("step-append");
+    std::fs::create_dir_all(rig.stream()).expect("the stream's path is a directory");
+    let out = rig.fleet(&args);
+    assert_eq!(code(&out), Some(3), "{}", err(&out));
+    assert!(
+        err(&out).starts_with("fleet event step: could not append to "),
+        "{}",
+        err(&out)
+    );
+
+    // The control: with the path free, the same call lands.
+    std::fs::remove_dir(rig.stream()).expect("the directory is removed");
+    let out = rig.fleet(&args);
+    assert_eq!(code(&out), Some(0), "{}", err(&out));
+}
+
 /// R18 for the step writer: a stream ending in half a line takes the
 /// step's line into it, so the read-back finds nothing and the exit is 3.
 #[test]
