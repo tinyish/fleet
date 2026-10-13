@@ -109,10 +109,10 @@ verb that cannot say what happened is a third answer rather than a failure.
   `fleet:` line would carry only the verb's name, fleet leaves it out: the
   verb's own `fleet <verb>:` line above it already names the verb, and the
   causes follow that line.
-- **A verb that writes a line of its own to the event stream** exits 3 when
-  it cannot append it: the `fleet event` writers (`woke`, `rest`,
-  `handed-off`, `exited`, `clear-halt` and `step`), `fleet seat nudge` and
-  `fleet seat attach --write`.
+- **The verbs that write a line of their own to the event stream** and that
+  R21 and R22 name exit 3 when they cannot append it: the `fleet event`
+  writers (`woke`, `rest`, `handed-off`, `exited`, `clear-halt` and `step`),
+  `fleet seat nudge` and `fleet seat attach --write`.
 
 For example, `fleet observe --once` with no seat list exits 3:
 
@@ -239,7 +239,7 @@ None.
 
 ## Open questions
 
-None.
+- [NEEDS CLARIFICATION: should `fleet routine run`, `fleet run` where the run never started, and `fleet observe` also exit 3 when they cannot append to the event stream? Today each answers its own way: routine run says so and exits with the routine's outcome, run keeps the refusal's own exit, and observe says so and keeps polling (fleet-6dn4).]
 
 ## Definition of Done
 
