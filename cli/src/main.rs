@@ -556,7 +556,8 @@ fn dispatch() -> Result<Exit> {
     // verb and no library under it resolves a directory that moves with the
     // working directory. `fleet observe` is the controller, gated the same.
     // `fleet guard` and `fleet prime` are exempt until the spec's open question
-    // is ruled: a guard that exits 1 fails open, and prime always exits 0.
+    // is ruled: a guard hook that exits 1 lets the tool call through unjudged,
+    // and a gated prime would exit 1 the way it already does outside a checkout.
     if !matches!(family, Family::Guard { .. } | Family::Prime) {
         if let Err(why) = platform::try_machine_dir() {
             let (verb, json) = exit::typed_verb(&matches);
