@@ -75,14 +75,14 @@ it, inside a project or not.
 
 ### What it checks before it writes anything
 
-The checks below run in this order. The first that fails ends the call. Up to
-that point nothing has been written and nothing loaded, except where the
-table says otherwise. Each refusal is a `fleet start:` line
-(shared.exit-codes.R12, R13).
+The checks below run in this order (onboarding.start.R38). The first that
+fails ends the call. Up to that point nothing has been written and nothing
+loaded, except where the table says otherwise. Each refusal is a
+`fleet start:` line (shared.exit-codes.R12, shared.exit-codes.R13).
 
 | Check | Fails when | Exit | The line names |
 | --- | --- | --- | --- |
-| The machine directory | the variable that decides it names a relative path, or no variable names it (shared.locations.R30 to R32) | 1 | the variable, and that it must be absolute |
+| The machine directory | the variable that decides it names a relative path, or no variable names it (shared.locations.R30 to shared.locations.R32) | 1 | the variable, and that it must be absolute |
 | A fleet | no policy file is found, as above | 1 | `fleet.toml`, `config.json`, `fleet create` |
 | The seat list | `config.json` is needed to find the policy file and is there but does not read or parse (shared.locations.R38) | 3 | `config.json` and why |
 | The register | `projects.toml`, read to key the seat rows (below), cannot be read | 3 | the file and why |
@@ -93,7 +93,7 @@ table says otherwise. Each refusal is a `fleet start:` line
 | The agent | the policy file does not parse; the agent adapter it names does not open, such as when no installed pack carries it; the adapter does not answer `capabilities` or `version`; or its `version` is null, meaning its agent is not installed | 3 | why, and that nothing was loaded; for a pack no one installed, the `fleet pack add` line that installs it |
 | tmux | `FLEET_TMUX_BIN` is not an absolute path to an executable file; or, with it unset, no `tmux` is on the search path | 3 | the path or `FLEET_TMUX_BIN`, and the search path |
 | The policy | the policy file does not read as the controller's policy | 3 | why |
-| The seats | the seats area refuses a `[seats]` table, such as one keyed by a name rather than a seat id; this is found during the first run, after the seat list is written | 3 | the table |
+| The seats | the seats area refuses a `[seats]` table, such as one keyed by a name rather than a seat id; this is found during the first run, after the seat list is written (onboarding.start.R39) | 3 | the table |
 
 The already-running check reads the pid from the manager. It reads the time
 of the last poll from the published projection, never from the process
@@ -192,12 +192,12 @@ fleet never creates a worktree. Making it is the person's step.
 
 ### The service file
 
-shared.locations.R18 and R19 say where the file goes. The service runs the
-`fleet` executable that ran `fleet start`, by its full path, with the one
-argument `observe`. A service file naming any other binary would load and
-then fail. So start the controller from the copy of `fleet` you mean to
-keep. A start from another copy rewrites the file to name that copy, unless
-it is a foreground start, which leaves the file as it is.
+shared.locations.R18 and shared.locations.R19 say where the file goes. The
+service runs the `fleet` executable that ran `fleet start`, by its full path,
+with the one argument `observe`. A service file naming any other binary
+would load and then fail. So start the controller from the copy of `fleet`
+you mean to keep. A start from another copy rewrites the file to name that
+copy, unless it is a foreground start, which leaves the file as it is.
 
 The file sets `FLEET_DIR` as shared.locations.R20 says. It never sets `PATH`.
 The controller builds its children's search path itself, and a `PATH` frozen
@@ -288,12 +288,12 @@ covers one poll interval plus a cold start, with room to spare.
   exits 0 (shared.exit-codes.R1).
 - **Not confirmed within 30 seconds.** fleet has the manager unload the
   service it loaded, keeps every file the start wrote, and exits 3
-  (shared.exit-codes.R4, R9). The line names `controller.started`, the
-  stream's path, and where the service's output is read
-  (shared.locations.R15, R16). A loaded controller that never confirmed
-  would be restarted by the manager each time it exits, and a `fleet stop`
-  after it would wait for a `controller.stopped` that the same broken
-  controller may never write. Today the service stays loaded and fleet
+  (shared.exit-codes.R4, shared.exit-codes.R9). The line names
+  `controller.started`, the stream's path, and where the service's output is
+  read (shared.locations.R15, shared.locations.R16). A loaded controller that
+  never confirmed would be restarted by the manager each time it exits, and a
+  `fleet stop` after it would wait for a `controller.stopped` that the same
+  broken controller may never write. Today the service stays loaded and fleet
   makes no unload call (fleet-nkgz).
 
 ```sh
@@ -379,17 +379,18 @@ the clause carries a `Today:` line.
   (fleet-euij).
 - **A relative `FLEET_SERVICE_BIN`** is read against the working directory
   and used. It should be refused as `FLEET_TMUX_BIN` is (fleet-bp1j).
-- **The first write of `config.json`** takes no lock, so two first starts on
-  a fresh machine can both write it, and one write is lost (fleet-rbwc).
-- **The telemetry edit** of the policy file takes no lock, so it can lose an
-  edit made by a command running beside it (fleet-adol).
 
-Three shared gaps reach `fleet start` too, and the shared clauses carry them:
+Five shared gaps reach `fleet start` too, and the shared clauses carry them:
 
 - A `config.json` that does not parse gets the no-fleet refusal, exit 1,
   where the start cannot tell and should exit 3 (shared.locations.R38,
   fleet-9sr5).
-
+- The first write of `config.json` takes no lock, so two first starts on a
+  fresh machine can both write it, and one write is lost
+  (shared.locations.R17, fleet-rbwc).
+- The telemetry edit of the policy file takes no lock, so it can lose an
+  edit made by a command running beside it (shared.locations.R17,
+  fleet-adol).
 - A relative `HOME`, or on Linux a relative `XDG_STATE_HOME`, that decides
   the machine directory is read against the working directory, and the start
   writes the relative directory it gives into the service file
@@ -404,20 +405,21 @@ Three shared gaps reach `fleet start` too, and the shared clauses carry them:
   directory (shared.locations.R28), fleet SHALL take as the fleet's policy
   file: where the directory shared.locations.R21 stops at holds a
   `.fleet/project.toml` the machine has registered, the policy file
-  `config.json` names (shared.locations.R11, R22); where it holds only a
-  `fleet.toml`, that file (shared.locations.R23); and otherwise the policy
-  file `config.json` names (shared.locations.R11), where that file exists.
+  `config.json` names (shared.locations.R11, shared.locations.R22); where it
+  holds only a `fleet.toml`, that file (shared.locations.R23); and otherwise
+  the policy file `config.json` names (shared.locations.R11), where that file
+  exists.
   Today: a `fleet.toml` beside a `.fleet/project.toml` is taken instead
   (fleet-5qo1).
 - **onboarding.start.R2**: IF onboarding.start.R1 finds no policy file that
-  exists, THEN fleet SHALL refuse with exit 1 (shared.exit-codes.R2) on
-  a line that names `fleet.toml`, `config.json` and `fleet create`, having
-  written and loaded nothing.
+  exists, except as shared.locations.R38 says for a `config.json` that cannot
+  be read or does not parse, THEN fleet SHALL refuse with exit 1
+  (shared.exit-codes.R2) on a line that names `fleet.toml`, `config.json`
+  and `fleet create`, having written and loaded nothing.
 - **onboarding.start.R3**: fleet SHALL take no argument and no flag but
   `--foreground`, and `--help` or `-h`, for `fleet start`, exiting 2 on any
-  other
-  (shared.exit-codes.R3, R15), and SHALL write every line it writes on
-  standard error and none on standard output.
+  other (shared.exit-codes.R3, shared.exit-codes.R15), and SHALL write every
+  line it writes on standard error and none on standard output.
 - **onboarding.start.R4**: IF `projects.toml`, which fleet reads to key the
   seat rows (onboarding.start.R14), cannot be read, THEN fleet SHALL exit 3
   (shared.exit-codes.R4) on a line naming it, having written and loaded
@@ -448,18 +450,19 @@ Three shared gaps reach `fleet start` too, and the shared clauses carry them:
   no service is loaded and go on with the start.
 - **onboarding.start.R10**: IF the policy file does not parse, the agent
   adapter it names does not open or does not answer `capabilities` or
-  `version`, its `version` is null, the policy file does not read as the
-  controller's policy, or the seats area refuses one of its `[seats]` tables,
-  THEN fleet SHALL exit 3 (shared.exit-codes.R4) on a line naming why,
-  having loaded nothing, and having written nothing unless the refusal came
-  from a `[seats]` table.
+  `version`, its `version` is null, or the policy file does not read as the
+  controller's policy, THEN fleet SHALL exit 3 (shared.exit-codes.R4) on a
+  line naming why, and, where the adapter does not open because no installed
+  pack carries it, the `fleet pack add` line that installs that pack, having
+  written and loaded nothing.
 - **onboarding.start.R11**: fleet SHALL run every program `fleet start` runs,
   and look for `tmux`, on the search path Interfaces lists for the platform,
   and never on the caller's `PATH`.
-- **onboarding.start.R12**: WHEN the checks of onboarding.start.R2 to R10,
-  R33 to R35 and shared.locations.R38 pass, fleet SHALL do the first-run work, making
-  the machine directory where it is absent, before it loads anything, writing
-  one line per step on standard error that starts `first run:`, and WHERE
+- **onboarding.start.R12**: WHEN every check onboarding.start.R38 orders
+  passes, fleet SHALL do the first-run work, except as onboarding.start.R39
+  says, making the machine directory where it is absent, before it loads
+  anything, writing one line per step on standard error that starts
+  `first run:`, and WHERE
   `--foreground` is given, SHALL write no service file and change none, and
   say on the service file's `first run:` line that it left the file as it
   is.
@@ -473,8 +476,9 @@ Three shared gaps reach `fleet start` too, and the shared clauses carry them:
   each row it adds on one project: the project registered in `projects.toml`
   whose root contains the policy file's directory, is not that directory, and
   holds a `.fleet/project.toml` (the deepest such), and otherwise the project
-  shared.locations.R21 to R24 find from the working directory; and SHALL
-  leave a row that already names a project keyed on the project it names.
+  shared.locations.R21 to shared.locations.R24 find from the working
+  directory; and SHALL leave a row that already names a project keyed on the
+  project it names.
   Today: a render keys every row on that one project and replaces the
   project each row named before (fleet-013b).
 - **onboarding.start.R15**: IF onboarding.start.R14 gives no project, THEN
@@ -510,12 +514,8 @@ Three shared gaps reach `fleet start` too, and the shared clauses carry them:
 - **onboarding.start.R23**: WHERE the policy file declares no `[telemetry]
   enabled`, fleet SHALL write `enabled = false` into it, appending a
   `[telemetry]` table or adding the key as the first line of the one already
-  there, without losing an edit another `fleet` command makes to the file at
-  the same time (shared.locations.R17), except where telemetry is declared
-  other than by a `[telemetry]` header, where it writes nothing and says the
-  key is the person's to write.
-  Today: the edit takes no lock, so a start racing `fleet seat add` can lose
-  one of the two edits (fleet-adol).
+  there, except where telemetry is declared other than by a `[telemetry]`
+  header, where it writes nothing and says the key is the person's to write.
 - **onboarding.start.R24**: fleet SHALL never write `enabled = true` into the
   policy file, and SHALL report the value `[telemetry] enabled` holds on a
   `first run:` line.
@@ -548,8 +548,9 @@ Three shared gaps reach `fleet start` too, and the shared clauses carry them:
   shared.locations.R38
 - **onboarding.start.R33**: IF the directory shared.locations.R21 stops at
   holds a `.fleet/project.toml` that the machine has not registered, THEN
-  fleet SHALL refuse `fleet start` as shared.locations.R28 and R35 say, with
-  exit 1 (shared.exit-codes.R2), having written and loaded nothing.
+  fleet SHALL refuse `fleet start` as shared.locations.R28 and
+  shared.locations.R35 say, with exit 1 (shared.exit-codes.R2), having
+  written and loaded nothing.
   Today: the start takes the policy file `config.json` names, keys the seat
   rows on that declaration, and goes on (fleet-xjn7).
 - **onboarding.start.R34**: IF onboarding.start.R1 takes a `fleet.toml`
@@ -581,16 +582,32 @@ Three shared gaps reach `fleet start` too, and the shared clauses carry them:
   run no loop.
   Today: fleet leaves the service loaded and runs its loop beside it
   (fleet-og989).
+- **onboarding.start.R38**: WHEN `fleet start` is called, with or without
+  `--foreground`, fleet SHALL make its checks in this order, and end the call
+  at the first that fails: the machine directory (shared.locations.R30 to
+  shared.locations.R32); a fleet (onboarding.start.R2); the seat list
+  (shared.locations.R38); the register (onboarding.start.R4); a registered
+  declaration (onboarding.start.R33); one fleet per machine
+  (onboarding.start.R34); the service manager (onboarding.start.R6's manager,
+  and onboarding.start.R35); already running (onboarding.start.R8); the agent
+  (onboarding.start.R10's policy parse and adapter); tmux
+  (onboarding.start.R6's tmux); and the policy (onboarding.start.R10's
+  policy reading).
+- **onboarding.start.R39**: IF, during the first run and after the seat list
+  is written (onboarding.start.R13), the seats area refuses one of the policy
+  file's `[seats]` tables, THEN fleet SHALL exit 3 (shared.exit-codes.R4) on a
+  line naming the table, keeping what the first run wrote and loading
+  nothing.
 
 ## Non-functional
 
 - **onboarding.start.N1**: IF no confirmation (onboarding.start.R29) arrives
   within 30 seconds of the load's return, THEN fleet SHALL have the service
   manager unload the service it loaded (onboarding.stop Interfaces), keep
-  every file the start wrote, and exit 3 (shared.exit-codes.R4, R9) on a line
-  naming `controller.started`, the path of `events.jsonl`
-  (shared.locations.R12), and where the service's output is read
-  (shared.locations.R15, R16).
+  every file the start wrote, and exit 3 (shared.exit-codes.R4,
+  shared.exit-codes.R9) on a line naming `controller.started`, the path of
+  `events.jsonl` (shared.locations.R12), and where the service's output is
+  read (shared.locations.R15, shared.locations.R16).
   Today: the service stays loaded and fleet makes no unload call
   (fleet-nkgz).
 - **onboarding.start.N2**: IF a service manager call (the status query, an
@@ -603,13 +620,11 @@ Three shared gaps reach `fleet start` too, and the shared clauses carry them:
 - **onboarding.start.N4**: IF a start is killed at any point, THEN fleet SHALL
   leave `config.json`, the service file and the policy file each either as it
   was or as that start would have written it, never part-written.
-- **onboarding.start.N5**: WHEN fleet start writes `config.json` while another
-  `fleet` command edits it, fleet SHALL lose neither command's edit
-  (shared.locations.R17).
-  Today: two first starts on a fresh machine can both write `config.json`,
-  and one write is lost (fleet-rbwc).
+- ~~**onboarding.start.N5**~~ retired 2026-10-13: restated
+  shared.locations.R17 for `config.json`; shared.locations.R17 states it
+  (fleet-1iby).
 - **onboarding.start.N6**: IF fleet start has waited 30 seconds for another
-  `fleet` command's edit of `config.json` (onboarding.start.N5), THEN fleet
+  `fleet` command's edit of `config.json` (shared.locations.R17), THEN fleet
   SHALL stop waiting and exit 3 (shared.exit-codes.R4) on a line naming
   `config.json`, writing nothing more and loading nothing.
   Today: the wait has no bound (fleet-euij).
@@ -655,7 +670,8 @@ defines both. A stand-in manager must have something write that event after
 a load, or the start unloads the service and exits 3 (onboarding.start.N1).
 
 **The service file**, which the platform's manager reads. shared.locations.R18
-and R19 give its path, R14 to R16 where its output goes, and R20 its
+and shared.locations.R19 give its path, shared.locations.R14 to
+shared.locations.R16 where its output goes, and shared.locations.R20 its
 `FLEET_DIR`.
 
 | | macOS property list | Linux user unit |
@@ -665,7 +681,7 @@ and R19 give its path, R14 to R16 where its output goes, and R20 its
 | Starts | `RunAtLoad` true: runs as soon as it is loaded | `[Install] WantedBy=default.target`: enabled for the user's default target |
 | Restarts | `KeepAlive` true: whenever it exits | `Restart=always`: whenever it exits |
 | Working directory | not set | `WorkingDirectory=<machine directory>` |
-| Output | `StandardOutPath`, `StandardErrorPath` (shared.locations.R14, R15) | the user's journal (shared.locations.R16) |
+| Output | `StandardOutPath`, `StandardErrorPath` (shared.locations.R14, shared.locations.R15) | the user's journal (shared.locations.R16) |
 | Environment | `EnvironmentVariables` `FLEET_DIR`, as shared.locations.R20 says, and nothing else | `Environment="FLEET_DIR=…"`, as shared.locations.R20 says, and nothing else |
 
 **The platform's check** (onboarding.start.R21, R22) runs from the search
@@ -682,7 +698,7 @@ path and is bounded at 20 seconds:
   row carries; a seat's worktree and a project's worktrees directory; the
   rows a render leaves alone, transient rows among them; and the loop
   `fleet observe` runs, with the `controller.started` event it writes
-  (onboarding.start.R10, R15, R16, R31). It has no feature spec yet.
+  (onboarding.start.R15, R16, R31, R39). It has no feature spec yet.
 - The agent area: how the adapter `[agent] adapter` names is opened, its
   `capabilities` and `version` answers, and its call bound
   (onboarding.start.R10, N3). It has no feature spec yet.
