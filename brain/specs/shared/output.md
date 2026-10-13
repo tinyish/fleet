@@ -80,8 +80,7 @@ lines a verb prints on standard output without the flag depends on the verb:
 
 | Verb | Under `--json`, its standard output lines |
 | --- | --- |
-| `fleet doctor`, `fleet dispatch`, `deliver`, `hold`, `clear`, `review`, `land` | move to standard error |
-| `fleet seat feed`, `fleet seat retire` | are printed nowhere: the line naming the seat fed or retired, and the line saying its work branch was deleted or kept, though a delete that failed is still said on standard error (fleet-vy4d moves them all to standard error) |
+| `fleet doctor`, `fleet dispatch`, `deliver`, `hold`, `clear`, `review`, `land`, `fleet seat feed`, `seat retire` | move to standard error |
 | `fleet item show`, `item list`, `fleet event show`, `event tail`, `fleet seat add`, `spawn` | are printed nowhere: the document stands in for them, as they are the answer itself (the item, the events, the seat's id or name) |
 
 ### `fleet event tail`
@@ -133,9 +132,6 @@ what fleet does today, with a `Changing:` line after each one.
   document whose code is `could_not_tell` and whose `why` is the error's
   reason, still writes its `fleet:` and `caused by:` lines on standard error,
   and exits 3.
-- **Every human line moves to standard error** (fleet-vy4d).
-  `fleet seat feed` and `fleet seat retire` write the lines they drop today
-  on standard error instead.
 - **`fleet status --json` answers in the envelope** (fleet-k8xi). It prints a
   success document with the published projection as its `data`, and where
   there is no projection a refusal document whose code is `no_collector`,
@@ -208,12 +204,10 @@ what fleet does today, with a `Changing:` line after each one.
   write on standard error each line the verb writes on standard output
   without the flag.
 - **shared.output.R16**: WHEN `fleet seat feed` or `fleet seat retire` is
-  called with `--json`, fleet SHALL print on neither standard output nor
-  standard error the line naming the seat fed or retired, or the line saying
-  the retired seat's work branch was deleted or kept. A branch whose delete
-  was tried and failed is still named on standard error, with or without
-  the flag.
-  Changing: fleet-vy4d: fleet writes those lines on standard error.
+  called with `--json`, fleet SHALL write on standard error each line the
+  verb writes on standard output without the flag: the line naming the seat
+  fed or retired, and the line saying the retired seat's work branch was
+  deleted or kept.
 - **shared.output.R17**: WHEN `fleet item show`, `item list`,
   `fleet event show`, `event tail`, `fleet seat add` or `spawn` is called
   with `--json`, fleet SHALL print what the verb prints on standard output

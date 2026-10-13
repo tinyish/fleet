@@ -8,6 +8,7 @@
 //! writes are `fleet_controller::transient`'s, so the belt that would refuse a
 //! spawn lives beside the loop that starts the session.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use fleet_controller::host::Host;
@@ -25,7 +26,7 @@ use fleet_core::store::ItemId;
 
 use crate::envelope;
 use crate::exit::{refuse_stop, Exit};
-use crate::item::acting;
+use crate::item::{acting, Human};
 
 /// The three verb names the envelope's documents carry, which are also the
 /// words each verb's own stderr line names itself by.
@@ -67,7 +68,7 @@ pub struct FeedArgs {
     /// the project this directory must resolve to
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
-    /// print the envelope document instead of the line
+    /// print the document; the line moves to stderr
     #[arg(long)]
     pub json: bool,
 }
@@ -86,7 +87,7 @@ pub struct RetireArgs {
     /// the project this directory must resolve to
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
-    /// print the envelope document instead of the reclaim
+    /// print the document; the lines move to stderr
     #[arg(long)]
     pub json: bool,
 }
@@ -189,6 +190,14 @@ pub fn feed_command(args: &FeedArgs) -> Exit {
 
     match transient::feed(&machine, &seat, &first_turn) {
         Ok(fed) => {
+            // THE PERSON'S LINE IS SAID EITHER WAY, on stdout ordinarily and
+            // on stderr under the flag, where stdout is the document alone.
+            let mut human = Human::under(args.json);
+            let _ = writeln!(
+                human,
+                "fed {} — the turn in the seat is now the new one",
+                fed.seat
+            );
             if args.json {
                 // THE TURNS ARE THEIR FIRST LINES, which is the shape the
                 // controller's own journal carries them in: the whole text is
@@ -205,8 +214,6 @@ pub fn feed_command(args: &FeedArgs) -> Exit {
                         })
                     )
                 );
-            } else {
-                println!("fed {} — the turn in the seat is now the new one", fed.seat);
             }
             Exit::Done
         }
@@ -269,26 +276,26 @@ pub fn retire_command(args: &RetireArgs) -> Exit {
 
     match transient::retire_with(&machine, &seat, args.dead, &withdrawal) {
         Ok(reclaimed) => {
-            if !args.json {
-                println!(
-                    "retired {} — reclaimed {} from {}{}{}",
-                    reclaimed.seat,
-                    match reclaimed.bytes {
-                        Some(bytes) => format!("{bytes} bytes"),
-                        None => "an unmeasured number of bytes".to_string(),
-                    },
-                    reclaimed.worktree,
-                    match reclaimed.pid {
-                        Some(pid) => format!(", pid {pid} confirmed gone"),
-                        None => ", no live session to stop".to_string(),
-                    },
-                    if reclaimed.dead {
-                        " (--dead: the host held no live session)"
-                    } else {
-                        ""
-                    }
-                );
-            }
+            let mut human = Human::under(args.json);
+            let _ = writeln!(
+                human,
+                "retired {} — reclaimed {} from {}{}{}",
+                reclaimed.seat,
+                match reclaimed.bytes {
+                    Some(bytes) => format!("{bytes} bytes"),
+                    None => "an unmeasured number of bytes".to_string(),
+                },
+                reclaimed.worktree,
+                match reclaimed.pid {
+                    Some(pid) => format!(", pid {pid} confirmed gone"),
+                    None => ", no live session to stop".to_string(),
+                },
+                if reclaimed.dead {
+                    " (--dead: the host held no live session)"
+                } else {
+                    ""
+                }
+            );
             if let Some(removal) = &reclaimed.removal {
                 eprintln!("session: {removal}");
             }
@@ -299,7 +306,7 @@ pub fn retire_command(args: &RetireArgs) -> Exit {
                 );
             }
             let branch =
-                release_the_branch(&machine, &timeline, reclaimed.branch.as_deref(), args.json);
+                release_the_branch(&machine, &timeline, reclaimed.branch.as_deref(), &mut human);
             if args.json {
                 println!(
                     "{}",
@@ -322,7 +329,8 @@ pub fn retire_command(args: &RetireArgs) -> Exit {
 }
 
 /// The work branch the landing already classified, deleted now that the
-/// worktree holding it is gone.
+/// worktree holding it is gone, and the line saying so written where `human`
+/// puts a person's lines.
 ///
 /// IT NEVER TAKES THE EXIT WITH IT, either way. The seat is reclaimed by the
 /// time this runs, and a retire reported as failed over a ref would be one a
@@ -331,17 +339,16 @@ fn release_the_branch(
     machine: &Machine,
     timeline: &[Entry],
     held: Option<&str>,
-    json: bool,
+    human: &mut dyn Write,
 ) -> serde_json::Value {
     match land::release(timeline, held) {
         Release::Delete(branch) => match transient::delete_branch(machine, &branch) {
             Ok(()) => {
-                if !json {
-                    println!(
-                        "work branch {branch}: {} on the landing — deleted",
-                        land::SAFE
-                    );
-                }
+                let _ = writeln!(
+                    human,
+                    "work branch {branch}: {} on the landing — deleted",
+                    land::SAFE
+                );
                 disposition(
                     Some(&branch),
                     "deleted",
@@ -349,6 +356,7 @@ fn release_the_branch(
                 )
             }
             Err(cause) => {
+                // Already stderr's, with or without the flag.
                 eprintln!(
                     "work branch {branch}: {} on the landing — kept: {cause}",
                     land::SAFE
@@ -359,8 +367,8 @@ fn release_the_branch(
         // A seat that was on no branch at all has nothing to say here; every
         // other keep names the branch and the reading that spared it.
         Release::Keep(why) => {
-            if held.is_some() && !json {
-                println!("work branch kept — {why}");
+            if held.is_some() {
+                let _ = writeln!(human, "work branch kept — {why}");
             }
             disposition(held, "kept", &why)
         }

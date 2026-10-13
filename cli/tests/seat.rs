@@ -1886,6 +1886,11 @@ fn a_retire_deletes_the_work_branch_its_landing_classified_safe() {
         "the delete is printed: {}",
         stdout(&retired)
     );
+    assert!(
+        !stderr(&retired).contains("work branch "),
+        "without the flag the line is on stdout alone: {}",
+        stderr(&retired)
+    );
     assert_eq!(
         rig.git(&["branch", "--list"]),
         "* main",
@@ -2291,6 +2296,13 @@ fn the_json_feed_prints_the_seat_and_the_turn_that_replaced_the_last() {
         parsed["data"]["prior_first_turn"], "the turn this seat comes up on",
         "the turn that was in the seat, which is what the marker held"
     );
+    assert!(
+        stderr(&fed).contains(&format!(
+            "fed {seat} — the turn in the seat is now the new one"
+        )),
+        "the person's line moves to stderr under the flag: {}",
+        stderr(&fed)
+    );
 }
 
 /// AC1, retire — `seat retire --json` answers what the controller's `Reclaimed`
@@ -2330,6 +2342,17 @@ fn the_json_retire_prints_the_reclaim_and_what_became_of_the_work_branch() {
     );
     assert_eq!(parsed["data"]["branch"]["name"], WORK);
     assert_eq!(parsed["data"]["branch"]["disposition"], "deleted");
+    let aside = stderr(&retired);
+    assert!(
+        aside.contains(&format!("retired {seat} — reclaimed ")),
+        "the reclaim line moves to stderr: {aside}"
+    );
+    assert!(
+        aside.contains(&format!(
+            "work branch {WORK}: {SAFE} on the landing — deleted"
+        )),
+        "and the branch line with it: {aside}"
+    );
     assert_eq!(
         rig.git(&["branch", "--list"]),
         "* main",
@@ -2357,6 +2380,13 @@ fn the_json_retire_says_kept_where_the_landing_did_not_read_safe() {
             .expect("the why is a string")
             .contains("carries_unlanded_work"),
         "{parsed}"
+    );
+    assert!(
+        stderr(&retired).contains(&format!(
+            "work branch kept — `{WORK}` — the landing reads `carries_unlanded_work`"
+        )),
+        "the kept line moves to stderr: {}",
+        stderr(&retired)
     );
     assert!(
         rig.git(&["branch", "--list"]).contains(WORK),
