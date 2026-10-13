@@ -33,6 +33,22 @@ impl Machine {
         Machine { root }
     }
 
+    /// A seat list naming one seat, Orla, so a seat writer's argument resolves
+    /// and the verb reaches the stream. The policy it names is never read by
+    /// the writers that need no projection.
+    fn list_orla(&self) {
+        std::fs::write(
+            self.root.join("config.json"),
+            format!(
+                "{{\"fleet_toml\": {:?}, \"children\": [{{\"id\": \
+                 \"01a0d1f1-0aec-765f-9abe-d4f993b9739a\", \"name\": \"Orla\", \
+                 \"worktrees\": {{\"demo\": \"/wt/orla\"}}}}]}}",
+                self.root.join("fleet.toml").to_string_lossy()
+            ),
+        )
+        .expect("the seat list is written");
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_fleet"))
             .args(args)
@@ -206,16 +222,7 @@ fn an_unreadable_instrument_is_three_and_prints_the_chain() {
 #[test]
 fn no_collector_is_five() {
     let machine = Machine::new("no-collector");
-    std::fs::write(
-        machine.root.join("config.json"),
-        format!(
-            "{{\"fleet_toml\": {:?}, \"children\": [{{\"id\": \
-             \"01a0d1f1-0aec-765f-9abe-d4f993b9739a\", \"name\": \"Orla\", \
-             \"worktrees\": {{\"demo\": \"/wt/orla\"}}}}]}}",
-            machine.root.join("fleet.toml").to_string_lossy()
-        ),
-    )
-    .expect("the seat list is written");
+    machine.list_orla();
     let out = machine.run(&["event", "rest", "Orla", "--reason", "x"]);
     assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
     assert!(
@@ -223,6 +230,37 @@ fn no_collector_is_five() {
         "{}",
         stderr(&out)
     );
+}
+
+/// Row 3, for a record that does not read back (R18): the stream ends in
+/// half a line, so the line a seat writer appends joins it and no line the
+/// stream carries is the one written. The writer acted and cannot say it
+/// landed, which is could-not-tell and not the call's fault.
+#[test]
+fn a_seat_record_that_does_not_read_back_is_three() {
+    let machine = Machine::new("read-back");
+    machine.list_orla();
+    let stream = machine.root.join("events.jsonl");
+    for verb in ["woke", "handed-off", "exited"] {
+        std::fs::write(&stream, "{").expect("the half line is written");
+        let out = machine.run(&["event", verb, "Orla"]);
+        assert_eq!(out.status.code(), Some(3), "{verb}: {}", stderr(&out));
+        assert!(
+            stderr(&out).starts_with(&format!("fleet event {verb}: ")),
+            "{verb}: {}",
+            stderr(&out)
+        );
+        assert!(
+            stderr(&out).contains("the record is not confirmed"),
+            "{verb}: {}",
+            stderr(&out)
+        );
+    }
+
+    // The control: over a whole stream the same writer reads its line back.
+    std::fs::write(&stream, "").expect("the stream is emptied");
+    let out = machine.run(&["event", "woke", "Orla"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
 
 // The refusal paths, one arm per verb family, pinned before their helpers

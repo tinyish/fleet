@@ -89,7 +89,14 @@ verb that cannot say what happened is a third answer rather than a failure.
 
 - **A verb that acted but cannot read back that the act took effect** exits
   3, never 0. It may have done part of the work, so a script treats the
-  outcome as unknown.
+  outcome as unknown. The `fleet event` writers read their line back as the
+  stream's last line, and exit 3 when it is not.
+- **A file fleet reads that is not in the shape it must be** exits 3, though
+  the call itself was right: `fleet event show` given an id that is on more
+  than one line of the event stream, and `fleet seat spawn`, or
+  `fleet dispatch` with no `--to`, finding that
+  `[permissions] tool_commands` in `fleet.toml` is not a list of single
+  command words.
 - **When fleet stops on an error it did not turn into a refusal,** it writes
   a line starting `fleet:`, then one indented line per cause that reads
   `caused by:` after its indent, and exits 3.
@@ -110,17 +117,6 @@ Exit 1 is different: fleet could tell, and the answer is no.
 Some of today's exits do not match the meaning in the table. Each one has an
 approved change, listed after it.
 
-- **Exit 2 for things that are not the call's fault.** Each of these is
-  changing to 3 (fleet-82l7):
-  - `fleet event woke`, `rest`, `handed-off`, `exited`, `clear-halt` and
-    `step`, when the line they wrote is not the stream's last line;
-  - `fleet event show` of an id that is on more than one line of the stream;
-  - `fleet seat spawn`, and `fleet dispatch` with no `--to`, when
-    `[permissions] tool_commands` in `fleet.toml` is not a list of single
-    command words.
-
-  Because of these exits, the rule that a verb which cannot read back its
-  act exits 3 does not hold yet for the `fleet event` writers.
 - **A failed append to the event stream.** The `fleet event` writers and
   `fleet event step` exit 1. `fleet seat nudge` and
   `fleet seat attach --write` exit 3. All of them will exit 3 (fleet-6dn4).
@@ -151,10 +147,7 @@ approved change, listed after it.
   invalid command, argument or flag; two flags that cannot go together; no
   command, or a family with no verb; or a question fleet would have to ask
   with no terminal to ask it on), THEN fleet SHALL exit 2, the row named
-  `usage`. Exit 2 also answers shared.exit-codes.R18 to R20, which are not the
-  call's fault.
-  Changing: fleet-82l7: those cases exit 3, and 2 means only that the call is
-  wrong.
+  `usage`.
 - **shared.exit-codes.R4**: IF something the answer needs cannot be read, so
   fleet cannot say what happened, THEN fleet SHALL exit 3, the row named
   `could_not_tell`. Exit 3 also answers a verb run outside any fleet
@@ -173,9 +166,7 @@ approved change, listed after it.
   and no other, except that once `fleet seat attach` has handed the terminal
   to tmux, the exit is tmux's.
 - **shared.exit-codes.R9**: IF a verb has acted but cannot read back that the
-  act took effect, THEN fleet SHALL exit 3 and never 0, except for the verbs
-  in shared.exit-codes.R18.
-  Changing: fleet-82l7: the exception goes, and those verbs exit 3 too.
+  act took effect, THEN fleet SHALL exit 3 and never 0.
 - **shared.exit-codes.R10**: WHEN a verb that takes `--json` is called with
   it, fleet SHALL exit with the same number it exits with without the flag,
   except for `fleet status --json`, whose exit the status area's spec states.
@@ -211,15 +202,12 @@ approved change, listed after it.
   name (today `fleet: fleet observe`), that line is dropped.
 - **shared.exit-codes.R18**: IF `fleet event woke`, `rest`, `handed-off`,
   `exited`, `clear-halt` or `step` has written its line and the stream's last
-  line is not that line, THEN fleet SHALL exit 2.
-  Changing: fleet-82l7: exits 3.
+  line is not that line, THEN fleet SHALL exit 3.
 - **shared.exit-codes.R19**: IF `fleet event show` is given an id that is on
-  more than one line of the stream, THEN fleet SHALL exit 2.
-  Changing: fleet-82l7: exits 3.
+  more than one line of the stream, THEN fleet SHALL exit 3.
 - **shared.exit-codes.R20**: IF `fleet seat spawn`, or `fleet dispatch` with no
   `--to`, finds that `[permissions] tool_commands` in `fleet.toml` is not a
-  list of single command words, THEN fleet SHALL exit 2.
-  Changing: fleet-82l7: exits 3.
+  list of single command words, THEN fleet SHALL exit 3.
 - **shared.exit-codes.R21**: IF `fleet event woke`, `rest`, `handed-off`,
   `exited`, `clear-halt` or `step` cannot append its line to the event
   stream, THEN fleet SHALL exit 1.

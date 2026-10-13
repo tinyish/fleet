@@ -422,6 +422,12 @@ impl Spawner for TransientSpawner<'_> {
         };
         let permissions = match permissions_of(self.here, ask.touched) {
             Ok(permissions) => permissions,
+            // NOTHING WAS MADE: the list is read before any worktree or launch,
+            // so a could-not-tell here is the policy's and withdraws the order,
+            // where a could-not-tell from the spawn itself leaves it standing.
+            Err(stop) if stop.code == COULD_NOT_TELL => {
+                return SpawnOutcome::Unreadable(stop.message)
+            }
             Err(stop) => return outcome_of(stop.code, stop.message),
         };
         let machine = wired.machine(self.here);

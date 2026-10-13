@@ -291,17 +291,16 @@ pub fn show(id: &str, json: bool) -> Exit {
             );
             Exit::Done
         }
-        // Ids are unique by construction, so a duplicate is a corrupted stream
-        // and a fact worth stopping on. It answers in the usage row, exit 2,
-        // naming both sequences — the exit table has no corruption row and this
-        // verb does not add one.
+        // Ids are unique by construction, so a duplicate is a corrupted stream:
+        // fleet cannot say which line is the event, so it answers could-not-tell,
+        // exit 3, naming both sequences rather than picking one.
         many => {
             let seqs: Vec<String> = many.iter().map(|m| m.seq.to_string()).collect();
             let why = format!(
                 "{id} is on more than one line — sequences {}",
                 seqs.join(", ")
             );
-            refuse("event show", Exit::Usage, &why, json)
+            refuse("event show", Exit::CouldNotTell, &why, json)
         }
     }
 }

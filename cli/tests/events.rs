@@ -573,14 +573,15 @@ fn show_prints_the_one_event_and_names_an_absent_or_duplicated_id() {
     assert_eq!(out(&absent), "");
     assert!(err(&absent).contains("no-such-id"), "{}", err(&absent));
 
-    // Two lines carrying one id: a corrupted stream, refused in the usage row
-    // with both sequences named, rather than one of the two picked.
+    // Two lines carrying one id: a corrupted stream, so fleet cannot say which
+    // line is the event — could-not-tell, with both sequences named, rather
+    // than one of the two picked.
     let corrupt = Rig::new("show-corrupt");
     let mut lines = fixture();
     lines[8] = lines[8].replace(&id(9), &id(7));
     corrupt.write_stream(&lines);
     let twice = corrupt.fleet(&["event", "show", &id(7)]);
-    assert_eq!(code(&twice), Some(2), "{}", err(&twice));
+    assert_eq!(code(&twice), Some(3), "{}", err(&twice));
     assert_eq!(
         out(&twice),
         "",
@@ -596,6 +597,15 @@ fn show_prints_the_one_event_and_names_an_absent_or_duplicated_id() {
         said.lines().count() == 1,
         "one line names both sequences: {said}"
     );
+
+    // Under `--json` the same refusal answers in the envelope, code included.
+    let twice = corrupt.fleet(&["event", "show", &id(7), "--json"]);
+    assert_eq!(code(&twice), Some(3), "{}", err(&twice));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&out(&twice)).unwrap_or_else(|e| panic!("{e}: {}", out(&twice)));
+    assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+    assert_eq!(parsed["verb"], "event show");
+    assert_eq!(parsed["refusal"]["code"], "could_not_tell");
 }
 
 /// AC5 — no stream at the resolved path: both readers refuse with exit 5, the
@@ -941,4 +951,35 @@ fn the_step_writer_appends_both_halves_on_the_run_and_the_json_tail_reads_the_cl
         lines_before,
         "a refused step writes nothing"
     );
+}
+
+/// R18 for the step writer: a stream ending in half a line takes the
+/// step's line into it, so the read-back finds nothing and the exit is 3.
+#[test]
+fn a_step_whose_line_does_not_read_back_is_three() {
+    let args = [
+        "event",
+        "step",
+        "started",
+        "--run",
+        "fleet-run-9",
+        "--n",
+        "1",
+        "--name",
+        "a",
+    ];
+    let rig = Rig::new("step-read-back");
+    rig.append("{");
+    let out = rig.fleet(&args);
+    assert_eq!(code(&out), Some(3), "{}", err(&out));
+    assert!(
+        err(&out).starts_with("fleet event step: the stream's last line reads nothing"),
+        "{}",
+        err(&out)
+    );
+
+    // The control: over no stream at all the same call lands and reads back.
+    let clean = Rig::new("step-read-back-control");
+    let out = clean.fleet(&args);
+    assert_eq!(code(&out), Some(0), "{}", err(&out));
 }

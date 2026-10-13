@@ -24,7 +24,7 @@ use crate::item::brief::{self, Packs, Subject, TRANSIENT};
 use crate::item::deliver::holds;
 use crate::item::{
     recorded, refuse_planted, render, show, signal, Events, Project, Ring, RingOutcome, Spawn,
-    SpawnOutcome, Spawner, Stop, Unrecorded, ITEM_ENTRY, NO_SESSION, REFUSED,
+    SpawnOutcome, Spawner, Stop, Unrecorded, COULD_NOT_TELL, ITEM_ENTRY, NO_SESSION, REFUSED,
 };
 use crate::seat::actor::Actor;
 use crate::seat::identity::{Directory, Kind, SeatId, SeatRef};
@@ -379,7 +379,9 @@ fn to_named_seat(
 /// item nobody had given it. A second ordered entry names the seat once the
 /// spawn has made one, so the timeline's current order is the seated one. A
 /// spawn that refuses therefore withdraws the order in the same act, so a
-/// refusal never leaves an ordered item nobody holds.
+/// refusal never leaves an ordered item nobody holds. A spawn that made nothing
+/// over a policy it could not read withdraws it the same way, and exits
+/// could-not-tell.
 ///
 /// A SPAWN THAT COULD NOT BE OBSERVED IS NOT A REFUSAL and withdraws nothing:
 /// the order stands with nothing written after it, and the cause is the exit's
@@ -464,15 +466,9 @@ fn to_a_transient_seat(
                 belt,
             })
         }
-        SpawnOutcome::Refused(cause) => {
-            withdraw(err, order, wiring, &cause).map_err(Refused::stopped)?;
-            Err(Refused {
-                stop: Stop::refused(format!(
-                    "{} was not dispatched — {cause}; the order was withdrawn",
-                    order.item
-                )),
-                withdrawn: Some(cause),
-            })
+        SpawnOutcome::Refused(cause) => Err(withdrawn(err, order, wiring, cause, REFUSED)),
+        SpawnOutcome::Unreadable(cause) => {
+            Err(withdrawn(err, order, wiring, cause, COULD_NOT_TELL))
         }
         // `withdrawn` stays `None`, which is the field's whole job: a flight
         // reads a hold off it, and a hold here would re-dispatch an item whose
@@ -487,6 +483,32 @@ fn to_a_transient_seat(
                 withdrawn: None,
             })
         }
+    }
+}
+
+/// A spawn that made nothing: the order withdrawn, and the stop that says so
+/// under `code` — refused for the spawner's verdict, could-not-tell for a
+/// policy the spawn could not read as it must be. A withdrawal that does not
+/// land is that failure's own stop, and nothing is said withdrawn.
+fn withdrawn(
+    err: &mut dyn Write,
+    order: &Order,
+    wiring: &Wiring,
+    cause: String,
+    code: u8,
+) -> Refused {
+    if let Err(stop) = withdraw(err, order, wiring, &cause) {
+        return Refused::stopped(stop);
+    }
+    Refused {
+        stop: Stop {
+            code,
+            message: format!(
+                "{} was not dispatched — {cause}; the order was withdrawn",
+                order.item
+            ),
+        },
+        withdrawn: Some(cause),
     }
 }
 

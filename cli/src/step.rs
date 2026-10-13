@@ -123,7 +123,7 @@ pub fn record(args: &StepArgs) -> Exit {
                 args.run,
                 args.n
             );
-            Exit::Usage
+            Exit::CouldNotTell
         }
     }
 }

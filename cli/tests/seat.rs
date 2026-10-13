@@ -961,10 +961,11 @@ fn a_tool_command_that_is_not_one_word_is_refused_before_anything_is_made() {
             "--first-turn",
             &rig.turn.display().to_string(),
         ]);
-        assert_ne!(
+        assert_eq!(
             spawned.status.code(),
-            Some(0),
-            "a list carrying `{entry}` does not spawn a seat"
+            Some(3),
+            "a list carrying `{entry}` is could-not-tell: {}",
+            stderr(&spawned)
         );
         let said = stderr(&spawned);
         assert!(
@@ -981,6 +982,107 @@ fn a_tool_command_that_is_not_one_word_is_refused_before_anything_is_made() {
             "and no launch was asked for ({entry})"
         );
     }
+}
+
+/// A `tool_commands` that is not a list at all is the same could-not-tell,
+/// refused before anything is made, and under `--json` the document's
+/// code says so.
+#[test]
+fn a_tool_commands_that_is_not_a_list_is_could_not_tell() {
+    let rig = Rig::new("tool-commands-not-a-list", true);
+    let path = rig.project.join("fleet.toml");
+    let policy = std::fs::read_to_string(&path).expect("the policy is readable");
+    let declared = policy.replace(
+        "[permissions]\n",
+        "[permissions]\ntool_commands = \"make\"\n",
+    );
+    assert!(declared.contains("tool_commands = \"make\""), "{policy}");
+    std::fs::write(&path, declared).expect("the declaration is written");
+
+    let spawned = rig.run(&[
+        "seat",
+        "spawn",
+        "--first-turn",
+        &rig.turn.display().to_string(),
+        "--json",
+    ]);
+    assert_eq!(spawned.status.code(), Some(3), "{}", stderr(&spawned));
+    assert!(
+        stderr(&spawned).contains("[permissions] tool_commands is not a list of command words"),
+        "{}",
+        stderr(&spawned)
+    );
+    let document: serde_json::Value = serde_json::from_str(stdout(&spawned).trim())
+        .unwrap_or_else(|e| panic!("one document: {e}: {}", stdout(&spawned)));
+    assert_eq!(document["refusal"]["code"], "could_not_tell");
+    assert!(rig.launches().is_empty(), "no launch was asked for");
+    assert_eq!(
+        rig.worktree_entries(),
+        Vec::<String>::new(),
+        "no worktree was made"
+    );
+}
+
+/// R20 for `fleet dispatch` with no `--to`: the spawn it asks for finds a
+/// tool command that is not one word, makes nothing, and the order is
+/// withdrawn as for any spawn that made nothing — but the exit is 3,
+/// because the call was right and the policy is not.
+#[test]
+fn a_dispatch_over_a_tool_command_that_is_not_one_word_withdraws_and_exits_3() {
+    let rig = Rig::new("dispatch-tool-commands", true);
+    rig.init_store();
+    rig.declaring(&["make check"]);
+    let item = rig.item("a ready item whose project lists a bad tool command");
+    let packs = rig.machine.join("packs").display().to_string();
+
+    let out = rig.run(&["dispatch", &item, "--by", ARCHITECT, "--packs-dir", &packs]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("is not one command word")
+            && stderr(&out).contains("the order was withdrawn"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("withdrawn: DISPATCH WITHDRAWN — spawn refused: "),
+        "{}",
+        stderr(&out)
+    );
+    assert!(rig.launches().is_empty(), "no launch was asked for");
+    assert_eq!(
+        rig.worktree_entries(),
+        Vec::<String>::new(),
+        "no worktree was made"
+    );
+    let (assignee, orders) = rig.order_of(&item);
+    assert_eq!(assignee, None, "nobody was ever assigned");
+    assert_eq!(orders, serde_json::Value::Null, "no orders key survives");
+    let timeline = rig.timeline(&item);
+    assert_eq!(
+        timeline
+            .iter()
+            .map(|entry| entry["kind"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["ordered", "order_withdrawn"],
+        "the withdrawal is on the record: {timeline:?}"
+    );
+    assert_eq!(timeline[1]["why"], serde_json::json!("spawn_refused"));
+
+    // The same call under `--json`: the item is ready again, and the
+    // refusal's code is the row's name.
+    let out = rig.run(&[
+        "dispatch",
+        &item,
+        "--by",
+        ARCHITECT,
+        "--packs-dir",
+        &packs,
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let document: serde_json::Value = serde_json::from_str(stdout(&out).trim())
+        .unwrap_or_else(|e| panic!("one document: {e}: {}", stdout(&out)));
+    assert_eq!(document["refusal"]["code"], "could_not_tell");
 }
 
 mod lessons {

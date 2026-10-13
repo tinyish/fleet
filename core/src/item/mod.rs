@@ -280,10 +280,19 @@ pub fn status_entries(z: &str) -> Result<Vec<StatusLine>, String> {
 /// `Refused` is a VERDICT and `CouldNotTell` is a question. Dispatch withdraws
 /// an order on the first and leaves it standing on the second, so a spawn
 /// nobody could observe is never recorded as a spawn that was declined.
+/// `Unreadable` is a verdict too, whose exit is could-not-tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnOutcome {
-    Spawned { seat: String, belt: Option<String> },
+    Spawned {
+        seat: String,
+        belt: Option<String>,
+    },
     Refused(String),
+    /// The spawn made nothing, because a file it reads is not in the shape it
+    /// must be — the project's `[permissions] tool_commands`. Dispatch withdraws
+    /// the order as for [`SpawnOutcome::Refused`], and stops could-not-tell: the
+    /// call was right, and the policy is not.
+    Unreadable(String),
     CouldNotTell(String),
 }
 

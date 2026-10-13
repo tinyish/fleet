@@ -1724,6 +1724,50 @@ mod transient {
         );
     }
 
+    /// A spawn that made nothing because a file it reads is not in its shape
+    /// withdraws the order exactly as a refusal does, and stops could-not-tell:
+    /// the call was right and the policy is not.
+    #[test]
+    fn an_unreadable_spawn_withdraws_the_order_and_exits_3() {
+        let rig = Rig::new("unreadable");
+        let item = rig
+            .graph
+            .item("a ready item whose project's tool commands do not read");
+        let ring = StubRing::answering(RingOutcome::Delivered);
+        let cause = "[permissions] tool_commands is not a list of command words";
+        let spawner = StubSpawner::answering(SpawnOutcome::Unreadable(String::from(cause)));
+
+        let answer = rig.run(&item, None, &[], rig.graph.store(), &ring, &spawner);
+        assert_eq!(answer.code, Some(3), "{}", answer.why);
+        assert!(answer.why.contains(cause), "{}", answer.why);
+        assert!(
+            answer.why.contains("the order was withdrawn"),
+            "{}",
+            answer.why
+        );
+
+        let read = rig.graph.store().show(&item).expect("the item reads back");
+        assert_eq!(read.order, OrderState::None, "no order index survives");
+        assert_eq!(read.assignee, None, "nobody was ever assigned");
+        assert_eq!(
+            timeline_of(&rig, &item)
+                .iter()
+                .map(|entry| &entry.body)
+                .collect::<Vec<_>>(),
+            vec![
+                &ordered_to(None),
+                &Body::OrderWithdrawn(OrderWithdrawn {
+                    why: Withdrawal::SpawnRefused,
+                    seat: None,
+                    cause: Some(String::from(cause)),
+                }),
+            ],
+            "the order, then its withdrawal naming the cause"
+        );
+        assert_eq!(answer.err, format!("withdrawn: {WITHDRAWN}: {cause}\n"));
+        assert_eq!(rig.events.count(), 0, "a withdrawn order announces nothing");
+    }
+
     /// A spawner that answers something no seat id parses from has handed back
     /// a seat no record can key on: the verb stops at could-not-tell before it
     /// assigns or announces anything, and the order it wrote stands.

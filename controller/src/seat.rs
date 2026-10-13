@@ -9,16 +9,16 @@
 use crate::config;
 use crate::events::{self, ActorRef, EventLog};
 use crate::projection::Stale;
+use fleet_core::item::COULD_NOT_TELL;
 use fleet_core::seat::identity::SeatId;
 use std::path::Path;
 
 /// The refusals `rest` has, each its own status because each has its own fix.
 ///
 /// 5 is a fleet nobody is collecting — a controller to start. 4 is a seat that
-/// is already down — nothing to stop. 6 is a seat of the kind that never rests.
-/// 2 is what every other unverifiable answer in this binary is: the caller
-/// cannot act on it.
-pub const EXIT_READ_BACK_FAILED: u8 = 2;
+/// is already down — nothing to stop. 6 is a seat of the wrong kind either way.
+/// A line that does not read back is none of these: it is could-not-tell,
+/// because the writer acted and cannot say the act landed.
 pub const EXIT_NO_SESSION: u8 = 4;
 pub const EXIT_NO_COLLECTOR: u8 = 5;
 pub const EXIT_WRONG_SEAT_KIND: u8 = 6;
@@ -96,7 +96,7 @@ pub fn record(
             Ok(format!("{kind} {seat} — seq {}", record.seq))
         }
         other => Err((
-            EXIT_READ_BACK_FAILED,
+            COULD_NOT_TELL,
             format!(
                 "the stream's last line reads {} rather than the {kind} for {seat} just \
                  written; the record is not confirmed",

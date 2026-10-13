@@ -136,6 +136,9 @@ fn store_word_of(here: &Here) -> Option<String> {
 /// glob character or a leading dash would widen a seat's posture past the list
 /// the project meant to write, and the widening would not be visible anywhere
 /// but in the seat's own settings file hours later.
+///
+/// A list that is not one is could-not-tell, exit 3, and not a usage error:
+/// the call was right, and the file it reads is not in the shape it must be.
 fn tool_commands_of(here: &Here) -> Result<Vec<String>, Stop> {
     let declared =
         match fleet_core::policy::read("permissions", "tool_commands", &here.project.policy) {
@@ -143,14 +146,16 @@ fn tool_commands_of(here: &Here) -> Result<Vec<String>, Stop> {
             _ => return Ok(Vec::new()),
         };
     let entries = declared.as_array().ok_or_else(|| {
-        Stop::usage("[permissions] tool_commands is not a list of command words".to_string())
+        Stop::could_not_tell(
+            "[permissions] tool_commands is not a list of command words".to_string(),
+        )
     })?;
     let mut words = Vec::with_capacity(entries.len());
     for entry in entries {
         match entry.as_str().filter(|word| is_command_word(word)) {
             Some(word) => words.push(word.to_string()),
             None => {
-                return Err(Stop::usage(format!(
+                return Err(Stop::could_not_tell(format!(
                     "[permissions] tool_commands entry `{entry}` is not one command word"
                 )))
             }
