@@ -47,24 +47,17 @@ pub const SERVICE_BIN: &str = "systemctl";
 /// the gate reads `ok` without probing (lessons claude-code D4).
 pub const GRANT_IS_GATED: bool = false;
 
-/// The unit file under the user's own unit directory.
-///
-/// `FLEET_DIR` is carried into the service's environment ONLY when the caller
-/// has one — a scratch machine directory has to reach the service — and no
-/// `PATH` is written: the controller constructs its children's search path, and
-/// one frozen here at install time is what every later session inherits
-/// (lessons claude-code D1).
-pub fn service_file(
-    home: &Path,
-    label: &str,
-    exe: &Path,
-    machine_dir: &Path,
-    fleet_dir: Option<&Path>,
-) -> ServiceFile {
-    let environment = match fleet_dir {
-        Some(dir) => format!("Environment=FLEET_DIR={}\n", dir.display()),
-        None => String::new(),
-    };
+/// The unit file under the user's own unit directory. It always tells the
+/// service the machine directory (`FLEET_DIR`), and no `PATH` is written: the
+/// controller constructs its children's search path, and one frozen here at
+/// install time is what every later session inherits (lessons claude-code D1).
+pub fn service_file(home: &Path, label: &str, exe: &Path, machine_dir: &Path) -> ServiceFile {
+    // Always, and quoted: see the macOS writer for why the directory is told,
+    // and `assignment_value` for why it is quoted.
+    let environment = format!(
+        "Environment=\"FLEET_DIR={}\"\n",
+        assignment_value(machine_dir)
+    );
     let text = format!(
         "[Unit]\n\
          Description=the fleet controller\n\
@@ -89,6 +82,18 @@ pub fn service_file(
             .join(format!("{label}.service")),
         text,
     }
+}
+
+/// A path inside a double-quoted `Environment=` assignment: a backslash and a
+/// quote escaped, and a `%` doubled, because the manager reads a lone one as
+/// the start of a specifier. Quoted at all because a space would otherwise end
+/// the assignment.
+fn assignment_value(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
 }
 
 /// This platform's manager collects what the service printed into the user's

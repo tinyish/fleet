@@ -117,13 +117,13 @@ directory is under `HOME`, whatever the machine directory is:
 The Linux path ignores `XDG_CONFIG_HOME`, even though a user service manager
 with `XDG_CONFIG_HOME` set elsewhere does not look there.
 
-The service file sets `FLEET_DIR` for the service only when the `fleet start`
-that wrote it had `FLEET_DIR` set. A scratch machine directory has to reach
-the service. A service that always carried the default would carry a variable
-nobody set. The machine directory can also come from `FLEET_HOME`, or on
-Linux from an `XDG_STATE_HOME` the service manager's own environment lacks.
-Then `fleet start` writes `config.json` in one directory and loads a
-controller that resolves another.
+The service file always sets `FLEET_DIR` for the service, to the machine
+directory the `fleet start` that wrote it resolved, whichever variable
+produced it. The service manager starts the controller with its own
+environment, not your shell's: it carries no `FLEET_HOME`, and on Linux it
+may lack the `XDG_STATE_HOME` you set. Told the directory, the controller
+reads and writes the one `fleet start` wrote `config.json` in, and never
+resolves another.
 
 A seat's session is handed no `FLEET_DIR` and no `FLEET_HOME`. Under a
 `FLEET_DIR`, the verbs a seat runs in its session resolve a different machine
@@ -195,9 +195,6 @@ what fleet does today, with a `Changing:` line after each one.
   items, `fleet doctor`, `fleet prime`) fall back only inside a checkout, and
   refuse outside one. Machine verbs (`fleet start`, `fleet stop`) act from any
   directory. Only `fleet prime` changes.
-- **The service always carries the machine directory** (fleet-uwzb).
-  `fleet start` writes the machine directory it resolved into the service as
-  `FLEET_DIR`, whichever variable produced it.
 - **A seat's session carries `FLEET_DIR`** (fleet-19w0). It is handed the
   controller's `FLEET_DIR`.
 - **No lock file in a checkout** (fleet-hn6e). The locks for a project's files
@@ -279,10 +276,8 @@ what fleet does today, with a `Changing:` line after each one.
   Changing: fleet-r0xz: where `XDG_CONFIG_HOME` is set, the file is
   `systemd/user/dev.fleet.controller.service` under `XDG_CONFIG_HOME`.
 - **shared.locations.R20**: WHEN `fleet start` writes the service file, fleet
-  SHALL set `FLEET_DIR` for the service to the caller's `FLEET_DIR` where the
-  caller has one set, and set no `FLEET_DIR` where it has none.
-  Changing: fleet-uwzb: the file always sets `FLEET_DIR` to the machine
-  directory `fleet start` resolved, whichever of R2 to R6 produced it.
+  SHALL set `FLEET_DIR` for the service to the machine directory that
+  `fleet start` resolved, whichever of R2 to R6 produced it.
 - **shared.locations.R21**: WHEN a verb that acts in a project (one that reads
   its policy, its store or its seats) is called, fleet SHALL look in the
   working directory and then in each directory above it, up to the root of

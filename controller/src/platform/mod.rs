@@ -414,7 +414,6 @@ impl Service {
         home: &Path,
         machine_dir: &Path,
         exe: &Path,
-        fleet_dir: Option<&Path>,
         bin_override: Option<&str>,
     ) -> Result<Service, String> {
         let child_path = child_path(home);
@@ -438,7 +437,7 @@ impl Service {
             })?,
         };
         Ok(Service {
-            file: sys::service_file(home, SERVICE_LABEL, exe, machine_dir, fleet_dir),
+            file: sys::service_file(home, SERVICE_LABEL, exe, machine_dir),
             bin,
             child_path,
         })
@@ -919,9 +918,9 @@ mod tests {
     ///
     /// The last two assertions are the ones a mutant reaches: the user's whole
     /// `PATH` baked into the file is the defect lessons claude-code D1 names,
-    /// and a caller with no fleet directory writes no environment dict at all —
-    /// so a writer that always wrote one would hand the service a variable the
-    /// caller did not set.
+    /// and the environment dict names the machine directory passed in, so the
+    /// service is told the directory its caller resolved (shared.locations
+    /// R20).
     #[test]
     fn the_macos_service_file_names_the_executable_and_bakes_in_no_path() {
         let file = macos::service_file(
@@ -929,7 +928,6 @@ mod tests {
             "a.label",
             Path::new("/bin/fleet"),
             Path::new("/m"),
-            Some(Path::new("/scratch")),
         );
         assert_eq!(
             file.path,
@@ -968,8 +966,8 @@ mod tests {
         );
         assert!(
             file.text
-                .contains("<key>FLEET_DIR</key>\n    <string>/scratch</string>"),
-            "a scratch machine directory reaches the service: {}",
+                .contains("<key>FLEET_DIR</key>\n    <string>/m</string>"),
+            "the service is told the machine directory: {}",
             file.text
         );
         assert!(
@@ -978,17 +976,21 @@ mod tests {
             file.text
         );
 
-        // The control for the environment dict: a caller with no fleet
-        // directory writes none, so the key above is the argument's and not a
-        // constant this writer always emits.
-        let bare = macos::service_file(
+        // The control: another machine directory is the one written, so the
+        // value is the argument and not a constant this writer always emits.
+        let elsewhere = macos::service_file(
             Path::new("/h"),
             "a.label",
             Path::new("/bin/fleet"),
-            Path::new("/m"),
-            None,
+            Path::new("/m&n"),
         );
-        assert!(!bare.text.contains("EnvironmentVariables"), "{}", bare.text);
+        assert!(
+            elsewhere
+                .text
+                .contains("<key>FLEET_DIR</key>\n    <string>/m&amp;n</string>"),
+            "{}",
+            elsewhere.text
+        );
 
         // A path carrying markup is escaped, or the file this writes does not
         // parse as one.
@@ -997,7 +999,6 @@ mod tests {
             "a.label",
             Path::new("/bin/a&b"),
             Path::new("/m"),
-            None,
         );
         assert!(
             marked.text.contains("<string>/bin/a&amp;b</string>"),
@@ -1014,7 +1015,6 @@ mod tests {
             "a.label",
             Path::new("/bin/fleet"),
             Path::new("/m"),
-            Some(Path::new("/scratch")),
         );
         assert_eq!(
             file.path,
@@ -1032,7 +1032,7 @@ mod tests {
             file.text
         );
         assert!(
-            file.text.contains("Environment=FLEET_DIR=/scratch"),
+            file.text.contains("Environment=\"FLEET_DIR=/m\"\n"),
             "{}",
             file.text
         );
@@ -1042,14 +1042,22 @@ mod tests {
             file.text
         );
 
-        let bare = linux::service_file(
+        // The control, and the quoting: another directory is the one written,
+        // whole, with a space kept inside the quotes and a `%` doubled so the
+        // manager does not read a specifier.
+        let elsewhere = linux::service_file(
             Path::new("/h"),
             "a.label",
             Path::new("/bin/fleet"),
-            Path::new("/m"),
-            None,
+            Path::new("/a b%c"),
         );
-        assert!(!bare.text.contains("Environment="), "{}", bare.text);
+        assert!(
+            elsewhere
+                .text
+                .contains("Environment=\"FLEET_DIR=/a b%%c\"\n"),
+            "{}",
+            elsewhere.text
+        );
     }
 
     /// The pid each manager reports, and the answer each gives for a service

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::hermetic::Hermetic;
+use common::hermetic::{FLEET_DIR, FLEET_HOME, XDG_STATE_HOME};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -174,6 +175,14 @@ fn code(out: &Output) -> i32 {
     out.status
         .code()
         .expect("the binary exited rather than died")
+}
+
+/// Whether a service file tells the service `machine` as FLEET_DIR, in either
+/// platform's spelling.
+fn sets_fleet_dir(text: &str, machine: &Path) -> bool {
+    let dir = machine.display().to_string();
+    text.contains(&format!("<key>FLEET_DIR</key>\n    <string>{dir}</string>"))
+        || text.contains(&format!("Environment=\"FLEET_DIR={dir}\"\n"))
 }
 
 fn write(path: &Path, body: &str) {
@@ -380,6 +389,29 @@ impl Rig {
 
     fn run(&self, args: &[&str]) -> Output {
         self.command(args).output().expect("the built binary runs")
+    }
+
+    /// A rig whose machine directory is `pick(&rig)` rather than the block's
+    /// own, for an arm that starts with no FLEET_DIR and lets the call resolve
+    /// it. The manager stub is written again: it bakes in the stream it
+    /// appends to.
+    fn resolving_to(label: &str, pick: impl Fn(&Rig) -> PathBuf) -> Rig {
+        let mut rig = Rig::new(label);
+        rig.machine = pick(&rig);
+        rig.a_manager();
+        rig
+    }
+
+    /// The call with `set` put on and `removed` taken out, after the block.
+    fn run_in_env(&self, args: &[&str], set: &[(&str, &Path)], removed: &[&str]) -> Output {
+        let mut command = self.command(args);
+        for (name, value) in set {
+            command.env(name, value);
+        }
+        for name in removed {
+            command.env_remove(name);
+        }
+        command.output().expect("the built binary runs")
     }
 
     /// The verb on a pseudo-terminal, with `keys` typed at it.
@@ -2249,6 +2281,49 @@ fn a_declaration_beside_a_fleet_toml_is_registered_and_every_key_is_read() {
 }
 
 // ---- fleet start and fleet stop ---------------------------------------------
+
+/// shared.locations R20: the service is told the machine directory `start`
+/// resolved, whichever variable produced it (here FLEET_HOME, then HOME
+/// alone) with no FLEET_DIR set anywhere, so the manager's environment, which
+/// holds neither, cannot send the controller to another directory.
+#[test]
+fn the_service_file_carries_the_machine_directory_start_resolved() {
+    for (label, removed) in [
+        ("from-fleet-home", &[FLEET_DIR][..]),
+        ("from-home", &[FLEET_DIR, FLEET_HOME][..]),
+    ] {
+        let rig = Rig::resolving_to(label, |rig| rig.home.join(".fleet"));
+        rig.created();
+        let out = rig.run_in_env(&["start"], &[], removed);
+        assert_eq!(code(&out), 0, "{label}: {}", stderr(&out));
+        let text = std::fs::read_to_string(rig.service_file()).expect("the service file reads");
+        assert!(
+            sets_fleet_dir(&text, &rig.machine),
+            "{label}: the service is told {}: {text}",
+            rig.machine.display()
+        );
+    }
+}
+
+/// shared.locations R20 with R4 and R5: a start under XDG_STATE_HOME tells the
+/// service what this platform resolved: `fleet` under it on Linux, and on
+/// macOS, which never reads it, `.fleet` under the home.
+#[test]
+fn a_start_under_xdg_state_home_tells_the_service_what_this_platform_resolved() {
+    let rig = Rig::resolving_to("xdg-state", |rig| {
+        if cfg!(target_os = "linux") {
+            rig.root.join("state").join("fleet")
+        } else {
+            rig.home.join(".fleet")
+        }
+    });
+    rig.created();
+    let state = rig.root.join("state");
+    let out = rig.run_in_env(&["start"], &[(XDG_STATE_HOME, &state)], &[FLEET_DIR]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = std::fs::read_to_string(rig.service_file()).expect("the service file reads");
+    assert!(sets_fleet_dir(&text, &rig.machine), "{text}");
+}
 
 /// The first run's own idempotence: a second start repeats none of it and says
 /// so, line by line.

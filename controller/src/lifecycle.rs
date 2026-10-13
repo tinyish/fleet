@@ -1301,7 +1301,6 @@ mod tests {
             &dir,
             &machine_dir,
             Path::new("/usr/local/bin/fleet"),
-            None,
             Some("/bin/sh"),
         )
         .expect("the service is composed");

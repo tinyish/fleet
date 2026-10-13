@@ -1227,20 +1227,13 @@ fn no_fleet(machine_dir: &Path) -> Stop {
 }
 
 /// The service manager, with the seam read here: the binary is what only a
-/// process knows, exactly as the agent binary is.
+/// process knows, exactly as the agent binary is. The service is told
+/// `machine_dir`, the directory this call resolved (shared.locations R20).
 fn service(machine_dir: &Path) -> Result<platform::Service, Stop> {
     platform::Service::resolve(
         &platform::home_dir(),
         machine_dir,
         &exe()?,
-        // The machine directory reaches the service ONLY when this process was
-        // pointed at one: a service that baked in the default would carry a
-        // variable the caller never set.
-        std::env::var("FLEET_DIR")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .map(PathBuf::from)
-            .as_deref(),
         std::env::var(platform::SERVICE_BIN_ENV).ok().as_deref(),
     )
     .map_err(Stop::could_not_tell)

@@ -58,28 +58,20 @@ fn domain() -> String {
 }
 
 /// The agent file: the label's own property list under the user's agents
-/// directory.
-///
-/// `FLEET_DIR` is carried into the service's environment ONLY when the caller
-/// has one — a scratch machine directory has to reach the service — and the
-/// user's `PATH` is never baked in: the controller constructs its children's
-/// search path, and a path frozen here at install time is the one every later
-/// session inherits (lessons claude-code D1).
-pub fn service_file(
-    home: &Path,
-    label: &str,
-    exe: &Path,
-    machine_dir: &Path,
-    fleet_dir: Option<&Path>,
-) -> ServiceFile {
-    let environment = match fleet_dir {
-        Some(dir) => format!(
-            "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>FLEET_DIR</key>\n    \
-             <string>{}</string>\n  </dict>\n",
-            escape(&dir.display().to_string())
-        ),
-        None => String::new(),
-    };
+/// directory. It always tells the service the machine directory (`FLEET_DIR`),
+/// and the user's `PATH` is never baked in: the controller constructs its
+/// children's search path, and a path frozen here at install time is the one
+/// every later session inherits (lessons claude-code D1).
+pub fn service_file(home: &Path, label: &str, exe: &Path, machine_dir: &Path) -> ServiceFile {
+    // The machine directory THIS CALL RESOLVED, always (shared.locations R20):
+    // the manager starts the service with its own environment, which carries
+    // neither the caller's FLEET_HOME nor its XDG_STATE_HOME, so a controller
+    // left to resolve its own could resolve another directory.
+    let environment = format!(
+        "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>FLEET_DIR</key>\n    \
+         <string>{}</string>\n  </dict>\n",
+        escape(&machine_dir.display().to_string())
+    );
     let text = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
