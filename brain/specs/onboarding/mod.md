@@ -8,15 +8,15 @@ also covers `fleet prime`, what a seat's session is handed when it starts.
 ## Feature specs
 
 - `brain/specs/onboarding/doctor.md` — `fleet doctor`: running the doctor checks
-  the pack layers declare, and its verdict. Not written yet.
+  the pack layers declare, and its verdict.
 - `brain/specs/onboarding/create.md` — `fleet create`: writing a fleet, embedded
-  or standalone, and installing its store's and agent's packs. Not written yet.
+  or standalone, and installing its store's and agent's packs.
 - `brain/specs/onboarding/start.md` — `fleet start`: bringing the controller up
-  as a service, confirmed from the stream. Not written yet.
+  as a service, confirmed from the stream.
 - `brain/specs/onboarding/stop.md` — `fleet stop`: taking the controller down,
-  leaving every seat's session running. Not written yet.
+  leaving every seat's session running.
 - `brain/specs/onboarding/prime.md` — `fleet prime`: what a seat's session is
-  handed when it starts. Not written yet.
+  handed when it starts.
 
 ## Modules
 
@@ -66,13 +66,16 @@ also covers `fleet prime`, what a seat's session is handed when it starts.
 ## Flow
 
 1. `cli/src/main.rs` hands `fleet create` to `cli/src/lifecycle.rs`, which asks
-   its three questions: the fleet's mode, its agent and its store.
-2. `controller/src/lifecycle.rs` writes `fleet.toml`, the project's declaration
+   its three questions: the fleet's mode, its store and its agent.
+2. Where the call installs a pack, `cli/src/lifecycle.rs` has
+   `core/src/defaults.rs` (packs) write the defaults `core/src/embedded.rs`
+   carries into the machine directory. Where it installs none, the defaults
+   go in last, after step 4 and the person's seat.
+3. `cli/src/lifecycle.rs` installs the store's pack, then the agent's, through
+   `core/src/add.rs`, at the fleet-packs tag `core/src/supported.rs` names,
+   before any fleet file is written.
+4. `controller/src/lifecycle.rs` writes `fleet.toml`, the project's declaration
    and the seat list, and registers the project on this machine.
-3. `cli/src/lifecycle.rs` has `core/src/defaults.rs` (packs) write the defaults
-   `core/src/embedded.rs` carries into the machine directory.
-4. `cli/src/lifecycle.rs` installs the agent's and the store's packs through
-   `core/src/add.rs`, at the fleet-packs tag `core/src/supported.rs` names.
 
 ## Depends on other areas
 
