@@ -333,7 +333,9 @@ two apart.
 ### Refusals
 
 Each refusal writes a line under `fleet create:` (shared.exit-codes.R12),
-naming what it is about (shared.exit-codes.R13).
+naming what it is about (shared.exit-codes.R13). Where two hold at the same
+moment, the usage error (exit 2) is the one made: a wrong command line is
+answered before anything about the machine.
 
 | The case | Exit | When |
 | --- | --- | --- |
@@ -468,7 +470,8 @@ short, a `Today:` line under the clause names the item that closes the gap.
   from a flag, `--fleet` among them (onboarding.create.R51), and straight
   after the mode question where it is answered there); and
   onboarding.create.R13 as soon as the mode, the store and, where the mode is
-  embedded, the agent are known.
+  embedded, the agent are known. Where two refusals hold at the same moment,
+  fleet SHALL make the one that exits 2 (shared.exit-codes.R3).
   Today: the refusals of onboarding.create.R17 and R35 come only after the
   questions the mode asks and the packs' installs (fleet-b42k).
 - **onboarding.create.R51**: WHEN `fleet create` is called with `--fleet` and
