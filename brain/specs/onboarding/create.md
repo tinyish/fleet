@@ -197,7 +197,8 @@ files already naming it, exit 1, naming both.
 
 ### Two projects with one name
 
-Where `<name>.fleet.toml` is already there and names another checkout:
+Where no project file names this checkout yet, and `<name>.fleet.toml` is
+already there and names another checkout:
 
 | That file's `path` | On a terminal | No terminal |
 | --- | --- | --- |
@@ -657,21 +658,24 @@ short, a `Today:` line under the clause names the item that closes the gap.
   one does and `--name` names another, THEN fleet SHALL refuse with exit 1
   (shared.exit-codes.R2) on a line naming both, and write nothing.
   Today: there is no project file (fleet-1s1x.3).
-- **onboarding.create.R69**: WHERE `--wingman` or `--dir` is given, IF
-  `<name>.fleet.toml` is in the wingman directory and its `path` names
+- **onboarding.create.R69**: WHERE `--wingman` or `--dir` is given, IF no
+  project file in the wingman directory names the project's checkout,
+  `<name>.fleet.toml` is there, and its `path` names
   another directory that exists, THEN fleet SHALL refuse with exit 1
   (shared.exit-codes.R2) on a line naming the file, its `path` and
   `--name`, and write nothing.
   Today: there is no project file (fleet-1s1x.3).
-- **onboarding.create.R70**: WHERE `--wingman` or `--dir` is given, WHEN
-  `<name>.fleet.toml` is in the wingman directory and its `path` names no
-  directory that exists, fleet SHALL, on a terminal, ask whether to point
+- **onboarding.create.R70**: WHERE `--wingman` or `--dir` is given, WHEN no
+  project file in the wingman directory names the project's checkout,
+  `<name>.fleet.toml` is there, and its `path` names no directory that
+  exists, fleet SHALL, on a terminal, ask whether to point
   that file at the project's checkout, with no selected before a key is
   pressed. A yes SHALL rewrite its `path` and nothing else of the file, on a
   line starting `project:`; a no SHALL refuse as onboarding.create.R69 says.
   Today: there is no project file (fleet-1s1x.3).
-- **onboarding.create.R71**: WHERE `--wingman` or `--dir` is given, IF
-  `<name>.fleet.toml` names a `path` that is no directory that exists and
+- **onboarding.create.R71**: WHERE `--wingman` or `--dir` is given, IF no
+  project file in the wingman directory names the project's checkout,
+  `<name>.fleet.toml` names a `path` that is no directory that exists, and
   standard input is not a terminal, THEN fleet SHALL refuse with exit 1
   (shared.exit-codes.R2) on a line naming the file to edit, and write
   nothing.
