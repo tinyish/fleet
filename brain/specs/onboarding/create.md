@@ -390,7 +390,7 @@ parse is the one made, and otherwise the usage error (exit 2)
 | wingman: `config.json` names another policy file that exists | 1 | once the directory is known |
 | wingman: a project file naming this checkout carries a key it may not, `--name` names another, or two name it | 1 | once the directory is known |
 | wingman: a project file there cannot be read, does not parse, or has no `path` (shared.locations.R53) | 3 | once the directory is known |
-| wingman: `<name>.fleet.toml` names another checkout, and the person does not repoint it | 1 | once the directory is known, or after the question |
+| wingman: no project file names this checkout, `<name>.fleet.toml` names another, and the person does not repoint it | 1 | once the directory is known, or after the question |
 | wingman: an `--agent` that is not the shared `fleet.toml`'s | 2 | once the directory is known |
 | `--packs-from` where the call installs no pack | 2 | once the answers it turns on are known (see [The packs](#the-packs)) |
 | a pack's install fails | 1 | see [The packs](#the-packs) |
