@@ -200,6 +200,10 @@ A change that adds a case to a lookup, a list of verbs or a set of values
 searches every clause and Interfaces line that lists that lookup's cases or
 names its result, and updates each in the same item.
 
+A `behaviour` or `spec` item that changes a clause lands only once an agent
+that did not write it has reviewed every clause it changed, every clause
+citing one, and every story row, table or example sorting the same cases.
+
 ## Scenarios and fleet-dtu
 
 fleet-dtu is a sibling repository holding the scenarios
