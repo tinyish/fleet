@@ -125,7 +125,7 @@ rather than by the first run it opens.
 **The store.** The project is the seat's worktree where the working directory
 is one, so the store line and the item lines name one store. Otherwise it is
 the wingman project's checkout where the fleet was found as a wingman
-project, and else the directory the walk stopped at. The store is the one a verb run in that
+project, and else the root of the default fleet the walk found. The store is the one a verb run in that
 project writes to. The adapter is named as `[store] adapter` names it: the
 name, or the file name of an adapter named by path, or `bd` where nothing is
 named. The version is shown whatever release it is: which release a store was
@@ -262,7 +262,9 @@ intent, and a `Today:` line says what fleet does now.
   fleet SHALL print as its second line a line starting `store:` about the
   project's store, where the project is the seat's worktree that R25 finds,
   or else the `path` of the wingman project shared.locations.R40 or
-  shared.locations.R43 finds, or else the directory the walk stopped at.
+  shared.locations.R43 finds, or else the root of the default fleet
+  shared.locations.R23 finds. A call the checkout fallback admits
+  (shared.locations.R24) has no project by this clause.
   Today: fleet knows no wingman project, so the project is the seat's
   worktree or the directory the walk stopped at (fleet-1s1x.5).
 - **onboarding.prime.R17**: WHEN the project's store answers its version,
