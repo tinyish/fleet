@@ -51,7 +51,9 @@ policy file of the fleet it starts in this order:
    shared.locations.R46 say: on a terminal it asks where there are several,
    and a script passes `--project`.
    Where it finds a default fleet's `fleet.toml`, that file is the policy
-   (shared.locations.R23).
+   (shared.locations.R23). Where the checkout fallback admits the working
+   directory, the policy is the file `config.json` names, and the nearest
+   checkout is the project (shared.locations.R24).
    Where `config.json` already names another policy file, the start
    refuses, exit 1: the machine runs one fleet, and a start that rendered
    this fleet's seats into the other fleet's seat list would load a
@@ -396,8 +398,9 @@ Five shared gaps reach `fleet start` too, and the shared clauses carry them:
   directory (shared.locations.R28), fleet SHALL take as the fleet's policy
   file: where shared.locations.R40, shared.locations.R43, shared.locations.R44 or
   shared.locations.R46 finds a wingman project,
-  the wingman directory's `fleet.toml`; where shared.locations.R23 finds a
-  default fleet, its `fleet.toml`; and otherwise the policy file
+  the wingman directory's `fleet.toml`; where shared.locations.R23 or
+  shared.locations.R24 finds a default fleet, its policy file; and
+  otherwise the policy file
   `config.json` names (shared.locations.R11), where that file exists.
   Today: there is no wingman project to find; a standalone project's
   `.fleet/project.toml` is taken instead, with a `fleet.toml` beside it
