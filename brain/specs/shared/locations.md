@@ -591,7 +591,9 @@ closes the gap.
   Today: fleet knows no wingman directory (fleet-1s1x.1).
 - **shared.locations.R48**: IF `--project <name>` is given where R46 does not
   apply, and the project fleet finds (R23, R24, R40) is named other than
-  `<name>`, THEN fleet SHALL refuse with exit 2 (shared.exit-codes.R3) on a
+  `<name>`, a wingman project as R39 names it and a default fleet's project
+  (R23, R24) by the name of the directory that is its root, THEN fleet SHALL
+  refuse with exit 2 (shared.exit-codes.R3) on a
   refusal line (shared.exit-codes.R12) naming both names.
   Today: only the transient verbs take `--project`, and it checks the name
   without picking a project (fleet-1s1x.1).
