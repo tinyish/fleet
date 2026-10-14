@@ -195,8 +195,9 @@ closes it.
   it knows, such as a check name, that is not in that set; two flags that
   cannot go together; no command, or a family with no verb; or a question
   fleet would have to ask with no terminal to ask it on), THEN fleet SHALL
-  exit 2, the row named `usage`. A named item or seat that is absent is not
-  such a name: shared.exit-codes.R2 refuses it.
+  exit 2, the row named `usage`, except as onboarding.create.R71 says. A
+  named item or seat that is absent is not such a name:
+  shared.exit-codes.R2 refuses it.
 - **shared.exit-codes.R4**: IF something the answer needs cannot be read, so
   fleet cannot say what happened, THEN fleet SHALL exit 3, the row named
   `could_not_tell`.
@@ -238,7 +239,7 @@ closes it.
 - **shared.exit-codes.R14**: IF a verb would ask a question and standard input
   is not a terminal, THEN fleet SHALL refuse with one line, carrying the one
   `fleet <verb>:` prefix shared.exit-codes.R12 names, that names every flag
-  that answers the question.
+  that answers the question, except as onboarding.create.R71 says.
 - **shared.exit-codes.R15**: IF the command line does not parse (a missing,
   unknown or invalid argument, an unknown command or flag, or two flags that
   cannot go together), THEN fleet SHALL write a block on standard error whose

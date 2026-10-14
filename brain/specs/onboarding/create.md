@@ -524,13 +524,13 @@ short, a `Today:` line under the clause names the item that closes the gap.
   them, and before installing anything: shared.locations.R38 and
   onboarding.create.R10 to R12, R49, R56, R58, R62 and R63 before any
   question; R14, R50, R59, R65 and R67
-  to R70 as soon as the wingman directory is known (before any question
+  to R71 as soon as the wingman directory is known (before any question
   where it comes from `--dir`, and straight after the directory question
   where it is answered there); and R13 as soon as the store and, where
   onboarding.create.R60 says it is asked, the agent are known. Where two
   refusals hold at the same moment, fleet SHALL make shared.locations.R38's
   before any other, and otherwise the one that exits 2
-  (shared.exit-codes.R3).
+  (shared.exit-codes.R3), except as onboarding.create.R71 says.
   Today: there is no wingman project, and so none of its refusals
   (fleet-1s1x.3).
 - **onboarding.create.R60**: fleet SHALL ask the agent question, or take
