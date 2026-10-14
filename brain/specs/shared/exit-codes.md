@@ -100,9 +100,11 @@ $ fleet create --wingman < /dev/null
 fleet create: which directory holds the fleet? — stdin is not a terminal; answer it with --dir
 ```
 
-The one question no flag answers, whether `fleet create` should point a
-moved project's file at this checkout, is refused with exit 1 instead,
-naming the file to edit (onboarding.create.R71).
+Two of `fleet create`'s questions are not refused this way. The store and
+agent questions take `none` without asking (onboarding.create.R6). The one
+question no flag answers, whether to point a moved project's file at this
+checkout, is refused with exit 1 instead, naming the file to edit
+(onboarding.create.R71).
 
 ### Could not tell, and refused
 
@@ -201,7 +203,8 @@ closes it.
   it knows, such as a check name, that is not in that set; two flags that
   cannot go together; no command, or a family with no verb; or a question
   fleet would have to ask with no terminal to ask it on), THEN fleet SHALL
-  exit 2, the row named `usage`, except as onboarding.create.R71 says. A
+  exit 2, the row named `usage`, except as onboarding.create.R6 and
+  onboarding.create.R71 say. A
   named item or seat that is absent is not such a name:
   shared.exit-codes.R2 refuses it.
 - **shared.exit-codes.R4**: IF something the answer needs cannot be read, so
@@ -245,7 +248,8 @@ closes it.
 - **shared.exit-codes.R14**: IF a verb would ask a question and standard input
   is not a terminal, THEN fleet SHALL refuse with one line, carrying the one
   `fleet <verb>:` prefix shared.exit-codes.R12 names, that names every flag
-  that answers the question, except as onboarding.create.R71 says.
+  that answers the question, except as onboarding.create.R6 and
+  onboarding.create.R71 say.
 - **shared.exit-codes.R15**: IF the command line does not parse (a missing,
   unknown or invalid argument, an unknown command or flag, or two flags that
   cannot go together), THEN fleet SHALL write a block on standard error whose
