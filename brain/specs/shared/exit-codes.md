@@ -100,6 +100,10 @@ $ fleet create --wingman < /dev/null
 fleet create: which directory holds the fleet? — stdin is not a terminal; answer it with --dir
 ```
 
+The one question no flag answers, whether `fleet create` should point a
+moved project's file at this checkout, is refused with exit 1 instead,
+naming the file to edit (onboarding.create.R71).
+
 ### Could not tell, and refused
 
 Exit 3 means fleet cannot say what happened, and it is never a success. A

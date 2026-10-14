@@ -532,8 +532,7 @@ short, a `Today:` line under the clause names the item that closes the gap.
   onboarding.create.R60 says it is asked, the agent are known. Where two
   refusals hold at the same moment, fleet SHALL make shared.locations.R38's
   or shared.locations.R53's (onboarding.create.R67) before any other, and
-  otherwise the one that exits 2 (shared.exit-codes.R3), except as
-  onboarding.create.R71 says.
+  otherwise the one that exits 2 (shared.exit-codes.R3).
   Today: there is no wingman project, and so none of its refusals
   (fleet-1s1x.3).
 - **onboarding.create.R60**: fleet SHALL ask the agent question, or take
