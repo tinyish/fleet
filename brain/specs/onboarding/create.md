@@ -777,8 +777,9 @@ short, a `Today:` line under the clause names the item that closes the gap.
   Today: there is no wingman directory (fleet-1s1x.3).
 - **onboarding.create.R73**: WHERE `--wingman` or `--dir` is given, WHEN no
   project file in the wingman directory names the project's checkout and
-  onboarding.create.R69 to R71 refuse nothing, fleet SHALL write
-  `<name>.fleet.toml` (onboarding.create.R57) in the wingman directory. The
+  onboarding.create.R69 to R71 refuse nothing, fleet SHALL, except as
+  onboarding.create.R70 says, write `<name>.fleet.toml`
+  (onboarding.create.R57) in the wingman directory. The
   file SHALL open with a comment naming the command that wrote it, and
   carry: `path`, the checkout's full path, written with `~` for `HOME`
   where it sits under `HOME`; `item_prefix`, the prefix the project's store
