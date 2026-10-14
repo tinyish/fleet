@@ -131,7 +131,10 @@ Each clause follows these rules:
 - Exact values: exit codes, event types, paths relative to the machine
   directory, bounds in seconds.
 - A rule is stated by one clause. Every other clause, in this spec or
-  another, cites that clause by its full id and never restates it.
+  another, cites that clause by its full id and never restates it. A clause
+  or row that applies another clause's test cites it ("a key
+  shared.locations.R52 refuses") rather than rewording it, since a reworded
+  copy drops qualifiers.
 - Where two clauses' triggers can both hold, the broader clause names the
   narrower one as its exception ("except as <id> says"), so every case meets
   exactly one clause. A refusal (`IF …, THEN fleet SHALL refuse …`) always
