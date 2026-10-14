@@ -370,8 +370,9 @@ two apart.
 
 Each refusal writes a line under `fleet create:` (shared.exit-codes.R12),
 naming what it is about (shared.exit-codes.R13). Where two hold at the same
-moment, a `config.json` that cannot be read or does not parse is the one
-made, and otherwise the usage error (exit 2) (onboarding.create.R8).
+moment, a `config.json` or a project file that cannot be read or does not
+parse is the one made, and otherwise the usage error (exit 2)
+(onboarding.create.R8).
 
 | The case | Exit | When |
 | --- | --- | --- |
@@ -530,8 +531,9 @@ short, a `Today:` line under the clause names the item that closes the gap.
   where it is answered there); and R13 as soon as the store and, where
   onboarding.create.R60 says it is asked, the agent are known. Where two
   refusals hold at the same moment, fleet SHALL make shared.locations.R38's
-  before any other, and otherwise the one that exits 2
-  (shared.exit-codes.R3), except as onboarding.create.R71 says.
+  or shared.locations.R53's (onboarding.create.R67) before any other, and
+  otherwise the one that exits 2 (shared.exit-codes.R3), except as
+  onboarding.create.R71 says.
   Today: there is no wingman project, and so none of its refusals
   (fleet-1s1x.3).
 - **onboarding.create.R60**: fleet SHALL ask the agent question, or take
