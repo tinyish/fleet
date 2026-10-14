@@ -194,6 +194,10 @@ A fix with no clause to cite has found a gap in the feature spec: it is a
 `behaviour` item. An item mislabelled `internal` is caught when its scenarios
 fail.
 
+A change that adds a case to a lookup, a list of verbs or a set of values
+searches every clause and Interfaces line that lists that lookup's cases or
+names its result, and updates each in the same item.
+
 ## Scenarios and fleet-dtu
 
 fleet-dtu is a sibling repository holding the scenarios
