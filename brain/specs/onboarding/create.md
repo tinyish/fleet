@@ -371,8 +371,9 @@ two apart.
 Each refusal writes a line under `fleet create:` (shared.exit-codes.R12),
 naming what it is about (shared.exit-codes.R13). Where two hold at the same
 moment, a command line that does not parse or `--name` without `--wingman`
-or `--dir` is the one made; then a `config.json` or a project file that
-cannot be read or does not parse; and otherwise the usage error (exit 2)
+or `--dir` is the one made; then a `config.json` that cannot be read or does
+not parse; then a project file that cannot be read, does not parse, or has
+no `path`; and otherwise the usage error (exit 2)
 (onboarding.create.R8).
 
 | The case | Exit | When |
