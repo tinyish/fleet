@@ -181,9 +181,8 @@ is written: each is the shared file's until the person sets it here.
 Where a project file in the wingman directory already names this checkout
 (as shared.locations.R49 matches), the call writes nothing over it. It reads
 it first: a file this verb did not write is the only one whose keys nobody
-has checked. A file that carries a key shared.locations.R51 does not take
-from a project file is refused, exit 1, naming the file and the key, and
-nothing is written. A project file there that cannot be read, does not
+has checked. A file that carries a key shared.locations.R52 refuses is
+refused, exit 1, naming the file and the key, and nothing is written. A project file there that cannot be read, does not
 parse, or has no `path` cannot say which checkout it names: the call exits
 3 naming it, as every verb that makes the lookup does
 (shared.locations.R53), and writes nothing. A good one gets a
@@ -652,7 +651,7 @@ short, a `Today:` line under the clause names the item that closes the gap.
 - **onboarding.create.R67**: WHERE `--wingman` or `--dir` is given, IF a
   project file in the wingman directory already names the project's
   checkout (as shared.locations.R49 matches) and carries a key
-  shared.locations.R51 does not take from a project file, THEN fleet SHALL
+  shared.locations.R52 refuses, THEN fleet SHALL
   refuse with exit 1 (shared.exit-codes.R2) on a line naming the file and
   the key, and write nothing. A project file there that cannot be read,
   does not parse, or has no `path` SHALL be refused as shared.locations.R53
