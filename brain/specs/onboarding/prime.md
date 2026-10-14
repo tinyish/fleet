@@ -263,8 +263,8 @@ intent, and a `Today:` line says what fleet does now.
   project's store, where the project is the seat's worktree that R25 finds,
   or else the `path` of the wingman project shared.locations.R40 or
   shared.locations.R43 finds, or else the root of the default fleet
-  shared.locations.R23 finds. A call the checkout fallback admits
-  (shared.locations.R24) has no project by this clause.
+  shared.locations.R23 finds. Where R25 finds no seat, a call the checkout
+  fallback admits (shared.locations.R24) has no project by this clause.
   Today: fleet knows no wingman project, so the project is the seat's
   worktree or the directory the walk stopped at (fleet-1s1x.5).
 - **onboarding.prime.R17**: WHEN the project's store answers its version,
