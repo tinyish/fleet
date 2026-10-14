@@ -668,8 +668,9 @@ closes the gap.
   fleet the same way (R21, R23, R24, R39 to R50): the item verbs,
   `fleet prime`, `fleet doctor`, `fleet run`, the seat verbs that act in a
   project (`fleet seat add`, `spawn`, `feed`, `retire`, `nudge` and
-  `attach`) and the `fleet routine` verbs among them. Each takes
-  `--project <name>` (R46 to R48). In a wingman project they read the policy
+  `attach`) and the `fleet routine` verbs among them. Each but `fleet prime`
+  takes `--project <name>` (R46 to R48); `fleet prime` takes none
+  (onboarding.prime.R2). In a wingman project they read the policy
   R51 composes; the guards' spec says what a guard reads where no fleet is
   found. `fleet prime` and the item verbs fall back to a checkout (R24) and,
   where that finds no fleet, refuse (R25). `fleet guard` follows its own
