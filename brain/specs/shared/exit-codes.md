@@ -154,10 +154,12 @@ where fleet looks for a fleet.
 ### When standard output closes early
 
 When a verb's standard output is closed before the verb has finished writing
-to it, as by `fleet prime | head -1`, the verb exits 0 and writes nothing
-about it on standard error. Whoever reads the output chose to stop reading:
-that is not a failure of the verb, and a line about it would only be noise in
-a pipeline that worked as meant.
+to it, as by `fleet prime | head -1`, the verb stops writing, writes nothing
+about it on standard error, and exits as its answer gives: 0 where it did
+what it was asked, and its own number for a finding or a could-not-tell, so
+`fleet doctor | head -1` still exits 1 where a check is a finding. Whoever
+reads the output chose to stop reading: that is not a failure of the verb,
+and a line about it would only be noise in a pipeline that worked as meant.
 
 ### Known gaps
 
@@ -175,7 +177,7 @@ closes it.
 - **A closed standard output (fleet-wtpr).** A verb whose standard output is
   closed before it has written everything, as by `fleet prime | head -1`,
   panics, writes the panic on standard error and exits 101, a number outside
-  the table, instead of exiting 0 quietly.
+  the table, instead of stopping quietly with its answer's exit.
 - **`fleet observe --once` and a failed append (fleet-ponk).** It says so on
   standard error and exits as its poll otherwise would, 0 where the poll
   went well, instead of exiting 3.
@@ -287,8 +289,9 @@ closes it.
   `--once`), IF it cannot append a line to the event stream, THEN fleet SHALL
   say so on standard error and keep polling rather than exit.
 - **shared.exit-codes.R27**: IF a verb's standard output is closed before the
-  verb has finished writing to it, THEN fleet SHALL exit 0, the row named
-  `done`, and write nothing about it on standard error.
+  verb has finished writing to it, THEN fleet SHALL stop writing to it,
+  write nothing about it on standard error, and exit with the number the
+  verb's answer gives.
   Today: the verb panics, writes the panic on standard error and exits 101
   (fleet-wtpr).
 

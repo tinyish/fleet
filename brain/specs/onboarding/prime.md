@@ -81,8 +81,9 @@ refusal of a machine directory it cannot resolve exits 1 (above).
 
 Everything is written on standard output, and nothing on standard error.
 Where whatever reads standard output closes it before prime has finished
-writing, prime stops writing, writes nothing on standard error and exits 0,
-as every verb does (shared.exit-codes.R27): the reader chose to stop reading.
+writing, prime stops writing, writes nothing on standard error and exits as
+its answer gives, 0 wherever it finds its fleet (shared.exit-codes.R27,
+onboarding.prime.R1): the reader chose to stop reading.
 Today every verb, `fleet prime` among them, panics there and exits 101
 (fleet-wtpr).
 
@@ -182,7 +183,7 @@ intent, and a `Today:` line says what fleet does now.
 - **The store line names the store the project's verbs use** (fleet-10uu).
   Today, in a seat's worktree with no fleet file of its own, prime opens the
   bd pack's store rather than the one the fleet's policy file names.
-- **A closed standard output exits 0 quietly** (fleet-wtpr, carried by
+- **A closed standard output ends prime quietly** (fleet-wtpr, carried by
   shared.exit-codes.R27's `Today:` line). Today prime, like every verb,
   panics, writes the panic on standard error and exits 101.
 - **Prime in a wingman directory of several projects refuses** (fleet-1s1x.5).
