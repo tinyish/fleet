@@ -181,9 +181,12 @@ is written: each is the shared file's until the person sets it here.
 Where a project file in the wingman directory already names this checkout
 (as shared.locations.R49 matches), the call writes nothing over it. It reads
 it first: a file this verb did not write is the only one whose keys nobody
-has checked. A file that does not parse, has no `path`, or carries a key
-shared.locations.R51 does not take from a project file is refused, exit 1,
-naming the file and the key, and nothing is written. A good one gets a
+has checked. A file that carries a key shared.locations.R51 does not take
+from a project file is refused, exit 1, naming the file and the key, and
+nothing is written. A project file there that cannot be read, does not
+parse, or has no `path` cannot say which checkout it names: the call exits
+3 naming it, as every verb that makes the lookup does
+(shared.locations.R53), and writes nothing. A good one gets a
 `project:` line saying it already names this checkout. The call goes on to
 list you, and exits 0. So `fleet create --wingman` run twice changes nothing
 the second time.
@@ -383,7 +386,8 @@ made, and otherwise the usage error (exit 2) (onboarding.create.R8).
 | wingman: the walk stops at a `fleet.toml` other than the wingman directory's own | 1 | once the directory is known |
 | wingman: the directory holds a `fleet.toml` and no project file: a default fleet's root | 1 | once the directory is known |
 | wingman: `config.json` names another policy file that exists | 1 | once the directory is known |
-| wingman: a project file naming this checkout is refused, `--name` names another, or two name it | 1 | once the directory is known |
+| wingman: a project file naming this checkout carries a key it may not, `--name` names another, or two name it | 1 | once the directory is known |
+| wingman: a project file there cannot be read, does not parse, or has no `path` (shared.locations.R53) | 3 | once the directory is known |
 | wingman: `<name>.fleet.toml` names another checkout, and the person does not repoint it | 1 | once the directory is known, or after the question |
 | wingman: an `--agent` that is not the shared `fleet.toml`'s | 2 | once the directory is known |
 | `--packs-from` where the call installs no pack | 2 | once the answers it turns on are known (see [The packs](#the-packs)) |
@@ -641,10 +645,12 @@ short, a `Today:` line under the clause names the item that closes the gap.
 
 - **onboarding.create.R67**: WHERE `--wingman` or `--dir` is given, IF a
   project file in the wingman directory already names the project's
-  checkout (as shared.locations.R49 matches) and it does not parse, has no
-  `path`, or carries a key shared.locations.R51 does not take from a project
-  file, THEN fleet SHALL refuse with exit 1 (shared.exit-codes.R2) on a line
-  naming the file and the key, and write nothing.
+  checkout (as shared.locations.R49 matches) and carries a key
+  shared.locations.R51 does not take from a project file, THEN fleet SHALL
+  refuse with exit 1 (shared.exit-codes.R2) on a line naming the file and
+  the key, and write nothing. A project file there that cannot be read,
+  does not parse, or has no `path` SHALL be refused as shared.locations.R53
+  says, exit 3, and nothing written.
   Today: there is no project file (fleet-1s1x.3).
 - **onboarding.create.R68**: WHERE `--wingman` or `--dir` is given, IF two
   project files in the wingman directory name the project's checkout, or
