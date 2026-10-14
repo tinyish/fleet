@@ -31,33 +31,33 @@ $ fleet start
 $ fleet start --foreground
 ```
 
-It takes no argument and one flag, `--foreground`, besides `--help` or `-h`.
+It takes no argument and two flags, `--foreground` and `--project <name>`
+(shared.locations.R46 to shared.locations.R48), besides `--help` or `-h`.
 Anything else is a usage error, exit 2 (shared.exit-codes.R3). It takes no `--json`. Every line it
 writes goes to standard error.
 
 ### Which fleet it starts
 
-`fleet start` works from any directory but a declared project the machine
-has not registered (shared.locations.R28). It finds the policy file of the
-fleet it starts in this order:
+`fleet start` works from any directory (shared.locations.R28). It finds the
+policy file of the fleet it starts in this order:
 
-1. It walks up from the working directory, as shared.locations.R21 says.
-   Where the directory it stops at holds a `.fleet/project.toml`, that is a
-   standalone project, and the policy is the file `config.json` names
-   (shared.locations.R11), as shared.locations.R22 says. The declaration is
-   that directory's own statement about itself, and a `fleet.toml` beside it
-   may be some other tool's file. A declaration the machine has not
-   registered is refused as shared.locations.R35 says: exit 1, naming the
-   directory, `projects.toml` and `fleet create --standalone`, with nothing
-   written or loaded. A start from it would key the seat rows on a project
-   no other verb will act in.
-   Where the directory holds only a `fleet.toml`, that file is the policy
-   (shared.locations.R23). Where `config.json` already names another policy
-   file, the start refuses, exit 1: the machine runs one fleet, and a start
-   that rendered this fleet's seats into the other fleet's seat list would
-   load a controller running the other fleet's policy. The line names both
-   policy files and how to move the machine to the fleet the start was
-   called in. Nothing is written or loaded.
+1. It looks for the fleet as every verb that acts in a project does
+   (shared.locations.R21 to shared.locations.R24, shared.locations.R39 to
+   shared.locations.R53), refusing where those clauses refuse.
+   Where that finds a wingman project, the policy is the wingman directory's
+   `fleet.toml`. That covers a start from inside one of its projects'
+   checkouts or a seat's worktree, and a start from the wingman directory
+   itself, which picks the project as shared.locations.R43 to
+   shared.locations.R46 say: on a terminal it asks where there are several,
+   and a script passes `--project`.
+   Where it finds a default fleet's `fleet.toml`, that file is the policy
+   (shared.locations.R23).
+   Where `config.json` already names another policy file, the start
+   refuses, exit 1: the machine runs one fleet, and a start that rendered
+   this fleet's seats into the other fleet's seat list would load a
+   controller running the other fleet's policy. The line names both policy
+   files and how to move the machine to the fleet the start was called in.
+   Nothing is written or loaded.
 2. Otherwise, the policy file `config.json` names (shared.locations.R11),
    where that file exists.
 3. Otherwise it refuses, exit 1 (shared.exit-codes.R2). The line names
@@ -70,8 +70,8 @@ line naming the file, with nothing written or loaded. Today it gets the
 no-fleet refusal above, exit 1 (shared.locations.R38's `Today:` line,
 fleet-9sr5).
 
-So a standalone fleet can be started from anywhere once `config.json` names
-it, inside a project or not.
+So a wingman fleet can be started from anywhere once `config.json` names
+it, inside one of its projects or not.
 
 ### What it checks before it writes anything
 
@@ -85,9 +85,8 @@ loaded, except where the table says otherwise. Each refusal is a
 | The machine directory | the variable that decides it names a relative path, or no variable names it (shared.locations.R30 to shared.locations.R32) | 1 | the variable, and that it must be absolute |
 | A fleet | no policy file is found, as above | 1 | `fleet.toml`, `config.json`, `fleet create` |
 | The seat list | `config.json` is needed to find the policy file and is there but does not read or parse (shared.locations.R38) | 3 | `config.json` and why |
-| The register | `projects.toml`, read to key the seat rows (below), cannot be read | 3 | the file and why |
-| A registered declaration | the directory the walk stops at holds a `.fleet/project.toml` that `projects.toml` does not list (shared.locations.R35) | 1 | the directory, `projects.toml`, `fleet create --standalone` |
-| One fleet per machine | the start took a `fleet.toml` (shared.locations.R23) and `config.json` names another policy file | 1 | both policy files, and how to move the machine to the one the start took |
+| The project | finding the fleet refuses (shared.locations.R41, shared.locations.R42, shared.locations.R45, shared.locations.R47, shared.locations.R48, shared.locations.R52, shared.locations.R53) | 1, 2 or 3, as that clause says | as that clause says |
+| One fleet per machine | the start took a default fleet's or a wingman directory's `fleet.toml` and `config.json` names another policy file | 1 | both policy files, and how to move the machine to the one the start took |
 | The service manager | `FLEET_SERVICE_BIN` is not an absolute path to an executable file; or, with it unset, the platform's manager is not on the search path; or the status query cannot be run; or it exits non-zero with any answer but that the manager does not know `dev.fleet.controller` | 3 | `FLEET_SERVICE_BIN`, or the manager and the search path, or the query's command and its answer |
 | Already running | the manager's status query reports a pid for `dev.fleet.controller` | 1 | the pid, and when the projection was last published or that none has been |
 | The agent | the policy file does not parse; the agent adapter it names does not open, such as when no installed pack carries it; the adapter does not answer `capabilities` or `version`; or its `version` is null, meaning its agent is not installed | 3 | why, and that nothing was loaded; for a pack no one installed, the `fleet pack add` line that installs it |
@@ -165,25 +164,20 @@ new rows are keyed on, and when it renders at all.
 
 A row's worktree belongs to a seat and a project, never to the directory you
 typed the start in. So a row that already names a project keeps it, whatever
-directory the start is called from. A standalone fleet started from a second
-registered project, or from a seat's own worktree, would otherwise move
-every row onto that directory and lose the worktrees the rows named.
+directory the start is called from. A wingman fleet started from a second
+project, or from a seat's own worktree, would otherwise move every row onto
+that directory and lose the worktrees the rows named.
 
-fleet keys each new row on one project, the first of these that exists:
+fleet keys each new row on the project found as in "Which fleet it starts":
+a wingman project, with its `path` as the project's root, or a default
+fleet's project.
 
-1. The project registered in `projects.toml` whose root contains the policy
-   file's directory, is not that directory itself, and holds a
-   `.fleet/project.toml`. Where several do, the deepest wins.
-2. The project found from the working directory, as in "Which fleet it
-   starts". A declaration the machine has not registered never gets this
-   far: the start refuses it first.
-
-Where neither project exists, as for a standalone fleet started from outside
-every project, fleet renders no row and leaves the rows `config.json` holds
-as they are: a guessed project would put a seat in the wrong checkout, and a
-start that dropped the rows would load a controller that runs no named seat.
-The `first run:` line says no row was rendered, and that a start from inside
-a registered project renders them.
+Where no project is found, as for a fleet `config.json` names started from
+outside every project, fleet renders no row and leaves the rows
+`config.json` holds as they are: a guessed project would put a seat in the
+wrong checkout, and a start that dropped the rows would load a controller
+that runs no named seat. The `first run:` line says no row was rendered, and
+that a start from inside one of the fleet's projects renders them.
 
 Where a render does drop rows, as when the policy names no agent seat, the
 line counts every row it dropped.
@@ -353,13 +347,10 @@ bound (fleet-euij).
 Each of these has its own `fix` or `behaviour` item. Until the item lands,
 the clause carries a `Today:` line.
 
-- **A `fleet.toml` beside a `.fleet/project.toml`** is taken as the policy,
-  where the declaration should win and `config.json`'s fleet be started
-  (fleet-5qo1).
-- **A declaration the machine has not registered** is started: the start
-  takes the policy file `config.json` names and keys the seat rows on that
-  declaration, where it should refuse (fleet-xjn7).
-- **A start inside an embedded fleet, on a machine whose `config.json` names
+- **A wingman fleet** cannot be started: fleet knows no wingman directory,
+  takes no `--project`, and keys rows on a standalone project registered in
+  `projects.toml` (fleet-1s1x.4).
+- **A start inside a default fleet, on a machine whose `config.json` names
   another fleet,** renders this fleet's seats into that seat list, writes the
   telemetry key into this fleet's file, and loads a controller that runs the
   other fleet's policy, where it should refuse (fleet-rlojy).
@@ -403,28 +394,28 @@ Five shared gaps reach `fleet start` too, and the shared clauses carry them:
 
 - **onboarding.start.R1**: WHEN `fleet start` is called, from any working
   directory (shared.locations.R28), fleet SHALL take as the fleet's policy
-  file: where the directory shared.locations.R21 stops at holds a
-  `.fleet/project.toml` the machine has registered, the policy file
-  `config.json` names (shared.locations.R11, shared.locations.R22); where it
-  holds only a `fleet.toml`, that file (shared.locations.R23); and otherwise
-  the policy file `config.json` names (shared.locations.R11), where that file
-  exists.
-  Today: a `fleet.toml` beside a `.fleet/project.toml` is taken instead
-  (fleet-5qo1).
+  file: where shared.locations.R40, shared.locations.R43, shared.locations.R44 or
+  shared.locations.R46 finds a wingman project,
+  the wingman directory's `fleet.toml`; where shared.locations.R23 finds a
+  default fleet, its `fleet.toml`; and otherwise the policy file
+  `config.json` names (shared.locations.R11), where that file exists.
+  Today: there is no wingman project to find; a standalone project's
+  `.fleet/project.toml` is taken instead, with a `fleet.toml` beside it
+  taken before it (fleet-1s1x.4).
 - **onboarding.start.R2**: IF onboarding.start.R1 finds no policy file that
   exists, except as shared.locations.R38 says for a `config.json` that cannot
   be read or does not parse, THEN fleet SHALL refuse with exit 1
   (shared.exit-codes.R2) on a line that names `fleet.toml`, `config.json`
   and `fleet create`, having written and loaded nothing.
 - **onboarding.start.R3**: fleet SHALL take no argument and no flag but
-  `--foreground`, and `--help` or `-h`, for `fleet start`, exiting 2 on any
-  other (shared.exit-codes.R3, shared.exit-codes.R15), and SHALL write every
-  line it writes on standard error and none on standard output.
-- **onboarding.start.R4**: IF `projects.toml`, which fleet reads to key the
-  seat rows (onboarding.start.R14), cannot be read, THEN fleet SHALL exit 3
-  (shared.exit-codes.R4) on a line naming it, having written and loaded
-  nothing. A `config.json` the start needs to find its fleet, and cannot
-  read, is shared.locations.R38's.
+  `--foreground`, `--project <name>` (shared.locations.R46 to
+  shared.locations.R48), and `--help` or `-h`, for `fleet start`, exiting 2
+  on any other (shared.exit-codes.R3, shared.exit-codes.R15), and SHALL write
+  every line it writes on standard error and none on standard output.
+  Today: `fleet start` takes no `--project` (fleet-1s1x.4).
+- ~~**onboarding.start.R4**~~ retired 2026-10-13: it refused a
+  `projects.toml` that would not read. `projects.toml` is gone with
+  standalone projects (fleet-1s1x).
 - **onboarding.start.R5**: WHERE `FLEET_SERVICE_BIN` is set to a value that is
   not empty or spaces only, fleet SHALL run the file at the absolute path it
   names for every service manager call `fleet start` makes, in place of the
@@ -473,18 +464,17 @@ Five shared gaps reach `fleet start` too, and the shared clauses carry them:
   with no rows, where no `config.json` exists, and otherwise leave the policy
   file it names as it is.
 - **onboarding.start.R14**: WHEN fleet renders the seat rows, fleet SHALL key
-  each row it adds on one project: the project registered in `projects.toml`
-  whose root contains the policy file's directory, is not that directory, and
-  holds a `.fleet/project.toml` (the deepest such), and otherwise the project
-  shared.locations.R21 to shared.locations.R24 find from the working
-  directory; and SHALL leave a row that already names a project keyed on the
-  project it names.
+  each row it adds on the project onboarding.start.R1 found (a wingman
+  project, rooted at its `path`, or a default fleet's project); and SHALL
+  leave a row that already names a project keyed on the project it names.
   Today: a render keys every row on that one project and replaces the
   project each row named before (fleet-013b).
+  Today: a row is keyed first on a project registered in `projects.toml`
+  whose root contains the policy file's directory (fleet-1s1x.4).
 - **onboarding.start.R15**: IF onboarding.start.R14 gives no project, THEN
   fleet SHALL render no row, leave every row `config.json` holds as it is,
   and say on its `first run:` line that no row was rendered and that a start
-  from inside a registered project renders them.
+  from inside one of the fleet's projects renders them.
   Today: the render still runs with nothing to write, and drops every agent
   row the seat list held without saying so (fleet-1ba5).
 - **onboarding.start.R16**: WHEN onboarding.start.R14 gives a project, fleet
@@ -546,15 +536,14 @@ Five shared gaps reach `fleet start` too, and the shared clauses carry them:
   and exit with the loop's exit.
 - ~~**onboarding.start.R32**~~ retired 2026-10-12: folded into
   shared.locations.R38
-- **onboarding.start.R33**: IF the directory shared.locations.R21 stops at
-  holds a `.fleet/project.toml` that the machine has not registered, THEN
-  fleet SHALL refuse `fleet start` as shared.locations.R28 and
-  shared.locations.R35 say, with exit 1 (shared.exit-codes.R2), having
-  written and loaded nothing.
-  Today: the start takes the policy file `config.json` names, keys the seat
-  rows on that declaration, and goes on (fleet-xjn7).
-- **onboarding.start.R34**: IF onboarding.start.R1 takes a `fleet.toml`
-  (shared.locations.R23) and `config.json` names another policy file, THEN
+- ~~**onboarding.start.R33**~~ retired 2026-10-13: it refused a declared
+  project the machine had not registered. No project declares itself any
+  more (fleet-1s1x).
+- **onboarding.start.R34**: IF onboarding.start.R1 takes a default fleet's
+  `fleet.toml` (shared.locations.R23) or a wingman directory's
+  (shared.locations.R40, shared.locations.R43, shared.locations.R44,
+  shared.locations.R46), and `config.json` names another
+  policy file, THEN
   fleet SHALL refuse with exit 1 (shared.exit-codes.R2) on a line naming both
   policy files and how to move the machine to the fleet the start took,
   having written and loaded nothing.
@@ -586,8 +575,10 @@ Five shared gaps reach `fleet start` too, and the shared clauses carry them:
   `--foreground`, fleet SHALL make its checks in this order, and end the call
   at the first that fails: the machine directory (shared.locations.R30 to
   shared.locations.R32); a fleet (onboarding.start.R2); the seat list
-  (shared.locations.R38); the register (onboarding.start.R4); a registered
-  declaration (onboarding.start.R33); one fleet per machine
+  (shared.locations.R38); the project (shared.locations.R41,
+  shared.locations.R42, shared.locations.R45, shared.locations.R47,
+  shared.locations.R48, shared.locations.R52, shared.locations.R53); one
+  fleet per machine
   (onboarding.start.R34); the service manager (onboarding.start.R6's manager,
   and onboarding.start.R35); already running (onboarding.start.R8); the agent
   (onboarding.start.R10's policy parse and adapter); tmux

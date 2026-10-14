@@ -124,9 +124,10 @@ unset, as that clause says too.
 
 `fleet stop` acts from any directory, inside a project or a git checkout or
 not (shared.locations.R28). It needs no fleet at all: not the policy file,
-not a project's declaration, not `config.json`. Nor is it refused in a
-declared project the machine has not registered, as the verbs that act in a
-project are (shared.locations.R26, shared.locations.R35). All it needs is
+not a project file, not `config.json`. Nor is it refused where finding a
+fleet would refuse, as the verbs that act in a project are
+(shared.locations.R41, shared.locations.R42, shared.locations.R52). All it
+needs is
 the service manager and the machine directory's event stream
 (shared.locations.R12). A
 stop that looked for a project first would refuse from a bare directory, or
@@ -186,9 +187,8 @@ before it asks the manager anything, as every verb but `fleet guard` is
 
 - **onboarding.stop.R1**: WHEN `fleet stop` is called, fleet SHALL take the
   controller down from any working directory (shared.locations.R28), whether
-  or not a fleet is found from it, whether or not the fleet's policy file, a
-  project's declaration or `config.json` exists or reads, and whether or not
-  the machine has registered that declaration.
+  or not a fleet is found from it, and whether or not the fleet's policy
+  file, a project file or `config.json` exists or reads.
 - **onboarding.stop.R2**: IF no controller runs for the machine directory
   `fleet stop` resolved (shared.locations.R2 to shared.locations.R6), the
   status query answering that the manager does not know

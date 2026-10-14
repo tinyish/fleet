@@ -1,0 +1,16 @@
+{
+  "width": 0,
+  "sorts": ["case", "the case", "condition"],
+  "sort_columns": ["outcome", "result", "exit"],
+  "bound_units": ["ms", "s", "seconds?", "minutes?", "hours?", "days?", "bytes", "KB", "MB",
+                  "GB", "lines", "times", "tries", "attempts"],
+  "uses_line": false,
+  "interface_names": "prose",
+  "labels": ["fleet"],
+  "review_by_staging": false,
+  "never_inputs": ["docs/", "fleet-dtu, the scenario repository: never open it"],
+  "safety": [
+    "Where you must run fleet, run only `fleet create`, `fleet doctor` or `fleet prime`, with `FLEET_DIR` set to a fresh `mktemp -d`.",
+    "Never run `fleet start` or `fleet stop`: they load and unload the real per-user controller."
+  ]
+}

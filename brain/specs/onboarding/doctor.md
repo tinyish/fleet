@@ -34,13 +34,15 @@ $ fleet doctor --packs-dir <DIR>   # read the packs from <DIR>
 ```
 
 `fleet doctor` acts in a project, which it finds from the working directory
-as shared.locations says (shared.locations.R21 to shared.locations.R24).
-Where it finds no fleet, or the directory declares a project this machine
-has not registered, it refuses before any check runs (shared.locations.R25,
-shared.locations.R26, shared.locations.R35), with exit 1. Where
-the machine's `config.json` or `projects.toml` is there but will not read,
-it cannot tell which fleet it is in, and exits 3 without running a check
-(shared.locations.R38). Like every verb but `fleet guard`, it refuses a
+as shared.locations says (shared.locations.R21 to shared.locations.R24,
+shared.locations.R39 to shared.locations.R53), and in a wingman directory of
+several projects it asks which, or takes `--project`
+(shared.locations.R44 to shared.locations.R48). Where it finds no fleet, or
+finding it refuses, it refuses before any check runs (shared.locations.R25,
+shared.locations.R41, shared.locations.R42, shared.locations.R52), with
+exit 1. Where the machine's `config.json` or a project file is there but
+will not read, it cannot tell which fleet it is in, and exits 3 without
+running a check (shared.locations.R38, shared.locations.R53). Like every verb but `fleet guard`, it refuses a
 machine directory named by a relative path, or no home at all, before it
 reads anything (shared.locations.R30 to shared.locations.R32). Every check
 runs from the
@@ -264,8 +266,9 @@ A refusal comes before any check runs, on a `fleet doctor:` line
 | Case | Exit |
 | --- | --- |
 | no fleet for the working directory | 1 (shared.locations.R25, shared.exit-codes.R23) |
-| a declared project this machine has not registered, or a `config.json` that names no fleet for it | 1 (shared.locations.R26, shared.locations.R35) |
-| `config.json` or `projects.toml` is there but will not read | 3 (shared.locations.R38) |
+| finding the fleet refuses: a checkout claimed twice, or by a wingman project and a `fleet.toml`, or a project file carrying a key it may not | 1 (shared.locations.R41, shared.locations.R42, shared.locations.R52) |
+| several projects in the wingman directory, no terminal and no `--project`, or a `--project` naming none of them or another project | 2 (shared.locations.R45, shared.locations.R47, shared.locations.R48) |
+| `config.json` or a project file is there but will not read | 3 (shared.locations.R38, shared.locations.R53) |
 | a machine directory named by a relative path, or no home at all | 1 (shared.locations.R30 to shared.locations.R32) |
 | a check name no layer carries | 2 (shared.exit-codes.R3) |
 | the pack layers do not resolve, such as with no defaults directory | 3 (shared.exit-codes.R4) |
@@ -300,11 +303,11 @@ Each gap is held by an open item, and the clause cited carries its
 ## Behaviour
 
 - **onboarding.doctor.R1**: IF `fleet doctor` finds no fleet for the working
-  directory (shared.locations.R25), or the directory declares a project this
-  machine has not registered (shared.locations.R26, shared.locations.R35),
-  or a file that
-  decides its fleet will not read (shared.locations.R38), THEN fleet SHALL
-  run no check.
+  directory (shared.locations.R25), finding it refuses
+  (shared.locations.R41, shared.locations.R42, shared.locations.R45,
+  shared.locations.R47, shared.locations.R48, shared.locations.R52), or a
+  file that decides its fleet will not read (shared.locations.R38,
+  shared.locations.R53), THEN fleet SHALL run no check.
 - **onboarding.doctor.R2**: IF the pack layers do not resolve, such as when
   the defaults directory is absent, THEN fleet SHALL refuse before any check
   runs and exit 3 (shared.exit-codes.R4), on a refusal line that says why.
@@ -499,9 +502,9 @@ Each gap is held by an open item, and the clause cited carries its
   document's `data` (R44, R45), inside the envelope shared.output states.
 - `fleet doctor` is one of the verbs that shared.output.R6, shared.output.R7,
   shared.output.R15, shared.output.R19 and shared.output.R20,
-  shared.exit-codes.R23, and shared.locations.R25, shared.locations.R26,
-  shared.locations.R30 to shared.locations.R32, shared.locations.R35 and
-  shared.locations.R38 cover. shared.locations.R30 and shared.locations.R38
+  shared.exit-codes.R23, and shared.locations.R25, shared.locations.R30 to
+  shared.locations.R32, shared.locations.R38 and shared.locations.R39 to
+  shared.locations.R53 cover. shared.locations.R30 and shared.locations.R38
   carry the `Today:` lines that reach it (fleet-8s9z, fleet-9sr5).
 
 ## Open questions

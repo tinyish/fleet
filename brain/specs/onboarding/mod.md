@@ -9,8 +9,8 @@ also covers `fleet prime`, what a seat's session is handed when it starts.
 
 - `brain/specs/onboarding/doctor.md` — `fleet doctor`: running the doctor checks
   the pack layers declare, and its verdict.
-- `brain/specs/onboarding/create.md` — `fleet create`: writing a fleet, embedded
-  or standalone, and installing its store's and agent's packs.
+- `brain/specs/onboarding/create.md` — `fleet create`: writing a default fleet
+  or a wingman project, and installing its store's and agent's packs.
 - `brain/specs/onboarding/start.md` — `fleet start`: bringing the controller up
   as a service, confirmed from the stream.
 - `brain/specs/onboarding/stop.md` — `fleet stop`: taking the controller down,

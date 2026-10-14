@@ -96,8 +96,8 @@ the verb's one `fleet <verb>:` prefix and names every flag that answers the
 question, and the call exits 2:
 
 ```sh
-$ fleet create < /dev/null
-fleet create: embedded or standalone? — stdin is not a terminal; answer it with --embedded or --standalone
+$ fleet create --wingman < /dev/null
+fleet create: which directory holds the fleet? — stdin is not a terminal; answer it with --dir
 ```
 
 ### Could not tell, and refused

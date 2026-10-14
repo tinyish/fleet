@@ -25,40 +25,34 @@ never waits on standard input.
 ### Which fleet it reads
 
 `fleet prime` finds its fleet as every verb that acts in a project does
-(shared.locations.R21 to shared.locations.R24, shared.locations.R26,
-shared.locations.R35): an embedded fleet's own `fleet.toml`, the fleet
-`config.json` names for a declared project this machine registers, and,
-where the walk finds neither file, the fleet `config.json` names only inside
-a git checkout. A seat's session runs
-`fleet prime` in the seat's worktree, which is a checkout. So a seat is
-primed wherever it works, provided the walk finds its fleet: a committed
-`fleet.toml` (shared.locations.R23); a committed `.fleet/project.toml` whose
-primary checkout `projects.toml` lists, while `config.json` names a policy
-file that exists (shared.locations.R22); or, with no file, `config.json`
-naming a policy file that exists (shared.locations.R24).
+(shared.locations.R21 to shared.locations.R24, shared.locations.R39 to
+shared.locations.R53): a wingman project whose project file names the
+checkout, a default fleet's own `fleet.toml`, and, where neither is found,
+the default fleet `config.json` names only inside a git checkout. A seat's
+session runs `fleet prime` in the seat's worktree, which is a checkout. So a
+seat is primed wherever it works, provided its fleet is found: a wingman
+project whose `path` names the seat's primary checkout
+(shared.locations.R40); a committed `fleet.toml` (shared.locations.R23); or,
+with no file, a default fleet `config.json` names (shared.locations.R24).
 
-Where it finds no fleet, or a declared project this machine has not
-registered, it refuses as every such verb does (shared.locations.R25,
-shared.locations.R26, shared.locations.R35): it says why on standard error,
-prints nothing on standard output, and exits 1. A session outside every
-checkout is told there is no fleet there. Where `config.json` or
-`projects.toml` is there but will not read, so it cannot tell which fleet it
-acts in, it says so as every such verb does (shared.locations.R38), likewise
-prints nothing on standard output, and exits 3. Today a `config.json` that
-does not parse gets the no-fleet refusal and exit 1 instead
-(shared.locations.R38's `Today:` line, fleet-9sr5).
+Where it finds no fleet, or finding it refuses, it refuses as every such
+verb does (shared.locations.R25, shared.locations.R41, shared.locations.R42,
+shared.locations.R52): it says why on standard error, prints nothing on
+standard output, and exits 1. A session outside every checkout is told there
+is no fleet there. Where `config.json` or a project file is there but will
+not read, so it cannot tell which fleet it acts in, it says so as every such
+verb does (shared.locations.R38, shared.locations.R53), likewise prints
+nothing on standard output, and exits 3. Today a `config.json` that does not
+parse gets the no-fleet refusal and exit 1 instead (shared.locations.R38's
+`Today:` line, fleet-9sr5).
 
-The guards part reports each class on or off as `fleet guard` treats it in
-the same directory: both read the fleet's policy file, so the two verbs
-answer about one file. Where that policy file cannot be read or does not
-parse, the guards part says so in place of the classes. Reading every class
-as on would tell the session that a class the file turns off is on.
-
-Where the working directory itself cannot be read (it was removed, for
-example), prime says on standard error that the working directory could not
-be read, prints nothing on standard output, and exits 3, as the item verbs
-do there. It cannot tell which fleet it is in, so it does not answer as
-though it stood outside every checkout.
+Prime never waits on standard input, so it never asks which project. Run in
+a wingman directory that holds several project files, it refuses as finding
+no fleet, exit 1, on a line saying to run it in a project's checkout. It
+takes no `--project`: seats never meet this, since they run prime in their
+worktrees, and a hook has no flag to pass. A wingman directory with one
+project file primes that project, as every verb does
+(shared.locations.R43).
 
 The machine directory prime reads `config.json` and the packs from is the one
 shared.locations.R2 to shared.locations.R6 resolve. A seat's session is
@@ -94,7 +88,7 @@ Today every verb, `fleet prime` among them, panics there and exits 101
 
 ### What it prints, in order
 
-In the fleet `fleet create --embedded` made with the claude-code agent and
+In a default fleet `fleet create` made with the claude-code agent and
 the bd store, from the worktree of a seat with two items open:
 
 ```text
@@ -162,7 +156,6 @@ working directory, no item line is printed.
 | the rules | the layers do not resolve | nothing: the first line already says why |
 | the rules | no layer carries a readable `assets/rules.md` | a line of its own saying so |
 | the items | the store cannot be opened, refuses the listing, or does not answer within 5 seconds | `item: could not be read —` and the reason, never `item: none`, which would tell a seat it is free |
-| the items | `config.json` cannot be read, in an embedded fleet, which needs no `config.json` to be found (elsewhere prime refuses first, shared.locations.R38) | `item: could not be read —` and a reason naming `config.json`: prime cannot tell which seat the directory is, and a seat's items must not vanish without a word |
 
 The two store calls are bounded on their own, well under a session-start
 hook's own deadline: 2 seconds for the version, which reads no items, and 5
@@ -191,8 +184,8 @@ intent, and a `Today:` line says what fleet does now.
 - **A closed standard output exits 0 quietly** (fleet-wtpr, carried by
   shared.exit-codes.R27's `Today:` line). Today prime, like every verb,
   panics, writes the panic on standard error and exits 101.
-- **An unreadable `config.json` in an embedded fleet says so** (fleet-vaf4).
-  Today the seat's item lines just vanish.
+- **Prime in a wingman directory of several projects refuses** (fleet-1s1x.5).
+  Today fleet knows no wingman directory.
 - **An unreadable policy file says so in the guards part** (fleet-uo1u).
   Today every class reads as on, without a word.
 - **An unreadable working directory exits 3** (fleet-fd5g). Today prime
@@ -218,16 +211,18 @@ intent, and a `Today:` line says what fleet does now.
   standard error.
 - **onboarding.prime.R5**: WHEN `fleet prime` is called, fleet SHALL find the
   fleet it acts under as every verb that acts in a project finds it
-  (shared.locations.R21 to shared.locations.R24, shared.locations.R36).
+  (shared.locations.R21 to shared.locations.R24, shared.locations.R39 to
+  shared.locations.R53), except as onboarding.prime.R37 says.
 - **onboarding.prime.R6**: IF `fleet prime` finds no fleet for the working
-  directory, or a declared project the machine has not registered
-  (shared.locations.R25, shared.locations.R26, shared.locations.R35), or
-  cannot tell which fleet it acts in (shared.locations.R38), THEN fleet SHALL
-  say why on a line on standard error as those clauses word it, print
-  nothing on standard output, and exit as those clauses say: 1 under
-  shared.locations.R25, shared.locations.R26 and shared.locations.R35
-  (shared.exit-codes.R2, shared.exit-codes.R23), and 3 under
-  shared.locations.R38 (shared.exit-codes.R4).
+  directory (shared.locations.R25), finding it refuses
+  (shared.locations.R41, shared.locations.R42, shared.locations.R52), or it
+  cannot tell which fleet it acts in (shared.locations.R38,
+  shared.locations.R53), THEN fleet SHALL say why on a line on standard error
+  as those clauses word it, print nothing on standard output, and exit as
+  those clauses say: 1 under shared.locations.R25, shared.locations.R41,
+  shared.locations.R42 and shared.locations.R52 (shared.exit-codes.R2,
+  shared.exit-codes.R23), and 3 under shared.locations.R38 and
+  shared.locations.R53 (shared.exit-codes.R4).
 - **onboarding.prime.R7**: IF the fleet's policy file cannot be read or does
   not parse, THEN fleet SHALL make the guards part read `could not be read —`
   followed by a reason naming the policy file, in place of what
@@ -312,13 +307,11 @@ intent, and a `Today:` line says what fleet does now.
   `item: none`.
 - **onboarding.prime.R30**: WHEN no row in `config.json` names the working
   directory as a worktree, fleet SHALL print no item line.
-- **onboarding.prime.R31**: IF `fleet prime` acts in an embedded fleet
-  (shared.locations.R23) and `config.json` cannot be read, THEN fleet SHALL
-  print in the items' place the one line `item: could not be read —`
-  followed by a reason naming `config.json`, and still exit 0
-  (onboarding.prime.R1).
-  Today: prime finds no seat and prints no item line, without saying
-  `config.json` could not be read (fleet-vaf4).
+- ~~**onboarding.prime.R31**~~ retired 2026-10-13: it printed an item line
+  for an unreadable `config.json` in an embedded fleet. Every verb that acts
+  in a project now reads `config.json` to find its fleet, a default fleet's
+  among them, and exits 3 where it will not read (shared.locations.R38)
+  (fleet-1s1x).
 - **onboarding.prime.R32**: fleet SHALL print the same lines from
   `fleet prime` whether or not a controller is running.
 - **onboarding.prime.R33**: IF `fleet prime` cannot read its working
@@ -335,9 +328,16 @@ intent, and a `Today:` line says what fleet does now.
 - ~~**onboarding.prime.R35**~~ retired 2026-10-12: restated
   shared.locations.R32
 - **onboarding.prime.R36**: WHEN `fleet prime` prints a reason on a line
-  (onboarding.prime.R7, R12, R15, R21, R29, R31), fleet SHALL fold any line
+  (onboarding.prime.R7, R12, R15, R21, R29), fleet SHALL fold any line
   break the reason carries, so that the reason stays on that one line and
   the store line is always the second line.
+- **onboarding.prime.R37**: IF shared.locations.R21 stops at a wingman
+  directory (shared.locations.R39), the working directory is inside no git
+  checkout, and the wingman directory holds more than one project file, THEN
+  fleet SHALL refuse `fleet prime` as shared.locations.R25 says, exit 1
+  (shared.exit-codes.R2, shared.exit-codes.R23), on a line saying to run it
+  in a project's checkout, and ask nothing, whatever standard input is.
+  Today: fleet knows no wingman directory (fleet-1s1x.5).
   Today: a reason that carries line breaks, such as a pack manifest's TOML
   parse error, spreads its line over several, and the store line is no
   longer the second (fleet-373f).
