@@ -58,8 +58,7 @@ policy file of the fleet it starts in this order:
    refuses, exit 1: the machine runs one fleet, and a start that rendered
    this fleet's seats into the other fleet's seat list would load a
    controller running the other fleet's policy. The line names both policy
-   files and how to move the machine to the fleet the start was called in.
-   Nothing is written or loaded.
+   files. Nothing is written or loaded.
 2. Otherwise, the policy file `config.json` names (shared.locations.R11),
    where that file exists.
 3. Otherwise it refuses, exit 1 (shared.exit-codes.R2). The line names
@@ -88,7 +87,7 @@ loaded, except where the table says otherwise. Each refusal is a
 | A fleet | no policy file is found, as above | 1 | `fleet.toml`, `config.json`, `fleet create` |
 | The seat list | `config.json` is needed to find the policy file and is there but does not read or parse (shared.locations.R38) | 3 | `config.json` and why |
 | The project | finding the fleet refuses (shared.locations.R41, shared.locations.R42, shared.locations.R45, shared.locations.R47, shared.locations.R48, shared.locations.R52, shared.locations.R53) | 1, 2 or 3, as that clause says | as that clause says |
-| One fleet per machine | the start took a default fleet's or a wingman directory's `fleet.toml` and `config.json` names another policy file | 1 | both policy files, and how to move the machine to the one the start took |
+| One fleet per machine | the start took a default fleet's or a wingman directory's `fleet.toml` and `config.json` names another policy file | 1 | both policy files |
 | The service manager | `FLEET_SERVICE_BIN` is not an absolute path to an executable file; or, with it unset, the platform's manager is not on the search path; or the status query cannot be run; or it exits non-zero with any answer but that the manager does not know `dev.fleet.controller` | 3 | `FLEET_SERVICE_BIN`, or the manager and the search path, or the query's command and its answer |
 | Already running | the manager's status query reports a pid for `dev.fleet.controller` | 1 | the pid, and when the projection was last published or that none has been |
 | The agent | the policy file does not parse; the agent adapter it names does not open, such as when no installed pack carries it; the adapter does not answer `capabilities` or `version`; or its `version` is null, meaning its agent is not installed | 3 | why, and that nothing was loaded; for a pack no one installed, the `fleet pack add` line that installs it |
@@ -548,8 +547,7 @@ Five shared gaps reach `fleet start` too, and the shared clauses carry them:
   shared.locations.R46), and `config.json` names another
   policy file, THEN
   fleet SHALL refuse with exit 1 (shared.exit-codes.R2) on a line naming both
-  policy files and how to move the machine to the fleet the start took,
-  having written and loaded nothing.
+  policy files, having written and loaded nothing.
   Today: the start renders this fleet's seats into the seat list
   `config.json` holds, writes the telemetry key into this fleet's file, and
   loads a controller that runs the policy `config.json` names (fleet-rlojy).
