@@ -499,7 +499,8 @@ Each gap is held by an open item, and the clause cited carries its
   specs say what those calls answer. `fleet store check` and
   `fleet agent check` prove the rest of each contract.
 - Scripts, agents and skills read the exit (R41 to R43) and the `--json`
-  document's `data` (R44, R45), inside the envelope shared.output states.
+  document's `data` (R44, R45), inside the envelope shared.output states
+  (shared.output.R4).
 - `fleet doctor` is one of the verbs that shared.output.R6, shared.output.R7,
   shared.output.R15, shared.output.R19 and shared.output.R20,
   shared.exit-codes.R23, and shared.locations.R25, shared.locations.R30 to

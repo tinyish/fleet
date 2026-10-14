@@ -679,9 +679,10 @@ closes the gap.
   resolves no fleet and acts from any working directory (R28).
 - `fleet create` writes what R39 to R56 read: a default fleet's
   `fleet.toml`, or a wingman directory's `fleet.toml` and project files, and
-  `config.json` (R11). The onboarding.create spec says how, and how it
-  repairs a moved project's `path` (R54) and re-points a moved wingman
-  directory (R55).
+  `config.json` (R11). The onboarding.create spec says how
+  (onboarding.create.R31, onboarding.create.R73), and how it repairs a
+  moved project's `path` (R54, onboarding.create.R70) and re-points a moved
+  wingman directory (R55, onboarding.create.R66).
 - The policy keys R51 lists belong to their own areas' specs (guards, store,
   items, packs, seats). This spec says only which file a wingman project
   reads each from.

@@ -308,8 +308,8 @@ None.
   `fleet prime`, `fleet run`, `fleet routine check`, `fleet status`) says so
   in its own spec, citing the rows it narrows. It still exits only with a
   number from the table (R8).
-- The `--json` document's refusal code is the row's name from R1 to R7 (see
-  shared.output).
+- The `--json` document's refusal code is the row's name from R1 to R7
+  (shared.output.R8).
 
 ## Open questions
 

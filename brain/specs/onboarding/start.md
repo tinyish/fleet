@@ -699,10 +699,12 @@ path and is bounded at 20 seconds:
 - The packs area: the defaults and `packs.lock` (onboarding.start.R26).
 - The controller's policy, which onboarding.start.R10 reads, has no feature
   spec yet. The shared area's map lists it.
-- onboarding.create writes the fleet that `fleet start` starts, and
-  onboarding.stop takes it down.
+- onboarding.create writes the fleet that `fleet start` starts
+  (onboarding.create.R31), and onboarding.stop takes it down
+  (onboarding.stop.R4).
 - Environment variables read: `FLEET_DIR`, `FLEET_HOME`, `HOME`,
-  `XDG_STATE_HOME` and `XDG_CONFIG_HOME` (shared.locations), plus `FLEET_SERVICE_BIN`,
+  `XDG_STATE_HOME` and `XDG_CONFIG_HOME` (shared.locations.R1 to
+  shared.locations.R6), plus `FLEET_SERVICE_BIN`,
   `FLEET_TMUX_BIN` and `FLEET_AGENT_TIMEOUT_MS`. `FLEET_TEST_HERMETIC` is a
   seam for fleet's own tests and is not part of this contract.
 

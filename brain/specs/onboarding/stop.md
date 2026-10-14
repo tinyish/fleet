@@ -326,7 +326,8 @@ before it asks the manager anything, as every verb but `fleet guard` is
   asks about and unloads. Stop leaves that file for the next start
   (onboarding.stop.R17).
 - **A stand-in manager** named by `FLEET_SERVICE_BIN` (onboarding.stop.R6)
-  must answer the status query as onboarding.start Interfaces says and the
+  must answer the status query as onboarding.start Interfaces says
+  (onboarding.start.R8, onboarding.start.R9) and the
   unload as onboarding.stop.R4 and onboarding.stop.N3 say, and must have
   something write `controller.stopped` on the machine directory's stream
   after the unload, or the stop exits 3 (onboarding.stop.N1).

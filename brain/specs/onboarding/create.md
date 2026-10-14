@@ -911,7 +911,8 @@ shared.locations.R17 holds the promise for two calls at once.
   (onboarding.create.R37).
 - git fetches each pack, is told never to prompt for credentials, and is
   given 120 s (onboarding.create.N1).
-- `fleet create` takes no `--json`. shared.output lists the verbs that do.
+- `fleet create` takes no `--json`, so shared.output.R1 does not bind it.
+  shared.output lists the verbs that do.
 
 ## Open questions
 
