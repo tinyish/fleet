@@ -86,7 +86,7 @@ is.
 | File | What you find in it | Written by |
 | --- | --- | --- |
 | `packs/<name>/` | one installed pack's files, in a directory named after the pack | installing a pack (`fleet create`, `fleet pack add`) |
-| `defaults/` | the defaults built into the `fleet` binary that last ran `fleet create` or `fleet start` | `fleet create`, `fleet start` |
+| `defaults/` | the defaults built into the `fleet` binary that last installed them, with `fleet create` or `fleet start` | `fleet create`, `fleet start` |
 | `packs.lock` | each installed pack and the defaults: the source it came from, its version, the commit that version resolved to, and when it was installed | installing a pack or the defaults |
 | `identity.toml` | who acts on this machine when a verb is given no `--by` and no `FLEET_ACTOR`: a person's seat id, and a name if you add one | `fleet create` |
 | `config.json` | the policy file of the fleet this machine runs, and the seats `fleet start` rendered from it | the first `fleet start`, or `fleet create --wingman` where `config.json` is absent or names a policy file that is gone |
@@ -382,8 +382,8 @@ closes the gap.
   SHALL keep its files in a directory named after the pack under `packs/` in
   the machine directory.
 - **shared.locations.R8**: WHEN `fleet create` or `fleet start` runs, fleet
-  SHALL leave in `defaults/` in the machine directory the defaults built into
-  the `fleet` binary that ran it.
+  SHALL, except as onboarding.start.R26 says, leave in `defaults/` in the
+  machine directory the defaults built into the `fleet` binary that ran it.
 - **shared.locations.R9**: WHEN a pack or the defaults are installed, fleet
   SHALL name each one installed in `packs.lock` in the machine directory, with
   the source it was installed from, its version, the commit that version
