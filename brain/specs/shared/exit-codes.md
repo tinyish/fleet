@@ -25,7 +25,7 @@ fleet will not do what you asked.
 | --- | --- | --- | --- |
 | 0 | `done` | The verb did what it was asked, and confirmed any change it made. | `fleet --version` |
 | 1 | `refused` | The thing named is absent, is not in the state the verb needs, or already is so. Or a check the verb runs answered no. | `fleet stop` with nothing loaded; a verb run outside any fleet |
-| 2 | `usage` | The call itself is wrong: a missing, unknown or invalid command, argument or flag; a name the verb takes from a fixed set it knows, such as a check name, that is not in that set; two flags that cannot go together; no command, or a family with no verb; or a question with no terminal to ask it on. | `fleet doctor --bogus`; `fleet doctor` given a check name no layer carries; `fleet create < /dev/null` |
+| 2 | `usage` | The call itself is wrong: a missing, unknown or invalid command, argument or flag; a name the verb takes from a fixed set it knows, such as a check name, that is not in that set; two flags that cannot go together; no command, or a family with no verb; or a question with no terminal to ask it on. | `fleet doctor --bogus`; `fleet doctor` given a check name no layer carries |
 | 3 | `could_not_tell` | Something the answer needs could not be read, so fleet cannot say what happened. It is never a success. | `fleet observe --once` with no seat list |
 | 4 | `no_session` | The verb needs a seat's live session, and the seat has none. | `fleet seat attach` for a seat with no session |
 | 5 | `no_collector` | No controller is consuming the event stream: there is no event stream, no projection, or a projection older than the verb allows. | `fleet status` with no projection; `fleet event show` with no stream |
