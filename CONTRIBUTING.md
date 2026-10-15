@@ -1,220 +1,159 @@
-# Contributing to fleet
+# Contributing to tinyfleet
 
-How fleet is built, and how work reaches `main`. Read all of it before your
-first item, whether you are a person or an agent. The first half is the
-method, adopted 2026-10-12. The second half is branches, commits and
-releases.
+How tinyfleet is built, and how work reaches `main`. Read all of it before
+your first item, whether you are a person or an agent. The first half is the
+method: the layered method, adopted 2026-10-15, which replaced the clause-id
+spec method of 2026-10-12. The second half is branches, commits and releases.
+The product is tinyfleet; its binary, crates and repository are named
+`fleet`.
 
-## How fleet is built
+## How tinyfleet is built
 
-Four problems decide whether fleet stays buildable for years, and the method
-answers each one:
+Code is regenerable output. What lasts is the layers above it, each written at
+the level it changes, so a rewrite can throw the code away and keep them:
 
-| Problem | Answer |
-| --- | --- |
-| Saying what fleet does | **Specs**: the source people read and review |
-| Proving it does it | **Scenarios** run against fleet from a separate, blind repository |
-| Knowing how it works | **Learning**: walkthroughs led by the architecture map |
-| Keeping the code sound | **Code health**: guards, scheduled passes, metrics |
+| Layer | Holds | Changes | Lives in |
+| --- | --- | --- | --- |
+| PRD | the problem, who has it, journeys, what success looks like | rarely | `brain/prd/` |
+| Architecture | the backbone: components, who talks to whom, boundaries, invariants | sometimes | `brain/architecture/overview.html`, pointing at contracts in code |
+| Program design | how one change reshapes the code | every change | the item's bead |
+| Evals | what any implementation must do: journeys and edge cases | grows with real use | fleet-dtu (hidden), `tests/cmd/` (visible) |
+| Code | one implementation | freely | the crates |
 
-**People own intent; agents own code.** People review, and may write, the
-seed PRD, the specs, the architecture map and the scenarios. People never
-write code and never gate on it; they read it only to learn, in
-walkthroughs. Agents draft most of the intent too, but a person
-approves every change to it. Planner agents write implementation plans from
-the feature specs, and builder agents build from those plans; neither ever
-sees a scenario. Reviewer agents still read code, against the code-health
-rules; no person gates on it.
+Provenance, the why behind each layer, is deferred: beads is building it
+(Memory Beads, Provenance V2). Until then commits keep their `Claude-Session:`
+trailer and decisions stay in bead comments.
 
-**The loop.** The seed PRD names the features. Each feature has a feature
-spec made of a story and numbered clauses. An item (a bead) declares its kind
-and cites the clauses it touches. A planner writes the item's implementation
-plan into its bead from those feature specs. A builder writes the code from
-the plan. fleet-dtu runs the scenarios that cite those clauses. The item
-lands. Health passes and map sittings feed internal items back in.
+**People own intent; agents own code.** People write or approve the PRDs, the
+overview and the journeys, and steer program design before code exists.
+People never write code and never gate on it; they read it to learn. Planner
+agents write program design from the PRD, the overview and the contracts.
+Builder agents build from the program design. Neither ever sees a fleet-dtu
+scenario.
+
+**The loop.** A PRD's journey names what a person needs. An item declares its
+kind and names the journey, boundary or eval case it touches. A planner writes
+the program design into the item's bead, and Alberto steers it. A builder
+writes the code. The visible evals run on every change; fleet-dtu runs the
+journeys. The item lands.
 
 **Where each truth lives:**
 
 | Place | Holds | Written by |
 | --- | --- | --- |
-| `brain/specs/seed.md` | the seed PRD, one page: what fleet is, who it is for, its features, the limits it never crosses | agents draft, a person approves |
-| `brain/specs/mod.md` | the map's overview: the crates, the areas, how the areas connect, which may depend on which | agents draft from the code, a person approves |
-| `brain/specs/<area>/mod.md` | the area's part of the map: its feature specs, its modules and how work flows through them | agents draft from the code, a person approves |
-| `brain/specs/<area>/<feature>.md` | a feature spec: what a feature does and why, the contract every implementation plan is written from | agents draft, a person approves |
-| fleet-dtu (sibling repository) | the scenarios and the twins: the proof | agents draft, a person approves; planners and builders never see it |
-| `docs/` | the user manual, generated from the feature specs | the docs skill only; never a planner's or builder's input |
+| `brain/prd/seed.md` | the product PRD: what tinyfleet is, who it is for, its capabilities, principles, success, non-goals | agents draft, Alberto approves |
+| `brain/prd/<capability>.md` | one capability's PRD: its problem and journeys | agents draft, Alberto approves |
+| `brain/architecture/overview.html` | the architecture: direction, the backbone, what makes it hard, boundaries, invariants, terms | agents draw, Alberto approves |
+| the contracts in code | each boundary's authoritative form, listed in the overview's Boundaries table | builders, from program design |
+| `tests/cmd/` | visible evals: edge cases and regressions at the CLI boundary | builders, from real use |
+| fleet-dtu (sibling repository) | hidden evals: the journeys as scenarios, and the twins | agents draft, Alberto approves; planners and builders never see it |
+| `docs/` | the user manual | the docs skill only; never a planner's or builder's input |
 | `brain/metrics.md` | the code-health numbers, one row per release | `tools/metrics`, at each release's health pass |
-| the rest of `brain/` | why fleet is shaped the way it is | Alberto |
-| beads | the work queue, and each item's implementation plan | agents and people; a planner writes the plan |
+| `brain/specs/` | the frozen clause-id specs: read-only material, archived after the pilot | nobody |
+| beads | the work queue, and each item's program design | agents and people; a planner writes the program design |
 
-## Specs
+## PRDs
 
-**The seed PRD** (`brain/specs/seed.md`) is one page: what fleet is, who it
-is for, the feature list with each feature's spec file, and the limits fleet
-never crosses. It changes only when a feature is added or removed, and links
-to the map rather than holding it.
+**The product PRD** (`brain/prd/seed.md`) says what tinyfleet is, who it is
+for, its capabilities, its principles, what success looks like and its
+non-goals. Each capability's title is its PRD's heading and file name.
 
-**The specs folder mirrors the code.** Each area has its own folder, and
-each folder's `mod.md` is its part of the architecture map, the way a Rust
-`mod.rs` is a module's root. The areas started from the `docs/` areas and are
-the folders under `brain/specs/`, listed in the map's overview
-(`brain/specs/mod.md` § Areas).
+**A capability PRD** (`brain/prd/<capability>.md`) states the problem in the
+user's terms, then its journeys. Each journey says what the person is trying
+to do, what success looks like, and the verbs it passes through. Then what
+success looks like for the capability, and its non-goals.
 
-    brain/specs/
-      seed.md            the seed PRD
-      mod.md             the map's overview
-      <area>/
-        mod.md           the area's map
-        <feature>.md     one feature's spec
+**The line rule.** A PRD line states a need or a success condition, and it
+must survive a redesign of the CLI: no flags, exit codes, file names, output
+lines or ordering. Those belong to the architecture's boundaries or to the
+evals. Check a PRD with:
 
-**The architecture map** is the `mod.md` files:
+    grep -nE '(^|[^a-z])--[a-z]|exit [0-9]|`[^`]*\.(toml|json|md|lock)`' brain/prd/*.md
 
-- `brain/specs/mod.md` is the overview: the crates, the areas and the folder for
-  each, how a request crosses from one area to the next, and which crate
-  and area may depend on which (the dependency guard reads this).
-- `brain/specs/<area>/mod.md` lists the area's feature specs, and every code
-  module the area owns with one sentence each: what it does and what it
-  depends on. It says how work flows through those modules.
+which prints nothing for a PRD that keeps the rule.
 
-The map changes when the architecture moves. A test, `cli/tests/map.rs`,
-fails the build on drift: a module no area's map names, a module named
-twice, or a name with no module.
+**A capability is a user problem, not a mechanism.** If its problem cannot be
+stated without naming the mechanism, the mechanism is an architecture concept
+serving another capability.
 
-**A feature spec** (`brain/specs/<area>/<feature>.md`) does four jobs:
+A PRD changes only when the problem does: a `behaviour` item that changes what
+a journey promises edits the PRD first.
 
-- it is the contract a planner writes an implementation plan from;
-- it is what a person reads to understand the feature and why it behaves as
-  it does;
-- it is the source the user docs are generated from;
-- it is where people own intent.
+## Architecture
 
-Agents read and write most of it, and people review its changes. It holds,
-in this order:
+**The overview** (`brain/architecture/overview.html`) is one page, mostly
+diagrams, made with the iterate-on-docs plugin's `make-a-project-overview` in
+diagram-design's style and refined with Alberto through `iterate-on-a-document`.
+It shows reality first; anything not yet true carries a visible
+**directional** mark.
 
-1. **The story**, for readers. It covers:
-   - what the feature is for, and who meets it and when;
-   - every flow a user walks, with its inputs and outputs;
-   - its errors and edge cases;
-   - the reason behind each choice.
+**It points, it never restates.** Each boundary in its table names the file
+that holds the boundary's authoritative form: the clap definitions, the exit
+enum, the `--json` envelope, the adapter schemas, the file formats. A complete
+definition lives in code, decision history in git, task status on the board.
 
-   Use tables, lists and examples wherever they read faster than prose: an
-   exit table, a file layout, the order of lookups. The story may repeat
-   what the clauses say, in the form a person reads fastest.
-2. **Behaviour clauses**, `<area>.<feature>.R<n>`, one EARS sentence each
-   (below).
-3. **Non-functional clauses**, `<area>.<feature>.N<n>`: recovery after a
-   crash or `kill -9`, concurrency, timing, limits.
-4. **Interfaces**: what other areas, the adapters and the operating system
-   rely on.
-5. **Open questions**: each `[NEEDS CLARIFICATION: …]`, or `None.`
-6. **Definition of Done**: every clause has at least one scenario.
+**It changes before the code it describes.** A change that moves a boundary or
+an invariant updates the overview while it is planned, marked directional, so
+Alberto sees the plan as a picture first. The commit that makes it real drops
+the mark. A change that moves no boundary never touches the overview.
 
-**Clauses are written in EARS**, the Easy Approach to Requirements Syntax.
-It has five patterns, and they combine (`WHERE …, WHEN …, fleet SHALL …`):
+**It is written for people.** Builders meet the same backbone where an agent
+obeys it: in the contracts, in the fitness tests that check the invariants,
+and in `AGENTS.md`.
 
-| Pattern | Form | For |
-| --- | --- | --- |
-| Always | `fleet SHALL …` | what holds whatever happens |
-| Event | `WHEN <trigger>, fleet SHALL …` | a command, a signal, an arriving event |
-| State | `WHILE <state>, fleet SHALL …` | what holds as long as a state lasts |
-| Unwanted | `IF <fault>, THEN fleet SHALL …` | a failure, a timeout, bad input |
-| Optional | `WHERE <feature or platform>, fleet SHALL …` | `WHERE the platform is macOS` |
+## Program design
 
-Each clause follows these rules:
+Program design is the per-change plan superpowers' writing-plans skill writes:
+types, signatures, call trees and file-tree diffs. It goes in the item's bead
+(its approach in the `design` field, its steps in the body or child beads),
+never in `brain/` or `docs/`. It is the level where Alberto reads and steers
+how the code is shaped before any code exists. It is never a standing
+document.
 
-- A clause states intended behaviour: what a person decided fleet does, not
-  whatever the code happens to do. A spec never makes a bug look like design.
-- A clause states the promise the behaviour serves, not the mechanism that
-  keeps it: "two commands editing the same file never lose an edit", not
-  which file gets a lock.
-- One observable outcome per clause.
-- Exact values: exit codes, event types, paths relative to the machine
-  directory, bounds in seconds.
-- A rule is stated by one clause. Every other clause, in this spec or
-  another, cites that clause by its full id and never restates it. A clause
-  or row that applies another clause's test cites it ("a key
-  shared.locations.R52 refuses") rather than rewording it, since a reworded
-  copy drops qualifiers.
-- Where two clauses' triggers can both hold, the broader clause names the
-  narrower one as its exception ("except as <id> says"), so every case meets
-  exactly one clause. A refusal (`IF …, THEN fleet SHALL refuse …`) always
-  wins over the clause it blocks, and that clause need not name it. Two
-  refusals are not settled that way: where two can hold for one call, one
-  clause says which is made, so every call has one exit.
-- Only text a script or a person depends on is quoted, never a whole
-  message.
-- Where today's binary falls short of a clause, a line
-  `Today: <what fleet does now> (<bead id>)` follows the clause, naming the
-  `fix` or `behaviour` item that will close the gap. The item's spec change
-  is deleting that line. Until then, the clause's scenarios are known
-  failures, not regressions. The story lists the same gaps, in plain words,
-  under a heading `### Known gaps`, so `grep -rn '^### Known gaps'
-  brain/specs` finds every one.
-- Every behaviour the story describes has a clause, and every clause appears
-  in the story. An item that changes one changes the other. If they disagree,
-  the clause is what fleet is held to, and the mismatch is a `spec` item.
+## Evals
 
-A feature spec says what a user or a neighbouring component can observe,
-never how the code does it. If a reader could only notice it by reading the
-code, it is not in the feature spec. That keeps a feature spec as big as the
-product's surface, not as big as the code. Where the code lives is the map's
-job. How one item changes it is that item's implementation plan.
+The evals are the layer that remembers the edge cases: the code can be thrown
+away, the evals are kept.
 
-**A feature spec and an implementation plan are different documents.** Keep
-the two names apart everywhere.
-
-| | Feature spec | Implementation plan |
-| --- | --- | --- |
-| Says | what a feature does and why | how one item changes fleet: its approach and its steps |
-| Lives | `brain/specs/<area>/<feature>.md`, for as long as the feature does | the item's bead: the approach in its `design` field (`bd update <id> --design-file <file>`), the steps in its body or child beads |
-| Written by | agents draft, a person approves | a planner, with superpowers:brainstorming and superpowers:writing-plans |
-| Read by | planners, people, the docs skill, fleet-dtu | the builder of that item |
-
-superpowers calls the design it writes a "spec". In fleet that design is the
-first half of an implementation plan, so it goes in the bead's `design`
-field, never in `brain/specs/` or `docs/`.
-
-**Zero clarification.** A planner must be able to write an implementation
-plan from a feature spec without asking anything, and a builder must be able
-to build from the plan without asking anything. An open question in a
-feature spec is written `[NEEDS CLARIFICATION: …]` and blocks planning the
-clauses it touches.
-
-**Clause ids are never reused.** A removed clause stays in the file, marked
-retired, so old items and scenarios that cite it still resolve.
+- **Journeys become fleet-dtu scenarios.** They are hidden from planners and
+  builders and judge whether a journey succeeds end to end (§ Scenarios and
+  fleet-dtu).
+- **Edge cases and regressions become visible evals** at the CLI boundary:
+  transcript cases under `tests/cmd/<verb>/`, run by `cargo test` on every
+  change. They are black-box, so they survive a rewrite. *(Directional: the
+  harness lands with fleet-20ti.8.)*
+- **Unit tests are part of the code.** They test one implementation and may be
+  regenerated with it. A unit test earns its place only for pure logic no eval
+  reaches cheaply, such as parsers and the controller's decide step.
+- **Edge cases enter from real use, never from reading a document.** A bug is
+  fixed by first adding the eval case that fails on it.
+- **Exact text where a change would matter, wildcards where it would not.** A
+  case states only what a person or a script would notice if a rewrite changed
+  it.
 
 ## Change kinds
 
-Every item declares one kind, as a bead label, and cites its clauses by id.
-The land gate checks the kind:
+Every item declares one kind, as a bead label, and names the journey, boundary
+or eval case it touches:
 
-| Kind | When | The feature spec | Scenarios |
+| Kind | When | First edits | Evals |
 | --- | --- | --- | --- |
-| `behaviour` | something observable changes | changes first; the item cites the changed clauses, or deletes the `Today:` line a ruling left for it | fleet-dtu adds or updates the scenarios for those clauses |
-| `fix` | the code broke a clause that already exists | does not change, except that the item deletes the `Today:` line naming it, if there is one; the item cites the broken clause | fleet-dtu adds a scenario that would have caught it |
-| `internal` | comments, refactors, speed, dependencies | does not change | every scenario passes unchanged |
-| `spec` | the feature spec is written or reworded to say what fleet already does | changes; the item cites the clauses it wrote or reworded | fleet-dtu adds or updates the scenarios for those clauses; the code does not change |
+| `behaviour` | what a journey or a boundary promises changes | the PRD or the overview (and the boundary's contract), before the code | added or updated for the changed promise |
+| `fix` | the code breaks a promise that already exists | the eval case that fails on it, before the fix | the new case, and every other passes |
+| `internal` | no promise moves: refactors, speed, dependencies, comments | the program design only | every eval passes unchanged |
+| `spec` | a PRD or the overview is written or reworded to say what tinyfleet already does | the PRD or the overview; no code | added where a journey had none |
 
-A fix with no clause to cite has found a gap in the feature spec: it is a
-`behaviour` item. An item mislabelled `internal` is caught when its scenarios
-fail.
-
-A change that adds a case to a lookup, a list of verbs or a set of values
-searches every clause and Interfaces line that lists that lookup's cases or
-names its result, and updates each in the same item.
-
-A `behaviour` or `spec` item that changes a clause lands only once an agent
-that did not write it has reviewed every clause it changed, every clause
-citing one, and every story row, table or example sorting the same cases.
+A fix that names no promise has found a gap in a PRD or the overview: it is a
+`behaviour` item. An item mislabelled `internal` is caught when an eval fails.
 
 ## Scenarios and fleet-dtu
 
 fleet-dtu is a sibling repository holding the scenarios
-(`scenarios/<area>/S-<area>-<nnn>.md`), the twins and the runner. **It is
-never mounted into a planner's or builder's seat.** Its own agents see
-fleet's `brain/specs/` and the built binary, never fleet's source, so
-scenarios test the feature specs and not the implementation. Agents draft
-scenarios from the feature specs; a person approves each one.
+(`scenarios/<capability>/S-<capability>-<nnn>.md`), the twins and the runner.
+**It is never mounted into a planner's or builder's seat.** Its own agents see
+fleet's `brain/prd/`, `brain/architecture/` and the built binary, never fleet's
+source, so scenarios test the journeys and not the implementation. Agents draft
+scenarios from the journeys; Alberto approves each one.
 
 **The twins** are fake `claude` and `bd` command-line tools. They sit behind
 the real adapters from fleet-packs, with real git and real tmux on a private
@@ -250,10 +189,10 @@ daily as a launchd job. Linux joins when fleet-dtu gets CI.
 Nothing a scenario does reaches the real launchd, systemd, tmux server or
 home directory.
 
-**A scenario** is one Markdown file: a user story with checks.
+**A scenario** is one Markdown file: a journey with checks.
 
-    # S-items-007: a dispatched item survives a controller kill -9
-    covers: items.dispatch.R3, seats.observe.N2
+    # S-delivery-007: a dispatched item survives a controller kill -9
+    covers: delivery/hand-work-to-an-agent
 
     ## Given
     - pack tiny · bd twin: open item t-1
@@ -271,91 +210,84 @@ home directory.
 
 `$` lines are fleet commands, `!` lines are faults, and every check under
 `Then` is deterministic: exit codes, item states, events, commits, files. An
-LLM judges only output that is prose.
+LLM judges only output that is prose. `covers:` names the journeys the
+scenario proves, as `<capability>/<journey>`.
 
 **Running.** Each scenario gets its own `FLEET_DIR` and tmux server, so
 scenarios run in parallel. Each runs three times and passes only if all three
-pass, to catch races. A `behaviour` or `fix` item runs the scenarios citing
-its clauses. An `internal` item runs every area whose modules it touched; the
-map says which. The full suite runs at least daily and at every release.
+pass, to catch races. A `behaviour` or `fix` item runs the scenarios covering
+the journeys it names. An `internal` item runs every capability whose code it
+touched. The full suite runs at least daily and at every release.
 
-**What a builder hears back:** the verdict, the scenario's title, the clauses
-it cites, and fleet's own output and event log from the run. Never the
-scenario's text. A planner who finds a feature spec contradicting itself,
-or a builder who finds the plan contradicting the feature spec, says so
+**What a builder hears back:** the verdict, the scenario's title, the
+journeys it covers, and fleet's own output and event log from the run. Never
+the scenario's text. A planner who finds a PRD or the overview contradicting
+itself, or a builder who finds the program design contradicting them, says so
 instead of guessing, and that becomes a `spec` item.
 
 **The bridge.** `tools/scenarios` is fleet's only way into fleet-dtu. A
-builder runs it with clause ids or an area. It builds fleet, has `dtu` run
+builder runs it with journeys or a capability. It builds fleet, has `dtu` run
 the matching scenarios, and prints only what a builder hears back. With
-`--coverage` it prints instead, for each clause id, how many scenarios cite it
+`--coverage` it prints instead, for each journey, how many scenarios cover it
 and the visible ones' titles. The gate and `tools/metrics` read that list.
 
 fleet's Claude Code project settings deny every session in fleet's checkout
 any read of fleet-dtu, and so every planner and builder seat and its
-subagents. The file
-tools are denied by a `Read` deny rule. The shell is denied by the sandbox's
-`denyRead`, with unsandboxed retries turned off. Only the bridge is excluded
-from the sandbox. fleet-dtu's own settings deny its sessions fleet's source the
-same way, leaving them `brain/specs/` and the built binary.
+subagents. The file tools are denied by a `Read` deny rule. The shell is
+denied by the sandbox's `denyRead`, with unsandboxed retries turned off. Only
+the bridge is excluded from the sandbox. fleet-dtu's own settings deny its
+sessions fleet's source the same way, leaving them `brain/prd/`,
+`brain/architecture/` and the built binary.
 
 **The holdout reserve.** About one scenario in five never reports to
 builders: it runs only in the daily run and at release, whose results go to
-a person. A failure there means the builders are being fitted to the visible
-scenarios, and the feature spec or the suite needs work. A holdout says
+Alberto. A failure there means the builders are being fitted to the visible
+scenarios, and the journey or the suite needs work. A holdout says
 `holdout: true` under its `covers:` line, and the bridge never runs it.
 
 **The land gate** is `tools/gate <bead id>`, run by the reviewer before an
 item is squash-landed. It:
 
-- reads the item's kind label and the clauses it cites;
-- refuses an item with no kind, a cited clause that does not exist, a
-  `behaviour` item whose spec did not change in the item, or a `spec` item
-  that changes code;
+- reads the item's kind label and the journeys, boundaries or eval cases it
+  names;
+- refuses an item with no kind, a named journey that no PRD holds, a
+  `behaviour` item whose PRD or overview did not change in the item, a `fix`
+  item that adds no eval case, or a `spec` item that changes code;
 - stops an item that changes the bridge, the gate, the size list or the
-  read-deny settings until a person approves it;
-- runs the guards;
-- runs the scenarios through the bridge. That is the cited clauses'
-  scenarios for `behaviour` and `fix` items, and those of every area whose
-  modules it touched for an `internal` item. It refuses on any failure,
-  except a known failure of a clause that still has a `Today:` line, and on a
-  cited clause no scenario covers.
+  read-deny settings until Alberto approves it;
+- runs the guards and the visible evals;
+- runs the scenarios through the bridge: those covering the named journeys for
+  `behaviour` and `fix` items, and those of every capability whose code it
+  touched for an `internal` item. It refuses on any failure.
 
 `fleet land` may call the same gate once fleet builds itself.
 
-## Unit tests
-
-Unit tests stay in fleet. New ones are written only for pure logic the
-scenarios cannot reach cheaply, such as parsers and the controller's decide
-step. A unit test earns its place only by catching a break that no scenario
-catches, and that break must be worth pinning.
-
 ## Learning
 
-**The bar:** every person on the project knows the architecture map: what
-each area does, where its code lives, and how a request flows through it.
+**The bar:** every person on the project knows the overview: what each part
+does, where its code lives, and how a request flows through it.
 
-**Walkthroughs.** One sitting covers one area. It starts from the area's
-folder, its `mod.md` and feature specs, and a trace of one real run
-read from fleet's event log. From there it goes into the code itself, module by
-module, as deep as the person wants. Reading code to learn is encouraged;
-what people never do is write it or approve it. The sitting ends with the
-person explaining the flow back, and its findings are filed as beads.
+**Walkthroughs.** One sitting covers one capability. It starts from the
+capability's PRD and the overview, and a trace of one real run read from
+fleet's event log. From there it goes into the code itself, module by module,
+as deep as the person wants. Reading code to learn is encouraged; what people
+never do is write it or approve it. The sitting ends with the person
+explaining the flow back, and its findings are filed as beads.
 
 **When:**
 
-- **Onboarding.** A new person walks every area once.
-- **After each release.** A short sitting covers each area whose spec or map
-  moved, so familiarity keeps pace with the code.
+- **Onboarding.** A new person walks every capability once.
+- **After each release.** A short sitting covers each capability whose PRD or
+  part of the overview moved, so familiarity keeps pace with the code.
 - **Any time,** on request.
 
 ## Code health
 
 - **Mechanical guards** are always on and fail the build:
-  - dependency rules from the map, generalising today's
-    core-never-depends-on-controller test: a test reads § Allowed
-    dependencies in `brain/specs/mod.md`, and a crate or area edge the map
-    does not list fails it;
+  - fitness tests for the overview's invariants, generalising today's
+    core-never-depends-on-controller test (`cli/tests/workspace.rs`); a
+    crate edge or placement the overview does not allow fails them
+    *(directional: fleet-20ti.9)*;
   - a pinned toolchain and clippy lint set, with warnings denied;
   - size budgets: at most 100 lines per function and 600 lines per file, not
     counting a file's inline tests. Code over budget when the guard landed is
@@ -363,20 +295,20 @@ person explaining the flow back, and its findings are filed as beads.
     but never grow, and leaves the list once it is within budget;
   - no dead code and no unused dependencies.
 
-  Loosening a guard is a change a person approves, never a builder's call.
-  That includes adding to the size list, and changing the scenario bridge, the
-  land gate or a seat's read-deny (see § Scenarios and fleet-dtu).
+  Loosening a guard is a change Alberto approves, never a builder's call. That
+  includes adding to the size list, and changing the scenario bridge, the land
+  gate or a seat's read-deny (see § Scenarios and fleet-dtu).
 - **Scheduled health passes** run at each release, before the docs pass.
   Agents look for duplication, dead code and simplification, security
-  problems, and map fidelity. Each finding is an `internal` item.
-- **Map sittings** file what they find (see Learning). A module the map
+  problems, and overview fidelity. Each finding is an `internal` item.
+- **Walkthroughs** file what they find (see Learning). A part the overview
   cannot explain in one sentence is a finding.
 - **Metrics, one row per release** in `brain/metrics.md`, printed by
   `python3 tools/metrics`:
   - build time, each test lane's tests and time, tests per crate;
   - lines per crate and the largest source file;
   - clippy allows and warnings;
-  - clauses that have no scenario.
+  - journeys that have no scenario.
 
   They are read as trends: compare the new row with the ones above it and
   file a health item for what moved the wrong way. Thresholds that file items
@@ -385,84 +317,52 @@ person explaining the flow back, and its findings are filed as beads.
 
 ## Moving to this method
 
-fleet moves to this method one area at a time. This section holds
-everything that is true only during the move. When the last area converts,
-the whole section is deleted and nothing else in this file changes
-(fleet-ptd9).
+tinyfleet moves to the layered method one capability at a time. This section
+holds everything that is true only during the move; when the last capability
+converts, it is deleted and nothing else in this file changes.
 
-1. **Phase 0.** Write `brain/specs/seed.md`, the overview
-   `brain/specs/mod.md`, and every area's folder with its `mod.md`, so the
-   whole map exists before any spec does. Fix what now points the wrong way
-   (README's links to the archived `brain/fleet-layers.md`, the rules in
-   `docs/README.md`), and measure today's suite as the baseline.
-2. **The pilot is onboarding.** Its feature specs come first, with `shared`'s
-   exit codes, locations and output. Then come fleet-dtu with the twins, the
-   bridge and the land gate, onboarding's scenarios, and the guards, all
-   measured against the baseline.
-3. **The rest**, one area at a time, in the order below.
+1. **The freeze.** `brain/specs/` is frozen as of 2026-10-15: nobody edits it,
+   cites its clause ids in new work, or runs spec-cleanup sittings on it. Its
+   area maps' `## Modules` lists are still read by `cli/tests/map.rs` until the
+   archive.
+2. **The pilot is onboarding, with shared** (epic fleet-20ti). Onboarding gets
+   its PRD, its trycmd evals and its fleet-dtu journeys; shared's exit codes,
+   output and locations become the overview's first boundaries and their
+   contracts in code.
+3. **The verdict.** The pilot passes when the onboarding PRD reads in one
+   sitting and keeps the line rule, the overview's every boundary points at a
+   contract or fitness test that exists, `fleet create`'s refusals are covered
+   by visible evals, and `fleet create` regenerated from the layers alone
+   passes them.
+4. **The archive.** After the verdict, `brain/specs/` is archived. It stays
+   readable as material for the capabilities still to convert.
+5. **The rest**, one capability at a time, in the order below.
 
-**Areas convert in the order a person meets them** using fleet for the first
-time: setting it up, adding a seat, working an item, watching it, being
-refused by a guard, and only later customising packs, workflows and
-routines or writing adapters. The specs then read as the path a new user
-walks. `shared` is not converted on its own: each of its features is specced
-with the first area that needs it (the exit codes, locations and output with
-onboarding).
+**Converting a capability looks at what tinyfleet does today, but writes down
+only what is needed.** An agent drafts the PRD from the archived specs, the docs
+and fleet's observable behaviour, keeping needs and dropping mechanisms, and
+Alberto refines it. Edge cases are not copied from the archived specs; they
+enter the evals from real use.
 
-**Converting an area looks at what fleet does today, but writes down only
-what was meant.** An agent drafts each feature spec from fleet's observable
-behaviour: it runs fleet, and reads the area's docs and code. It writes only
-what a user or a neighbouring component can observe, as the promise each
-behaviour serves. It then sorts every clause by the evidence that the
-behaviour was intended:
+A capability not yet converted keeps the old rules: its docs are checked
+against the code, and its unit tests are its proof. The land gate runs its
+unit tests in place of its scenarios.
 
-- **evidenced**: a code comment giving the reason, a `brain/` note, a test
-  that asserts it on purpose, or a person's earlier ruling;
-- **apparent**: consistent and plausible, but nothing says why;
-- **doubtful**: looks accidental, inconsistent or wrong. It is written
-  `[NEEDS CLARIFICATION: …]`, never kept silently.
+**Twins grow capability by capability.** A twin answers only the calls the
+converted capabilities' scenarios make. While a twin is partial, its
+faithfulness check runs only the checks for the calls it answers. The bd twin
+must pass the whole `fleet store check` before Delivery converts. The claude
+twin must pass the whole `fleet agent check` before Autonomy converts.
 
-The sorting, with each clause's evidence, goes in a review note on the spec
-item's bead, never in the spec. The person confirms the apparent clauses,
-rules on each doubtful one, and reads and edits the feature spec before it
-is committed. A clause nobody can vouch for stays out. Where a ruling or a
-found bug leaves today's binary short of a clause, the clause states the
-intent and carries a `Today:` line naming the `behaviour` or `fix` item that
-will close the gap.
-
-An area is **converted** when every clause has a scenario, its scenarios pass
-in fleet-dtu, its docs are regenerated from its feature specs, and its unit
-tests are triaged. Until then the area keeps the old rules: its docs are checked
-against the code, and its unit tests are its proof. The land gate then runs
-the area's unit tests in place of its scenarios.
-
-**Triaging an area's unit tests** happens once its scenarios are complete.
-An agent does it from inside fleet, so it never sees a scenario's text. It
-reads each of the area's unit tests against the area's specs and the titles
-and clauses of its scenarios, from the bridge's coverage list. It decides
-whether each test stays or goes by the rule in § Unit tests, and writes one
-report giving the reason for every test it kept and every test it removed. A
-person reads the report before the removals land.
-
-**Twins grow area by area.** A twin answers only the calls the converted
-areas' scenarios make. While a twin is partial, its faithfulness check runs
-only the checks for the calls it answers. The bd twin must pass the whole
-`fleet store check` before items converts. The claude twin must pass the
-whole `fleet agent check` before seats converts.
-
-| Order | Area | Status |
+| Order | Capability | Status |
 | --- | --- | --- |
-| 1 | onboarding | not converted (the pilot) |
-| 2 | seats | not converted |
-| 3 | items | not converted |
-| 4 | status | not converted |
-| 5 | guards | not converted |
-| 6 | packs | not converted |
-| 7 | runs | not converted |
-| 8 | routines | not converted |
-| 9 | store | not converted |
-| 10 | agent | not converted |
-| — | shared | specced feature by feature, with the area that first needs each |
+| 1 | Onboarding | the pilot |
+| 2 | Delivery | not converted |
+| 3 | Autonomy | not converted |
+| 4 | Visibility | not converted |
+| 5 | Safety | not converted |
+| 6 | Customization | not converted |
+| 7 | Integrations | not converted |
 
 ## Branching, commits and releases
 

@@ -2,9 +2,9 @@
 
 One binary, three crates.
 
-How fleet is built, and what it must do, are written down rather than read
-out of the code: `CONTRIBUTING.md` is the method, `brain/specs/seed.md` the
-one-page PRD, and `brain/specs/mod.md` the map of where each piece lives.
+How tinyfleet is built, and what it must do, are written down rather than read
+out of the code: `CONTRIBUTING.md` is the method, `brain/prd/` holds the
+PRDs, and `brain/architecture/overview.html` draws the architecture.
 
 ## Layout
 
