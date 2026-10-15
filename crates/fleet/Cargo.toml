@@ -1,0 +1,17 @@
+[package]
+name = "fleet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "fleet"
+path = "src/main.rs"
+
+[dependencies]
+cli.workspace = true
+
+[lints]
+workspace = true
