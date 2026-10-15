@@ -8,7 +8,8 @@ code:
 
 - `brain/prd/` holds the PRDs: `seed.md` for the product, one file per
   capability.
-- `brain/architecture/overview.html` draws the architecture.
+- `brain/architecture/` will hold the architecture doc, once a capability
+  needs one.
 - `CONTRIBUTING.md` is the method; `AGENTS.md` is its short form for agents.
 
 The implementation from before 2026-10-15 is on older branches only, and

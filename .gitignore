@@ -7,6 +7,8 @@ target/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+# bd's concurrency gate: flock files beside .beads, never deleted
+*.gate.lock*
 
 # Claude Code: builder worktrees and per-machine settings
 .claude/worktrees/

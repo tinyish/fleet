@@ -27,8 +27,8 @@ The same holds for `brain/specs/`: it describes the old code, so it is read
 only at a capability's harvest step (§ Building a capability).
 
 **Why:** the old code was leaking into how the new one was being designed. A
-design that starts from the PRD and the overview, and from nothing older,
-is the one the rewrite is for.
+design that starts from the PRD and the architecture doc, and from nothing
+older, is the one the rewrite is for.
 
 ## How tinyfleet is built
 
@@ -38,7 +38,7 @@ the level it changes, so a rewrite can throw the code away and keep them:
 | Layer | Holds | Changes | Lives in |
 | --- | --- | --- | --- |
 | PRD | the problem, who has it, journeys, what success looks like | rarely | `brain/prd/` |
-| Architecture | the backbone: components, who talks to whom, boundaries, invariants | sometimes | `brain/architecture/overview.html`, pointing at contracts in code |
+| Architecture | the backbone: components, who talks to whom, boundaries, invariants | sometimes | `brain/architecture/`, once one is needed, pointing at contracts in code |
 | Program design | how one change reshapes the code | every change | the item's bead |
 | Evals | what any implementation must do: journeys, invariants and edge cases | grows with real use | `tests/cmd/` (visible), fleet-dtu (hidden) |
 | Code | one implementation | freely | the crates |
@@ -48,10 +48,10 @@ Provenance, the why behind each layer, is deferred: beads is building it
 trailer and decisions stay in bead comments.
 
 **People own intent; agents own code.** People write or approve the PRDs, the
-overview and the journeys, and steer program design before code exists.
+architecture doc and the journeys, and steer program design before code exists.
 People never write code; they read it to learn. Planner agents write program
-design from the PRD, the overview and the contracts. Builder agents build from
-the program design. Neither ever sees a fleet-dtu scenario.
+design from the PRD, the architecture doc and the contracts. Builder agents
+build from the program design. Neither ever sees a fleet-dtu scenario.
 
 **Alberto reviews and tests every piece.** Nothing moves on to the next piece
 until Alberto has reviewed the one before it and tested it on his machine.
@@ -62,11 +62,11 @@ until Alberto has reviewed the one before it and tested it on his machine.
 | --- | --- | --- |
 | `brain/prd/seed.md` | the product PRD: what tinyfleet is, who it is for, its capabilities, principles, success, non-goals | agents draft, Alberto approves |
 | `brain/prd/<capability>.md` | one capability's PRD: its problem and journeys | agents draft, Alberto approves |
-| `brain/architecture/overview.html` | the architecture: direction, the backbone, what makes it hard, boundaries, invariants, terms | agents draw, Alberto approves |
-| the contracts in code | each boundary's authoritative form, listed in the overview's Boundaries table | builders, from program design |
+| `brain/architecture/` | the architecture doc, once a capability needs one: the backbone, what makes it hard, boundaries, invariants, terms | agents draw, Alberto approves |
+| the contracts in code | each boundary's authoritative form, listed in the architecture doc's Boundaries table | builders, from program design |
 | `tests/cmd/` | visible evals at the CLI boundary | builders, from the journeys, the invariants and real use |
 | fleet-dtu (sibling repository) | hidden evals: the journeys as scenarios | agents draft, Alberto approves; planners and builders never see it |
-| `docs/` | the user manual, written again as capabilities are built | the docs skill only; never a planner's or builder's input |
+| `docs/` | the user manual, written again as capabilities are built; never a planner's or builder's input | not decided yet |
 | `brain/specs/` | the old clause-id specs, read only at a capability's harvest step and deleted after it | nobody |
 | beads | the work queue, and each item's program design | agents and people; a planner writes the program design |
 
@@ -127,22 +127,22 @@ a journey promises edits the PRD first.
 
 ## Architecture
 
-**The overview** (`brain/architecture/overview.html`) is one page, mostly
-diagrams, made with the iterate-on-docs plugin's `make-a-project-overview` in
-diagram-design's style and refined with Alberto through `iterate-on-a-document`.
-It shows reality first; anything not yet true carries a visible
-**directional** mark. *(It still draws the old implementation: its boundaries
-point at files that no longer exist. Each part is redrawn as the new code
-makes it real.)*
+**The architecture doc** lives in `brain/architecture/`. None exists yet: it
+is drawn when the first capability's shape needs one, and Alberto approves
+it. It is one page, mostly diagrams, made with the iterate-on-docs plugin's
+`make-a-project-overview` in diagram-design's style and refined with Alberto
+through `iterate-on-a-document`. It shows reality first; anything not yet true
+carries a visible **directional** mark.
 
 **It points, it never restates.** Each boundary in its table names the file
 that holds the boundary's authoritative form. A complete definition lives in
 code, decision history in git, task status on the board.
 
 **It changes before the code it describes.** A change that moves a boundary or
-an invariant updates the overview while it is planned, marked directional, so
-Alberto sees the plan as a picture first. The commit that makes it real drops
-the mark. A change that moves no boundary never touches the overview.
+an invariant updates the architecture doc while it is planned, marked
+directional, so Alberto sees the plan as a picture first. The commit that
+makes it real drops the mark. A change that moves no boundary never touches
+it.
 
 **It is written for people.** Builders meet the same backbone where an agent
 obeys it: in the contracts, in the fitness tests that check the invariants,
@@ -187,13 +187,14 @@ or eval case it touches:
 
 | Kind | When | First edits | Evals |
 | --- | --- | --- | --- |
-| `behaviour` | what a journey or a boundary promises changes | the PRD or the overview (and the boundary's contract), before the code | added or updated for the changed promise |
+| `behaviour` | what a journey or a boundary promises changes | the PRD or the architecture doc (and the boundary's contract), before the code | added or updated for the changed promise |
 | `fix` | the code breaks a promise that already exists | the eval case that fails on it, before the fix | the new case, and every other passes |
 | `internal` | no promise moves: refactors, speed, dependencies, comments | the program design only | every eval passes unchanged |
-| `spec` | a PRD or the overview is written or reworded to say what tinyfleet already does | the PRD or the overview; no code | added where a journey had none |
+| `spec` | a PRD or the architecture doc is written or reworded to say what tinyfleet already does | the PRD or the architecture doc; no code | added where a journey had none |
 
-A fix that names no promise has found a gap in a PRD or the overview: it is a
-`behaviour` item. An item mislabelled `internal` is caught when an eval fails.
+A fix that names no promise has found a gap in a PRD or the architecture doc: it
+is a `behaviour` item. An item mislabelled `internal` is caught when an eval
+fails.
 
 ## Scenarios and fleet-dtu
 
@@ -225,9 +226,9 @@ parallel. Each runs three times and passes only if all three pass, to catch
 races. A `behaviour` or `fix` item runs the scenarios covering the journeys it
 names. The full suite runs at least daily and at every release.
 
-**What a builder hears back:** the verdict, the scenario's title, the
-journeys it covers, and fleet's own output from the run. Never the scenario's
-text. A planner who finds a PRD or the overview contradicting itself, or a
+**What a builder hears back:** the verdict, the scenario's title, the journeys
+it covers, and fleet's own output from the run. Never the scenario's text. A
+planner who finds a PRD or the architecture doc contradicting itself, or a
 builder who finds the program design contradicting them, says so instead of
 guessing, and that becomes a `spec` item.
 
@@ -242,28 +243,28 @@ scenarios, and the journey or the suite needs work.
 
 ## Learning
 
-**The bar:** every person on the project knows the overview: what each part
-does, where its code lives, and how a request flows through it.
+**The bar:** every person on the project knows the architecture doc: what each
+part does, where its code lives, and how a request flows through it.
 
 **Walkthroughs.** One sitting covers one capability. It starts from the
-capability's PRD and the overview, and a trace of one real run. From there it
-goes into the code itself, module by module, as deep as the person wants.
-Reading code to learn is encouraged; what people never do is write it. The
-sitting ends with the person explaining the flow back, and its findings are
+capability's PRD and the architecture doc, and a trace of one real run. From
+there it goes into the code itself, module by module, as deep as the person
+wants. Reading code to learn is encouraged; what people never do is write it.
+The sitting ends with the person explaining the flow back, and its findings are
 filed as beads.
 
 **When:**
 
 - **Onboarding.** A new person walks every capability once.
 - **After each release.** A short sitting covers each capability whose PRD or
-  part of the overview moved, so familiarity keeps pace with the code.
+  part of the architecture doc moved, so familiarity keeps pace with the code.
 - **Any time,** on request.
 
 ## Code health
 
 - **Mechanical guards** are always on and fail the build:
-  - fitness tests for the overview's invariants: a crate edge or placement the
-    overview does not allow fails them;
+  - fitness tests for the architecture doc's invariants: a crate edge or
+    placement the architecture doc does not allow fails them;
   - a pinned toolchain and clippy lint set, with warnings denied;
   - size budgets: at most 100 lines per function and 600 lines per file, not
     counting a file's inline tests;
@@ -272,9 +273,10 @@ filed as beads.
   Loosening a guard is a change Alberto approves, never a builder's call.
 - **Scheduled health passes** run at each release, before the docs pass.
   Agents look for duplication, dead code and simplification, security
-  problems, and overview fidelity. Each finding is an `internal` item.
-- **Walkthroughs** file what they find (see Learning). A part the overview
-  cannot explain in one sentence is a finding.
+  problems, and the architecture doc's fidelity. Each finding is an
+  `internal` item.
+- **Walkthroughs** file what they find (see Learning). A part the architecture
+  doc cannot explain in one sentence is a finding.
 
 ## Branching, commits and releases
 
@@ -326,9 +328,8 @@ Every commit on a release or hotfix branch is **one item, squashed**:
    health passes (see Code health) and the full scenario suite with the
    holdout reserve. Each finding is an `internal` item, landed on the branch
    or filed for the next release.
-2. **The docs pass.** Then run the docs skill's
-   release pass (`.claude/skills/docs/SKILL.md` § 8) over the items landed on
-   the branch. It lands as the branch's last item, subject
+2. **The docs pass.** Then bring `docs/` up to date with the items landed
+   on the branch. It lands as the branch's last item, subject
    `<item id>: docs release pass for <x.y.z>`.
 3. **Open the release PR** from `release/<x.y.z>` to `main`.
 4. **Squash-merge it.** The squash commit's subject is `release: v<x.y.z>`.

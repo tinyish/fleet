@@ -10,21 +10,21 @@ and it binds you. The rules you are most likely to break:
   this conversation what to read. `brain/specs/` describes the old code too:
   read it only at a capability's harvest step, with Alberto.
 - **Intent lives in layers, not in code.** A PRD (`brain/prd/`) says what a
-  person needs. The overview (`brain/architecture/overview.html`) says how
-  the system is shaped and points at the contracts in code. Program design,
-  in an item's bead, says how that one item changes the code. Planners write
-  program design from the PRD, the overview and the contracts; builders build
-  from the program design in their bead.
+  person needs. The architecture doc (`brain/architecture/`, drawn once a
+  capability needs one) says how the system is shaped and points at the
+  contracts in code. Program design, in an item's bead, says how that one item
+  changes the code. Planners write program design from the PRD, the architecture
+  doc and the contracts; builders build from the program design in their bead.
 - **superpowers' "spec" is program design.** The design superpowers writes
   goes in the bead's `design` field, never in `brain/` or `docs/`.
-- **Obey the contracts and the fitness tests.** The overview is drawn for
-  people; what binds your code is the contract each boundary names and the
+- **Obey the contracts and the fitness tests.** The architecture doc is drawn
+  for people; what binds your code is the contract each boundary names and the
   tests that check the invariants.
 - **One piece at a time.** Alberto reviews each piece and tests it on his
   machine before the next one starts.
 - **Declare the item's kind** (`behaviour`, `fix`, `internal` or `spec`) and
-  name the journey, boundary or eval case it touches. A `behaviour` change
-  edits the PRD or the overview first. A `fix` adds its failing eval case
+  name the journey, boundary or eval case it touches. A `behaviour` change edits
+  the PRD or the architecture doc first. A `fix` adds its failing eval case
   first. A `spec` item changes no code.
 - **A PRD line survives a CLI redesign.** No flags, exit codes, file names,
   output lines or ordering in `brain/prd/`; those belong to the boundaries or
@@ -34,8 +34,8 @@ and it binds you. The rules you are most likely to break:
   building it, and the spec clauses Alberto keeps. After that, never add an
   edge-case eval or a PRD line because a document or a sitting imagined it.
 - **`docs/` is never an input.** It is the user manual: never take intended
-  behaviour from it, and never edit it outside the docs skill.
-- **Never guess past a PRD, the overview or a plan.** If one is silent,
+  behaviour from it.
+- **Never guess past a PRD, the architecture doc or a plan.** If one is silent,
   ambiguous or contradicts itself, say so on the item and stop that part of
   the work.
 - **Planners and builders never open fleet-dtu**, the scenario repository,
