@@ -1,5 +1,5 @@
 //! The landing lane: the worktree the fleet owns per project, and the lock
-//! every landing queues on (flights PRD R15, R16; S3b, S3d).
+//! every landing queues on.
 //!
 //! ONE QUEUE PER PROJECT, AND `land` IS WHAT TAKES IT. The tick's landings and
 //! a person's `fleet land` wait on the same object because both reach it the
@@ -25,7 +25,7 @@ use crate::item::{Progress, Stop};
 use crate::policy;
 
 /// `[core.flight] lanes` where the policy names none: one directory under the
-/// machine directory holding one worktree per project (flights PRD R16).
+/// machine directory holding one worktree per project.
 pub const LANES: &str = "lanes";
 
 /// What the lane's own directory is called, ahead of the project's name.
@@ -41,7 +41,7 @@ pub const LANE_PREFIX: &str = "lane-";
 pub const LOCK_SUFFIX: &str = ".lock";
 
 /// `[core.flight] rerun_wait_seconds` where the policy names none: how long the
-/// rerun waits for the box's load to fall before running anyway (R18, Q3c).
+/// rerun waits for the box's load to fall before running anyway.
 pub const RERUN_WAIT_SECONDS: u64 = 300;
 
 /// The line a landing prints when the lane is held. It opens at column zero and
@@ -60,10 +60,6 @@ const TICK: Duration = Duration::from_millis(200);
 /// A relative value is read against the MACHINE directory and not the caller's
 /// cwd, because the fleet's own policy file is what writes it and a landing is
 /// run from wherever a reviewer stands.
-///
-/// RESOLVING THE LANE IS WHAT ADOPTS ONE CUT UNDER THE PROJECT'S BARE NAME, so
-/// that a caller cannot reach the path without taking the older directory with
-/// it and leaving a machine's build cache stranded beside a freshly cut lane.
 pub fn directory(machine_dir: &Path, guards: &toml::Table, project: &str) -> Result<PathBuf, Stop> {
     let named = policy::read("core.flight", "lanes", guards)
         .map_err(|unlisted| Stop::could_not_tell(unlisted.to_string()))?;
@@ -90,81 +86,7 @@ pub fn directory(machine_dir: &Path, guards: &toml::Table, project: &str) -> Res
             }
         }
     };
-    let lane = lanes.join(format!("{LANE_PREFIX}{project}"));
-    adopt(&lane, &lanes.join(project))?;
-    Ok(lane)
-}
-
-/// A lane cut under the project's bare name, taken over under the prefixed one.
-/// A machine that already has one keeps it, with its build cache and its
-/// registration, rather than cutting a second beside it.
-///
-/// IT RUNS ONLY WHERE THE PREFIXED NAME IS ABSENT, which makes it a migration
-/// that happens once per machine and a pair of stats on every landing after it.
-///
-/// THE LOCK MOVES FIRST, and only onto a name no lock file holds yet: a landing
-/// already queued under the old name holds that file's inode, and carrying the
-/// name onto it is what keeps the two landings serialised across the migration
-/// instead of letting them run at once on one worktree.
-///
-/// A WORKTREE MOVES THROUGH GIT AND NOT BY RENAME. The primary records the
-/// lane's path, and a directory moved behind git's back is one the next
-/// `git worktree prune` unregisters. A move that will not run leaves the lane
-/// where it is and refuses the landing, because the two recoveries a person has
-/// from here both start with the lane still being there.
-fn adopt(lane: &Path, old: &Path) -> Result<(), Stop> {
-    if lane.exists() || !old.is_dir() {
-        return Ok(());
-    }
-    let (from, to) = (lock_path(old), lock_path(lane));
-    if from.exists() && !to.exists() {
-        std::fs::rename(&from, &to).map_err(|e| {
-            Stop::could_not_tell(format!(
-                "the lane's lock {} could not be carried to {}: {e} — the lane at {} is \
-                 where it was",
-                from.display(),
-                to.display(),
-                old.display()
-            ))
-        })?;
-    }
-    if !old.join(".git").exists() {
-        return std::fs::rename(old, lane).map_err(|e| {
-            Stop::could_not_tell(format!(
-                "the lane at {} could not be taken over as {}: {e}",
-                old.display(),
-                lane.display()
-            ))
-        });
-    }
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(old)
-        .args(["worktree", "move"])
-        .arg(old)
-        .arg(lane)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| {
-            Stop::could_not_tell(format!(
-                "`git worktree move` could not be run to take over the lane at {}: {e}",
-                old.display()
-            ))
-        })?;
-    if !out.status.success() {
-        return Err(Stop::could_not_tell(format!(
-            "the lane at {} could not be taken over as {} {}: {} — it is left where it is, and a \
-             landing does not cut a second lane beside it",
-            old.display(),
-            lane.display(),
-            match out.status.code() {
-                Some(code) => format!("(`git worktree move` exited {code})"),
-                None => String::from("(`git worktree move` was killed by a signal)"),
-            },
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
+    Ok(lanes.join(format!("{LANE_PREFIX}{project}")))
 }
 
 /// The lock file that guards a lane, derived from the lane's own path by
@@ -317,7 +239,7 @@ fn holder_of(path: &Path) -> String {
 }
 
 /// The box's five-minute load and the ceiling it is judged against, as the
-/// caller reads them (flights PRD R18).
+/// caller reads them.
 ///
 /// A SEAM AND NOT A VALUE, because the wait exists to see the load FALL and one
 /// reading cannot show that. `None` is a leg nobody could read — never a box
@@ -338,19 +260,19 @@ impl Load for Unread {
 }
 
 /// What a wait for the box to quieten ended as. Each is a clause the second
-/// gate row prints, so the row says which of the three happened.
+/// check row prints, so the row says which of the three happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Waited {
     /// The load was already under the ceiling, or fell under it in time.
     Quiet(String),
-    /// The wait ran out and the rerun runs anyway (Q3c: the expiry reruns).
+    /// The wait ran out and the rerun runs anyway.
     Expired(String),
     /// No reading, so there was nothing to wait for.
     Unreadable,
 }
 
 impl Waited {
-    /// The clause the second gate row and the second `gate.read` carry.
+    /// The clause the second check row and the second `check.read` carry.
     pub fn clause(&self) -> String {
         match self {
             Waited::Quiet(text) => text.clone(),
@@ -365,10 +287,10 @@ impl Waited {
 /// Wait for the five-minute load to fall under the belt's ceiling, bounded by
 /// `[core.flight] rerun_wait_seconds`.
 ///
-/// THE EXPIRY RERUNS ANYWAY AND SAYS SO (Q3c). A suite that raced the box is
-/// rerun beside a quieter one where the box quietens, and on a box that never
-/// does the rerun still happens — with the row saying the wait expired, so the
-/// reader of a second red knows which kind of box it was taken on.
+/// THE EXPIRY RERUNS ANYWAY AND SAYS SO. A suite that raced the box is rerun
+/// beside a quieter one where the box quietens, and on a box that never does the
+/// rerun still happens — with the row saying the wait expired, so the reader of
+/// a second red knows which kind of box it was taken on.
 pub fn wait_for_a_quiet_box(load: &dyn Load, limit: Duration, progress: &dyn Progress) -> Waited {
     let Some((first, ceiling)) = load.read() else {
         return Waited::Unreadable;

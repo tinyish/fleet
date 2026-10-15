@@ -11,7 +11,7 @@ include!("drive/rig.rs");
 
 mod common;
 
-/// The routines on the controller's own tick (PRD R22–R24, Q2).
+/// The routines on the controller's own tick.
 ///
 /// Every arm here drives the BUILT binary against the stub agent, with the
 /// routines' clock on a file this rig steps: an arm about a schedule that ran on
@@ -22,16 +22,6 @@ mod routines {
     /// A minute boundary, so a step of sixty seconds lands on the next whole
     /// minute in every zone whose offset is whole minutes.
     const BASE: u64 = 1_788_600_000;
-
-    /// The `bd` this box carries, resolved on THIS process's own search path.
-    /// `None` is a box with no work-graph binary, which the one arm that needs
-    /// it says out loud rather than passing quietly.
-    fn bd_on_path() -> Option<PathBuf> {
-        let path = std::env::var("PATH").ok()?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join("bd"))
-            .find(|candidate| candidate.is_file())
-    }
 
     fn a_cooldown_nudge(seat: &str, text: &str, authority: &str) -> String {
         format!(
@@ -119,7 +109,7 @@ mod routines {
         assert!(path.contains(&child_path(&rig.home())), "{path}");
     }
 
-    /// (b) A gate that cannot answer is a third outcome, and the streak it
+    /// (b) A trigger that cannot answer is a third outcome, and the streak it
     /// carries is a number the projection publishes.
     ///
     /// Three polls of a STEPPED clock, then a fourth tick with the clock
@@ -173,28 +163,24 @@ mod routines {
         assert!(row["last_fired"].is_null(), "nothing ever fired: {row}");
     }
 
-    /// (c) A ring that lands: the argv the stub received is the policy's model
-    /// and a prompt carrying the routine's own sentence.
+    /// (c) A ring that lands: the routine's own sentence and its authority,
+    /// typed into the seat's own session and taken.
     #[test]
     fn a_nudge_routine_rings_a_live_seat_with_its_text_and_its_authority() {
         let rig = Rig::new("routines-nudge");
-        rig.write_roster(&live_row(&rig.worktree(), "a-session"));
+        rig.write_roster_taking("a-session");
         rig.write_routine(
             "ring",
-            &a_cooldown_nudge("builder-1", "look at the board", "the operator"),
+            &a_cooldown_nudge("Orla", "look at the board", "the operator"),
         );
         rig.set_clock(BASE);
         assert_eq!(rig.observe().status.code(), Some(0));
 
-        let argv =
-            std::fs::read_to_string(rig.nudge_argv_path()).expect("the ring reached the stub");
-        assert!(argv.lines().any(|line| line == "-p"), "{argv}");
-        assert!(
-            argv.lines().any(|line| line == "claude-haiku-4-5-20251001"),
-            "the ring runs on the policy's nudge model: {argv}"
+        assert_eq!(
+            rig.typed(),
+            vec!["look at the board\nauthority: the operator".to_string()],
+            "the ring's text, verbatim, is the one thing typed into the seat's session"
         );
-        assert!(argv.contains("look at the board"), "{argv}");
-        assert!(argv.contains("authority: the operator"), "{argv}");
 
         let events = rig.routine_events();
         assert_eq!(events.len(), 2, "{events:#?}");
@@ -207,27 +193,27 @@ mod routines {
     /// nowhere to leave it is an absence somebody has to read.
     #[test]
     fn a_ring_that_finds_nobody_files_an_item_once_and_dedupes_the_next_firing() {
-        let Some(bd) = bd_on_path() else {
-            panic!("this box carries no `bd`, so the item action has no store to file into");
-        };
         let rig = Rig::new("routines-item");
         // The seat is on the list and absent from the roster, which is the
-        // case the fallback exists for.
+        // case the fallback exists for — and it STAYS absent: every start the
+        // loop makes for it ends at once, so no session the host holds is
+        // there for the next poll to find it present on by its pane's pid.
         rig.write_roster("[]");
+        rig.set_start_exit(Some(1));
         rig.write_routine(
             "leave-it",
             &format!(
                 "{}[action.item]\ntitle = \"the ring found nobody\"\nwhen = \"absent\"\n\
                  dedupe = \"open\"\ntype = \"task\"\npriority = 3\nlabels = [\"lane\"]\n",
-                a_cooldown_nudge("builder-1", "look at the board", "the operator")
+                a_cooldown_nudge("Orla", "look at the board", "the operator")
             ),
         );
         rig.write_routine(
             "no-fallback",
-            &a_cooldown_nudge("builder-1", "nowhere to leave it", "the operator"),
+            &a_cooldown_nudge("Orla", "nowhere to leave it", "the operator"),
         );
 
-        common::take_a_board_with(&bd, &rig.root, "drive");
+        common::take_a_store(&rig.root);
 
         rig.set_clock(BASE);
         assert_eq!(rig.observe().status.code(), Some(0));
@@ -247,29 +233,37 @@ mod routines {
             .to_string();
 
         // The item carries the routine's own label, which is what makes "did this
-        // routine already file one" answerable from outside this process.
-        let listed = Command::new(&bd)
-            .args([
-                "-C",
-                &rig.root.display().to_string(),
-                "list",
-                "--label",
-                "routine:leave-it",
-                "--status",
-                "open",
-                "--json",
-            ])
-            .output()
-            .expect("bd runs");
-        let rows: serde_json::Value =
-            serde_json::from_slice(&listed.stdout).expect("the listing is JSON");
-        let ids: Vec<&str> = rows
-            .as_array()
-            .expect("a list")
-            .iter()
-            .filter_map(|row| row["id"].as_str())
-            .collect();
+        // routine already file one" answerable from outside this process — read
+        // through fleet's own listing, which is the store's.
+        let listed = fleet_json(&rig, &["item", "list", "--label", "routine:leave-it"]);
+        let rows = listed["items"].as_array().expect("a list of rows");
+        let ids: Vec<&str> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
         assert_eq!(ids, vec![item.as_str()], "one item, carrying the label");
+        assert_eq!(rows[0]["type"], "task");
+        assert_eq!(
+            rows[0]["labels"],
+            serde_json::json!(["lane", "routine:leave-it"])
+        );
+
+        // THE STORE'S OWN WITNESS, once: the routine is the item's author on
+        // the record, and wrote no note about it [ASSUMES D9].
+        let (wrote, noted) = common::with_state(&rig.root, |store| {
+            let noted = store
+                .comments
+                .lock()
+                .expect("the comments are not poisoned")
+                .get(&item)
+                .map_or(0, Vec::len);
+            (store.wrote(), noted)
+        });
+        assert!(
+            wrote.iter().any(|write| {
+                write.starts_with("create the ring found nobody ")
+                    && write.ends_with(" routine:leave-it")
+            }),
+            "the routine filed it, as its own author: {wrote:#?}"
+        );
+        assert_eq!(noted, 0, "no note on {item}");
 
         // The ring with nowhere to leave it: absent, and nothing filed.
         let bare: Vec<serde_json::Value> = rig
@@ -300,6 +294,238 @@ mod routines {
                 .is_some_and(|ids| ids.iter().any(|id| id == &serde_json::json!(item))),
             "the dedupe names the item it found: {:#?}",
             again[3]
+        );
+    }
+
+    /// One fleet verb's `--json` answer, run in the rig's own project: the
+    /// envelope's `data`.
+    fn fleet_json(rig: &Rig, args: &[&str]) -> serde_json::Value {
+        let out = rig
+            .binary()
+            .args(args)
+            .arg("--json")
+            .current_dir(&rig.root)
+            .output()
+            .expect("the built binary runs");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "fleet {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let answer: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("fleet {args:?} answered JSON: {e}"));
+        answer["data"].clone()
+    }
+
+    /// A routine's assignee is the seat's FULL ID on the record: one naming
+    /// the rig's seat files an item that reads back, through fleet, as held
+    /// by that seat's id. A name no seat answers to refuses the file at load
+    /// ([ASSUMES D14]), so nothing fires and nothing carries its label; the
+    /// filing's own words for an assignee that resolved to nothing are
+    /// `controller/tests/routines.rs`'s.
+    #[test]
+    fn a_routine_files_its_item_to_the_seat_it_names() {
+        let rig = Rig::new("routines-assignee");
+        rig.write_roster("[]");
+        let an_item_for = |seat: &str| {
+            format!(
+                "[order]\ndescription = \"hand it on\"\ntrigger = \"cooldown\"\n\
+                 interval = \"1m\"\n[action.item]\ntitle = \"for {seat}\"\n\
+                 assignee = \"{seat}\"\n"
+            )
+        };
+        rig.write_routine("to-orla", &an_item_for("Orla"));
+        rig.write_routine("to-nobody", &an_item_for("nobody"));
+        common::take_a_store(&rig.root);
+
+        rig.set_clock(BASE);
+        assert_eq!(rig.observe().status.code(), Some(0));
+
+        let events = rig.routine_events();
+        let filed: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|e| e["payload"]["order"] == "to-orla")
+            .collect();
+        assert_eq!(filed.len(), 2, "{events:#?}");
+        assert_eq!(filed[1]["payload"]["outcome"], "filed", "{:#?}", filed[1]);
+        let item = filed[1]["payload"]["item"]
+            .as_str()
+            .expect("the completed event names the item");
+        let shown = fleet_json(&rig, &["item", "show", item]);
+        assert_eq!(shown["assignee"], SEAT_ID, "{shown}");
+
+        assert!(
+            !events.iter().any(|e| e["payload"]["order"] == "to-nobody"),
+            "a file the load refused never fires: {events:#?}"
+        );
+        let listed = fleet_json(&rig, &["item", "list", "--label", "routine:to-nobody"]);
+        assert_eq!(listed["items"], serde_json::json!([]), "nothing filed");
+    }
+
+    /// The policy every arm about the roster's last-good starts from: Pell is
+    /// a seat `fleet.toml` lists and no row of the seat list runs.
+    fn a_policy_listing_pell() -> String {
+        format!(
+            "[controller]\npoll_seconds = 1\n{}",
+            common::seat_table_of("Pell")
+        )
+    }
+
+    /// A routine whose assignee resolves only through `fleet.toml`'s roster,
+    /// on a schedule that never matches `BASE`: nothing fires, so no store is
+    /// needed, and the row stands in the projection's orders while it loads.
+    const TO_PELL: &str = "[order]\ndescription = \"hand it on\"\ntrigger = \"cron\"\n\
+                           schedule = \"0 0 1 1 *\"\n[action.item]\ntitle = \"for Pell\"\n\
+                           assignee = \"Pell\"\n";
+
+    /// Whether the projection's orders carry a row by this name.
+    fn orders_carry(rig: &Rig, name: &str) -> bool {
+        rig.projection()["orders"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["name"] == name))
+    }
+
+    /// Whether the projection carries a parse error for the policy file.
+    fn parse_error_set(rig: &Rig) -> bool {
+        rig.projection()
+            .get("fleet_parse_error")
+            .is_some_and(|why| !why.is_null())
+    }
+
+    /// A BROKEN EDIT KEEPS THE SEAT DIRECTORY LAST-GOOD WITH THE POLICY: the
+    /// loop reads `fleet.toml` once per change, and a read that does not parse
+    /// leaves both the policy and the roster a routine's assignee resolves
+    /// through standing, so the routine still loads.
+    #[test]
+    fn a_broken_policy_edit_keeps_the_seat_directory_a_routine_names() {
+        let rig = Rig::new("routines-broken-roster");
+        rig.write_roster("[]");
+        rig.write_policy(&a_policy_listing_pell());
+        rig.write_routine("to-pell", TO_PELL);
+        rig.set_clock(BASE);
+
+        rig.driving(|ticks| {
+            ticks.tick();
+            assert!(
+                orders_carry(&rig, "to-pell"),
+                "the routine loads against the policy's roster: {}",
+                rig.projection_body()
+            );
+
+            rig.write_policy("[controller\npoll_seconds = 1\n");
+            ticks.tick();
+            assert!(
+                parse_error_set(&rig),
+                "the broken edit is published: {}",
+                rig.projection_body()
+            );
+            assert!(
+                orders_carry(&rig, "to-pell"),
+                "the roster stays last-good with the policy: {}",
+                rig.projection_body()
+            );
+        });
+        assert_eq!(
+            rig.stderr_lines_with("assignee is Pell"),
+            0,
+            "the routine never loaded as a defect"
+        );
+    }
+
+    /// A REFUSED EDIT DOES NOT HALF-APPLY: valid TOML with no roster that the
+    /// policy parse refuses keeps the roster it had, and the directory follows
+    /// the next policy that parses.
+    #[test]
+    fn a_refused_policy_edit_keeps_the_roster_it_had() {
+        let rig = Rig::new("routines-refused-roster");
+        rig.write_roster("[]");
+        rig.write_policy(&a_policy_listing_pell());
+        rig.write_routine("to-pell", TO_PELL);
+        rig.set_clock(BASE);
+
+        rig.driving(|ticks| {
+            ticks.tick();
+            assert!(
+                orders_carry(&rig, "to-pell"),
+                "the routine loads against the policy's roster: {}",
+                rig.projection_body()
+            );
+
+            rig.write_policy("[controller]\nposture = \"yolo\"\n");
+            ticks.tick();
+            assert!(
+                parse_error_set(&rig),
+                "the refused edit is published: {}",
+                rig.projection_body()
+            );
+            assert!(
+                orders_carry(&rig, "to-pell"),
+                "the refused edit's empty roster is not taken: {}",
+                rig.projection_body()
+            );
+
+            rig.write_policy("[controller]\npoll_seconds = 1\n");
+            ticks.tick();
+            assert!(
+                !parse_error_set(&rig),
+                "the policy parses again: {}",
+                rig.projection_body()
+            );
+            assert!(
+                !orders_carry(&rig, "to-pell"),
+                "the directory follows a policy that parses: {}",
+                rig.projection_body()
+            );
+        });
+    }
+
+    /// A DEDUPE PAST FIFTY OPEN ITEMS STILL DEDUPES, naming every one: the
+    /// store's label listing is asked for all of its rows, and every row it
+    /// answers is named. A store that caps its own listing is that adapter's
+    /// to read past, in its own suite.
+    #[test]
+    fn a_dedupe_past_fifty_open_items_names_all_of_them() {
+        let rig = Rig::new("routines-dedupe-51");
+        rig.write_roster("[]");
+        rig.write_routine(
+            "sweep",
+            "[order]\ndescription = \"one open at a time\"\ntrigger = \"cooldown\"\n\
+             interval = \"1m\"\n[action.item]\ntitle = \"sweep\"\ndedupe = \"open\"\n",
+        );
+        common::take_a_store(&rig.root);
+
+        // Fifty-one open items under the routine's label, in one call.
+        common::with_state(&rig.root, |store| {
+            use fleet_core::store::Store as _;
+            for n in 1..=51 {
+                let row = fleet_core::store::NewItem {
+                    title: format!("row {n}"),
+                    description: String::new(),
+                    item_type: String::from("task"),
+                    labels: vec![String::from("routine:sweep")],
+                    priority: None,
+                };
+                store
+                    .create(&row, &common::the_test())
+                    .expect("the row is filed");
+            }
+        });
+
+        rig.set_clock(BASE);
+        assert_eq!(rig.observe().status.code(), Some(0));
+        let events = rig.routine_events();
+        assert_eq!(events.len(), 2, "{events:#?}");
+        assert_eq!(
+            events[1]["payload"]["outcome"], "deduped",
+            "{:#?}",
+            events[1]
+        );
+        assert_eq!(
+            events[1]["payload"]["existing"].as_array().map(Vec::len),
+            Some(51),
+            "every open item under the label, the 51st included: {:#?}",
+            events[1]
         );
     }
 

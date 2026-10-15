@@ -1,5 +1,4 @@
-//! `fleet routine list | check | run | history` against the shipped binary
-//! (PRD R24).
+//! `fleet routine list | check | run | history` against the shipped binary.
 //!
 //! Every arm runs the built `fleet` with a scratch machine directory and a
 //! scratch fleet root, and reads each exit from the child's own status. The
@@ -32,7 +31,7 @@ impl Rig {
             &rig.machine().join("config.json"),
             &format!(
                 r#"{{"fleet_toml": "{}", "children": [
-                     {{"name":"builder-1","chosen_name":"Rook",
+                     {{"id":"01a0d1f1-0aec-765f-9abe-d4f993b9739a","name":"Orla",
                        "worktrees":{{"demo":"{}"}}}}
                    ]}}"#,
                 rig.fleet_root().join("fleet.toml").display(),
@@ -68,10 +67,15 @@ impl Rig {
     /// The built binary, with the fleet root as its working directory — which
     /// is what the walk-up for `fleet.toml` reads.
     fn fleet(&self, args: &[&str]) -> Output {
+        self.fleet_in(&self.fleet_root(), args)
+    }
+
+    /// The built binary, as [`Rig::fleet`] runs it, from `dir` instead.
+    fn fleet_in(&self, dir: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_fleet"))
             .args(args)
-            .current_dir(self.fleet_root())
-            .hermetic(&self.root.join("home"), &self.machine(), None)
+            .current_dir(dir)
+            .hermetic(&self.root.join("home"), &self.machine())
             .env_remove("FLEET_ORDERS_CLOCK")
             .output()
             .expect("the built binary runs")
@@ -149,6 +153,84 @@ fn list_prints_one_row_per_routine_with_its_source_and_a_defect_row_for_a_broken
     );
 }
 
+/// I5: a declared project's fleet is the one the machine's seat list names.
+/// Run from inside a checkout that declares itself, the walk stops at the
+/// declaration and never at a `fleet.toml` some other tool wrote beside it, so
+/// the routines listed are the machine's fleet's and not that neighbour's.
+#[test]
+fn a_routine_run_from_a_declared_project_reads_the_fleet_the_machine_names() {
+    let rig = Rig::new("declared");
+    rig.routine("beat", &ticking("beat.txt"));
+    let project = rig.root.join("project");
+    write(
+        &project.join(".fleet").join("project.toml"),
+        "[project]\nname = \"demo\"\n",
+    );
+    write(&project.join("fleet.toml"), "[tool]\nname = \"other\"\n");
+    write(
+        &project.join(ROUTINES).join("stray.toml"),
+        &ticking("stray.txt"),
+    );
+    fleet_controller::lifecycle::register(&rig.machine(), &project, "demo").unwrap();
+
+    let listed = rig.fleet_in(&project.join(ROUTINES), &["routine", "list"]);
+    assert_eq!(listed.status.code(), Some(0), "{}", err(&listed));
+    let body = out(&listed);
+    let rows: Vec<&str> = body.lines().collect();
+    assert_eq!(rows.len(), 1, "the machine's fleet's one routine: {body}");
+    assert!(rows[0].starts_with("beat  fleet "), "{body}");
+    assert!(
+        !rows.iter().any(|row| row.contains("stray")),
+        "the neighbour's routine is never read: {body}"
+    );
+}
+
+/// I5's refusal, by the way the walk ended: where the walk finds nothing and
+/// the machine names no fleet, that is a refusal, exit 1
+/// (shared.exit-codes.R23); inside a declared project it is the declaration's
+/// refusal, exit 1 (shared.locations.R26). Inside a declared project the
+/// declaration wins over the `fleet.toml` beside it, so the line names the
+/// declaration and the machine's `config.json`; where the walk found nothing,
+/// it says so.
+#[test]
+fn a_fleet_nobody_names_refuses_and_says_whether_a_project_was_declared() {
+    let rig = Rig::new("unnamed");
+    let config = rig.machine().join("config.json");
+    std::fs::remove_file(&config).unwrap();
+    let project = rig.root.join("project");
+    write(
+        &project.join(".fleet").join("project.toml"),
+        "[project]\nname = \"demo\"\n",
+    );
+    write(&project.join("fleet.toml"), "[tool]\nname = \"other\"\n");
+
+    let declared = rig.fleet_in(&project, &["routine", "list"]);
+    assert_eq!(declared.status.code(), Some(1), "{}", err(&declared));
+    assert_eq!(
+        err(&declared),
+        format!(
+            "fleet routine list: {} declares a project, and {} names no fleet whose policy \
+             file is there to run it under — `fleet create --standalone --fleet <dir>` \
+             registers it with one\n",
+            std::fs::canonicalize(&project).unwrap().display(),
+            config.display()
+        )
+    );
+    assert!(out(&declared).is_empty(), "{}", out(&declared));
+
+    let nowhere = rig.root.join("nowhere");
+    std::fs::create_dir_all(&nowhere).unwrap();
+    let nothing = rig.fleet_in(&nowhere, &["routine", "list"]);
+    assert_eq!(nothing.status.code(), Some(1), "{}", err(&nothing));
+    assert_eq!(
+        err(&nothing),
+        format!(
+            "fleet routine list: no `fleet.toml` above this directory and none named by {}\n",
+            config.display()
+        )
+    );
+}
+
 #[test]
 fn check_answers_due_not_due_and_could_not_tell_with_its_own_exit() {
     let rig = Rig::new("check");
@@ -214,7 +296,7 @@ fn run_fires_a_routine_prints_its_event_row_and_refuses_one_that_is_not_due() {
     assert!(err(&again).contains("is not due"), "{}", err(&again));
     assert!(out(&again).is_empty(), "a refusal prints no row");
 
-    // --force bypasses the gate.
+    // --force overrides the trigger.
     let forced = rig.fleet(&["routine", "run", "beat", "--force"]);
     assert_eq!(forced.status.code(), Some(0), "{}", err(&forced));
     assert!(
@@ -234,7 +316,7 @@ fn run_fires_a_routine_prints_its_event_row_and_refuses_one_that_is_not_due() {
 }
 
 #[test]
-fn a_dry_run_prints_the_gate_and_the_argv_and_writes_nothing_at_all() {
+fn a_dry_run_prints_the_trigger_s_answer_and_the_argv_and_writes_nothing_at_all() {
     let rig = Rig::new("dry");
     rig.routine("beat", &ticking("beat.txt"));
     // A firing first, so there IS a state file and a stream to compare against:
@@ -432,53 +514,6 @@ fn check_takes_the_instant_and_the_last_firing_from_the_caller() {
     assert!(err(&bad).contains("is not a UTC stamp"));
 }
 
-/// The family's old name, for one release: usage, with the rewrite on stderr
-/// as one line, whatever followed it — a script that still types `fleet order`
-/// reads exit 2 and the one line that helps.
-#[test]
-fn the_old_family_name_is_refused_with_the_pointer_to_routine() {
-    let rig = Rig::new("old-name");
-    rig.routine("beat", &ticking("beat.txt"));
-    for args in [
-        vec!["order"],
-        vec!["order", "list"],
-        vec!["order", "run", "beat", "--force"],
-        vec!["order", "--help"],
-    ] {
-        let refused = rig.fleet(&args);
-        assert_eq!(
-            refused.status.code(),
-            Some(2),
-            "{args:?} read {}",
-            err(&refused)
-        );
-        assert_eq!(
-            err(&refused).lines().count(),
-            1,
-            "one line: {}",
-            err(&refused)
-        );
-        assert!(
-            err(&refused).contains("use `fleet routine list | check | run | history`"),
-            "{args:?}: {}",
-            err(&refused)
-        );
-        assert!(out(&refused).is_empty(), "{args:?} printed a row");
-    }
-    assert!(
-        !rig.fleet_root().join("beat.txt").exists(),
-        "the old name never fired anything"
-    );
-    // The control: the same words under the new name are the verb.
-    let listed = rig.fleet(&["routine", "list"]);
-    assert_eq!(listed.status.code(), Some(0), "{}", err(&listed));
-    assert!(
-        out(&listed).starts_with("beat  fleet  cooldown"),
-        "{}",
-        out(&listed)
-    );
-}
-
 // ---- the run action, through the shipped binary ------------------------------
 
 fn executable(path: &Path) {
@@ -492,7 +527,7 @@ fn executable(path: &Path) {
 /// A scratch pack with one workflow, on the rig's machine: the binary's own
 /// defaults materialized beside it for the runtime check, a runtime stub where
 /// the CONSTRUCTED child
-/// path looks (`~/.local/bin`, never this process's `PATH`), and a board in
+/// path looks (`~/.local/bin`, never this process's `PATH`), and a store in
 /// the fleet root for the run's record.
 fn scratch_pack(rig: &Rig, workflow: &str, script: &str) {
     let defaults = rig.machine().join(fleet_core::defaults::DIR);
@@ -517,7 +552,7 @@ fn scratch_pack(rig: &Rig, workflow: &str, script: &str) {
             bundler.display()
         ),
     );
-    common::take_a_board(&rig.fleet_root(), "routines");
+    common::take_a_store(&rig.fleet_root());
 }
 
 fn stream_of(rig: &Rig) -> Vec<serde_json::Value> {
@@ -585,7 +620,11 @@ fn a_run_action_fires_the_run_verb_against_a_scratch_pack_and_the_events_wrap() 
         .expect("run.started names the run")
         .to_string();
     assert!(run_id.starts_with("fx-"), "{run_id}");
-    assert_eq!(stream[1]["actor"], "takeoff", "the routine is the runner");
+    assert_eq!(
+        stream[1]["actor"],
+        serde_json::json!({ "kind": "routine", "id": "takeoff" }),
+        "the routine is the runner, typed"
+    );
     assert_eq!(stream[1]["payload"]["workflow"], "rt-hello");
     assert_eq!(stream[2]["payload"]["run"], run_id.as_str());
     assert!(
@@ -626,7 +665,7 @@ fn a_run_action_fires_the_run_verb_against_a_scratch_pack_and_the_events_wrap() 
     assert!(verb.ends_with("/fleet"), "{verb}");
     assert!(
         body.contains(
-            "argv run\nargv rt-hello\nargv --input\nargv who=the-arm\nargv --by\nargv takeoff\n"
+            "argv run\nargv rt-hello\nargv --input\nargv who=the-arm\nargv --by\nargv routine:takeoff\n"
         ),
         "{body}"
     );

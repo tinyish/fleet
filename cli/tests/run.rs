@@ -1,17 +1,13 @@
 //! `fleet run` through the shipped binary, on a scratch pack that pins a
 //! runtime this rig puts on `PATH` itself.
 //!
-//! ONE BOARD, AND ONE ARM ALONE ON ITS OWN. The open runs are a query across
-//! the whole work graph, so the arm that measures the cap would be counting
-//! whatever its neighbours left open: it takes a board nobody else writes to.
-//! Every other arm reads its own stream, its own run directory and its own
-//! record by id, none of which a neighbour's rows move, so they share the run's
-//! one board and pay a copy instead of a `bd init`. The machine directory and
-//! the project stay each arm's own either way; the board is the whole of what
-//! is shared.
+//! ONE STORE PER ARM, on the store stub. The open runs are a query across the
+//! whole work graph, so the arm that measures the cap counts only what it left
+//! open itself because no neighbour writes to its store. The machine
+//! directory and the project are each arm's own too.
 //!
 //! A WORKFLOW NAME BEGINS WITH ITS RIG'S LABEL, which is what keeps one arm's
-//! records legible on a board holding every other arm's.
+//! records legible in a listing of its runs.
 //!
 //! THE WORKFLOW IS THE ARM'S OWN SCRIPT. The pack's bundle command copies its
 //! entry verbatim and its run command is `sh {bundle}`, so an arm writes the
@@ -32,10 +28,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::hermetic::Hermetic;
 use fleet_core::item::pins;
 use fleet_core::item::run as workflow_run;
+use fleet_core::seat::actor::{Actor, ActorKind};
+use fleet_core::store::StoreError;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-const BY: &str = "architect-1";
+/// Who starts the runs here: a seat typed whole, which a verb takes as given
+/// — these rigs write policies of their own and list no roster to resolve a
+/// name over.
+const BY: &str = "seat:01a0d1f1-0aec-765f-9abe-000000001ead";
+/// Who clears and cancels a run by hand: another seat, typed the same way.
+const PERSON: &str = "seat:01a0d1f1-0aec-765f-9abe-00000000fe25";
+
+/// The controller's run pass, as it acts: under a machine's identity.
+fn the_controller() -> Actor {
+    Actor {
+        kind: ActorKind::Controller,
+        id: String::from("01a0d1f1-0aec-765f-9abe-00000000c0de"),
+    }
+}
 
 /// The runtime the scratch pack pins, and the version its stub prints.
 const RUNTIME: &str = "fx-runtime";
@@ -62,15 +73,6 @@ fn write(path: &Path, body: &str) {
     std::fs::write(path, body).expect("the file is written");
 }
 
-/// Which board a rig runs on.
-enum Board {
-    /// The run's one board, copied in.
-    Shared,
-    /// A `bd init` of this rig's own, for an arm whose subject is a reading
-    /// across the whole graph.
-    OfItsOwn,
-}
-
 /// What the scratch pack's manifest declares and which workflows it carries, so
 /// one rig covers the refusals that are about the manifest, the one that is
 /// not, and every row of the exit table.
@@ -86,6 +88,13 @@ struct Pack {
     /// the version given, or none. The layering sorts them beneath the
     /// scratch pack, which is where a run looks for a pin the carrier lacks.
     imports: Vec<(&'static str, Option<&'static str>)>,
+    /// Packs declared in the scratch pack's `[imports]` and not installed.
+    absent: Vec<&'static str>,
+    /// The manifest's `[config.<key>]` declarations, appended verbatim.
+    settings: &'static str,
+    /// Whether the pack's bundle command exits non-zero and writes nothing,
+    /// which is the one refusal a run meets AFTER its record is filed.
+    bundle_fails: bool,
 }
 
 impl Pack {
@@ -94,6 +103,9 @@ impl Pack {
             runtime: Some(version),
             workflows: vec![(ONE, String::from(WORKFLOW))],
             imports: Vec::new(),
+            absent: Vec::new(),
+            settings: "",
+            bundle_fails: false,
         }
     }
 
@@ -102,6 +114,9 @@ impl Pack {
             runtime: None,
             workflows: vec![(ONE, String::from(WORKFLOW))],
             imports: Vec::new(),
+            absent: Vec::new(),
+            settings: "",
+            bundle_fails: false,
         }
     }
 
@@ -119,6 +134,9 @@ impl Pack {
                 .map(|(row, body)| (*row, format!("#!/bin/sh\n{body}\n")))
                 .collect(),
             imports: Vec::new(),
+            absent: Vec::new(),
+            settings: "",
+            bundle_fails: false,
         }
     }
 
@@ -126,6 +144,24 @@ impl Pack {
     /// `version`, or pins none.
     fn importing(mut self, name: &'static str, version: Option<&'static str>) -> Pack {
         self.imports.push((name, version));
+        self
+    }
+
+    /// The same pack, importing one more pack that is not installed.
+    fn importing_absent(mut self, name: &'static str) -> Pack {
+        self.absent.push(name);
+        self
+    }
+
+    /// The same pack, declaring the settings `fleet.toml` may set for it.
+    fn declaring(mut self, settings: &'static str) -> Pack {
+        self.settings = settings;
+        self
+    }
+
+    /// The same pack, whose bundle command refuses.
+    fn whose_bundle_fails(mut self) -> Pack {
+        self.bundle_fails = true;
         self
     }
 }
@@ -139,18 +175,8 @@ struct Rig {
 }
 
 impl Rig {
-    /// A rig on the run's shared board.
+    /// A rig on a store of its own, which the policy names.
     fn new(label: &str, pack: &Pack, policy: &str) -> Rig {
-        Rig::on(Board::Shared, label, pack, policy)
-    }
-
-    /// A rig on a board of its own, for the arm that counts what the board
-    /// holds open.
-    fn alone(label: &str, pack: &Pack, policy: &str) -> Rig {
-        Rig::on(Board::OfItsOwn, label, pack, policy)
-    }
-
-    fn on(board: Board, label: &str, pack: &Pack, policy: &str) -> Rig {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let root =
             std::env::temp_dir().join(format!("fleet-cli-run-{label}-{}-{n}", std::process::id()));
@@ -174,7 +200,14 @@ impl Rig {
 
         let scratch = rig.machine.join("packs/scratch");
         let bundler = scratch.join("assets/bundle.sh");
-        write(&bundler, "#!/bin/sh\nset -eu\ncp \"$1\" \"$2\"\n");
+        if pack.bundle_fails {
+            write(
+                &bundler,
+                "#!/bin/sh\necho 'the bundler would not bundle' >&2\nexit 7\n",
+            );
+        } else {
+            write(&bundler, "#!/bin/sh\nset -eu\ncp \"$1\" \"$2\"\n");
+        }
         executable(&bundler);
         for (row, body) in &pack.workflows {
             write(
@@ -194,7 +227,12 @@ impl Rig {
             "[pack]\nname = \"scratch\"\nversion = \"0.1.0\"\nschema = 3\n\
              description = \"a scratch pack\"\n",
         );
-        for (name, _) in &pack.imports {
+        for name in pack
+            .imports
+            .iter()
+            .map(|(name, _)| name)
+            .chain(&pack.absent)
+        {
             manifest.push_str(&format!(
                 "\n[imports.{name}]\nsource = \"../{name}\"\nversion = \"0.1.0\"\n"
             ));
@@ -202,6 +240,7 @@ impl Rig {
         if let Some(version) = pack.runtime {
             manifest.push_str(&runtime_table(version));
         }
+        manifest.push_str(pack.settings);
         write(&scratch.join("pack.toml"), &manifest);
         for (name, version) in &pack.imports {
             let mut imported = format!(
@@ -218,28 +257,12 @@ impl Rig {
         }
 
         write(&rig.project.join("fleet.toml"), policy);
-
-        match board {
-            Board::Shared => common::take_a_board(&rig.project, "run"),
-            Board::OfItsOwn => {
-                let init = Command::new("bd")
-                    .args(["init", "--prefix", "fx", "--quiet"])
-                    .args(common::bd_init_server_args("run"))
-                    .current_dir(&rig.project)
-                    .output()
-                    .expect("bd is on the process PATH");
-                assert!(
-                    init.status.success(),
-                    "bd init: {}",
-                    String::from_utf8_lossy(&init.stderr)
-                );
-            }
-        }
+        common::take_a_store(&rig.project);
         rig
     }
 
     /// The name one of this rig's workflows answers to. The label leads, so a
-    /// board holding every arm's records still says which arm filed which.
+    /// record still says which arm filed it.
     fn workflow(&self, row: &str) -> String {
         format!("{}-{row}", self.label)
     }
@@ -287,7 +310,7 @@ impl Rig {
             .arg("--packs-dir")
             .arg(self.machine.join("packs"))
             .current_dir(&self.project)
-            .hermetic(&self.root.join("home"), &self.machine, None)
+            .hermetic(&self.root.join("home"), &self.machine)
             .env("PATH", path)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -324,25 +347,30 @@ impl Rig {
         found
     }
 
+    /// The item as the store answers it, in the contract's own JSON.
     fn document(&self, item: &str) -> serde_json::Value {
-        let out = Command::new("bd")
-            .arg("-C")
-            .arg(&self.project)
-            .args(["show", item, "--json"])
-            .output()
-            .expect("bd runs");
-        assert!(
-            out.status.success(),
-            "bd show {item}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let text = String::from_utf8_lossy(&out.stdout);
-        let value: serde_json::Value =
-            serde_json::from_str(text.trim()).expect("bd show answers JSON");
-        match value {
-            serde_json::Value::Array(mut rows) if !rows.is_empty() => rows.remove(0),
-            other => other,
-        }
+        common::shown(&self.project, item)
+    }
+
+    /// The policy file rewritten whole as `body`, the store it names kept: a
+    /// file carrying no `[store]` table names the built-in store.
+    fn rewrite_policy(&self, body: &str) {
+        let file = self.project.join("fleet.toml");
+        let stub = serde_json::to_string(&common::stub_path().display().to_string())
+            .expect("a path is JSON text");
+        write(&file, &format!("{body}\n[store]\nadapter = {stub}\n"));
+    }
+
+    /// Why the store closed `item`, which the contract's item does not carry.
+    fn close_reason(&self, item: &str) -> Option<String> {
+        common::with_state(&self.project, |store| {
+            store
+                .closed
+                .lock()
+                .expect("the reasons are not poisoned")
+                .get(item)
+                .cloned()
+        })
     }
 }
 
@@ -385,14 +413,13 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// A policy with a run cap, and the two gates a project carries.
+/// A policy with a run cap.
 fn policy_with(max_open: u64) -> String {
-    format!("[gates]\nsuite = \"make check\"\n\n[core.run]\nmax_open = {max_open}\n")
+    format!("[core.run]\nmax_open = {max_open}\n")
 }
 
-/// The cap an arm that is not measuring one runs under. The board is shared, so
-/// the open runs counted against it are every arm's — a cap low enough to be
-/// reached would turn one arm's leftovers into another arm's refusal.
+/// The cap an arm that is not measuring one runs under: high enough that the
+/// runs an arm leaves open in its own store never reach it.
 fn cap_that_is_not_the_subject() -> String {
     policy_with(1000)
 }
@@ -538,18 +565,12 @@ fn the_front_half_pins_the_inputs_the_bundle_and_one_hash_over_all_three() {
 
     let record = rig.document(id);
     assert_eq!(
-        record["metadata"]["run"]["hash"].as_str(),
+        record["run"]["hash"].as_str(),
         Some(hash),
         "the hash is on the record item: {record}"
     );
-    assert_eq!(
-        record["metadata"]["run"]["workflow"].as_str(),
-        Some(workflow.as_str())
-    );
-    assert_eq!(
-        record["issue_type"].as_str(),
-        Some(workflow_run::RECORD_TYPE)
-    );
+    assert_eq!(record["run"]["workflow"].as_str(), Some(workflow.as_str()));
+    assert_eq!(record["type"].as_str(), Some(workflow_run::RECORD_TYPE));
     assert!(
         record["labels"]
             .as_array()
@@ -657,6 +678,43 @@ fn a_pack_with_no_runtime_table_refuses_by_name_and_writes_nothing() {
         &rig,
         &["run", &rig.workflow(ONE), "--by", BY],
         "declares no [runtime] table",
+    );
+}
+
+/// fleet-4fw: the carrier's runtime would come from a pack it imports, and that
+/// pack is not installed. The refusal names the import and the line that adds
+/// it, read off the carrier's own line in the lock.
+#[test]
+fn a_carrier_whose_import_is_not_installed_refuses_naming_the_line_that_adds_it() {
+    let rig = Rig::new(
+        "absent-import",
+        &Pack::without_a_runtime().importing_absent("ts"),
+        &cap_that_is_not_the_subject(),
+    );
+    fleet_core::lock::write(
+        &rig.machine.join(fleet_core::lock::LOCK),
+        &[fleet_core::lock::Entry {
+            source: "https://example.invalid/o/fleet//packs/scratch".into(),
+            name: Some("scratch".into()),
+            version: "main".into(),
+            commit: "0".repeat(40),
+            fetched: "2026-09-23T00:00:00Z".into(),
+            tree: None,
+        }],
+    )
+    .expect("the lock is written");
+    let said = refuses(
+        &rig,
+        &["run", &rig.workflow(ONE), "--by", BY],
+        "`scratch` imports `ts`, which is not installed",
+    );
+    assert!(
+        said.contains("fleet pack add https://example.invalid/o/fleet//packs/ts --version main"),
+        "the refusal names the line that adds it: {said}"
+    );
+    assert!(
+        !said.contains("core"),
+        "the binary's bottom layer is not `core` on a person's surface: {said}"
     );
 }
 
@@ -804,13 +862,9 @@ fn the_doctor_measures_the_pack_that_declares_the_imported_pin() {
 /// The cap counts the runs the STORE still holds open, so the run this arm
 /// leaves standing is a waiting one: a workflow that exits 0 closes its own
 /// record and frees the cap, which is the second half of what this arm says.
-///
-/// A BOARD OF ITS OWN, because the count is across the whole graph: on the
-/// board the arms beside this one share, whether the first of these two calls
-/// is allowed would be decided by what they had left open.
 #[test]
 fn the_open_run_cap_refuses_naming_the_open_runs_and_writes_nothing() {
-    let rig = Rig::alone("cap", &Pack::running(WAITS), &policy_with(1));
+    let rig = Rig::new("cap", &Pack::running(WAITS), &policy_with(1));
     let workflow = rig.workflow(ONE);
     let first = rig.run(&["run", &workflow, "--by", BY]);
     assert!(first.status.success(), "{}", stderr(&first));
@@ -823,6 +877,63 @@ fn the_open_run_cap_refuses_naming_the_open_runs_and_writes_nothing() {
         "`[core.run] max_open` is 1",
     );
     assert!(said.contains(&id), "the refusal names the open run: {said}");
+}
+
+/// The run directory's one entry, which is the record a run filed: the
+/// directory is named by the id the store answered, and it is made before the
+/// bundle command runs.
+fn the_one_run_directory(rig: &Rig) -> String {
+    let names: Vec<String> = std::fs::read_dir(rig.machine.join(workflow_run::RUNS))
+        .expect("the runs directory was made")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names.len(), 1, "one run was filed: {names:?}");
+    names.into_iter().next().expect("the one name")
+}
+
+/// A BUNDLE THAT FAILS CLOSES THE RECORD FILED FOR IT, says so on the stream and
+/// names it. The bundle is the one refusal a run meets after its record is
+/// filed — the record is what names the directory the bundle is written into —
+/// and a record left open there is one no stream line names: `status` does not
+/// list it, the controller neither re-runs nor cleans it, and it holds a
+/// `[core.run] max_open` slot for good.
+#[test]
+fn a_bundle_that_fails_closes_the_record_filed_for_it_and_names_it() {
+    let rig = Rig::new(
+        "bundle-fails",
+        &Pack::pinned_at(VERSION).whose_bundle_fails(),
+        &cap_that_is_not_the_subject(),
+    );
+
+    let out = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let id = the_one_run_directory(&rig);
+    let said = stderr(&out);
+    assert!(
+        said.contains("the bundler would not bundle"),
+        "the refusal is the bundle command's: {said}"
+    );
+    // The bundle line's own path carries the id, so the record is looked for
+    // AS the record and not as a substring of that path.
+    assert!(
+        said.contains(&format!("the record {id} ")),
+        "and it names the record: {said}"
+    );
+
+    assert!(
+        !is_open(&rig, &id),
+        "the record leaves the open set the cap is measured against"
+    );
+    let failed = only(&rig, WHOLE_STREAM, fleet_core::item::RUN_FAILED);
+    assert_eq!(failed["payload"]["run"].as_str(), Some(id.as_str()));
+    assert!(
+        failed["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("the bundler would not bundle")),
+        "the reason is the refusal the verb printed: {failed}"
+    );
+    none_of(&rig, WHOLE_STREAM, fleet_core::item::RUN_STARTED);
 }
 
 // ---- AC1: the exit table ------------------------------------------------------
@@ -845,7 +956,7 @@ const MOVED_TO: u64 = 99;
 fn waits_after_moving_the_stream() -> String {
     format!(
         "echo '{{\"id\":\"x\",\"seq\":{MOVED_TO},\"ts\":\"t\",\"type\":\"probe.wrote\",\
-         \"actor\":\"the-workflow\",\"payload\":{{}}}}' >> \"$FLEET_STREAM\"\n\
+         \"actor\":{{\"kind\":\"run\",\"id\":\"the-workflow\"}},\"payload\":{{}}}}' >> \"$FLEET_STREAM\"\n\
          echo \"started_at=$FLEET_STREAM_SEQ\"\n\
          echo '{{\"for\":\"a delivery\"}}'\n\
          exit 2"
@@ -856,7 +967,7 @@ fn waits_after_moving_the_stream() -> String {
 /// on.
 ///
 /// ONE RIG AND FOUR WORKFLOWS. The rows differ by the script and by nothing
-/// else, so a rig apiece would pay four boards and four packs to vary one file.
+/// else, so a rig apiece would pay four stores and four packs to vary one file.
 /// Each row's assertions are taken from the position the stream stood at before
 /// that row ran — the same claim a row on a stream of its own makes, and the
 /// reason `only` and `none_of` take a cursor.
@@ -1116,22 +1227,19 @@ fn the_project_root_reaches_the_workflow_as_fleet_project() {
     );
 }
 
-/// `HOME`, `FLEET_CLAUDE_BIN`, `USER`, `TMPDIR` and `LANG` pass through from
-/// the fleet process to the workflow, verbatim, while the clearing holds for
-/// everything else: the dispatch a workflow calls resolves the agent binary
-/// from the first two — a child under no `HOME` searches a relative
-/// `.local/bin` and finds nothing — and hands the last three to the seat it
-/// starts, which reads its keychain login off `USER` and comes up logged out
-/// without one.
+/// `HOME`, `USER`, `TMPDIR` and `LANG` pass through from the fleet process to
+/// the workflow, verbatim, while the clearing holds for everything else: the
+/// dispatch a workflow calls builds its agent's search path from `HOME` — a
+/// child under no `HOME` searches a relative `.local/bin` and finds nothing —
+/// and hands the last three to the seat it starts, which reads its keychain
+/// login off `USER` and comes up logged out without one.
 ///
-/// The binary named here is no file at all, which is what shows the value is
-/// copied and not resolved; the stray name set beside it is the control that
-/// the clearing still stands. `TMPDIR` names a real directory because the
-/// fleet process under test is handed this same value.
+/// The stray name set beside them is the control that the clearing still
+/// stands. `TMPDIR` names a real directory because the fleet process under test
+/// is handed this same value.
 #[test]
-fn the_agent_binary_seams_reach_the_workflow_from_the_environment() {
+fn the_four_pass_throughs_reach_the_workflow_from_the_environment() {
     let echoes = "echo \"home=$HOME\"\n\
-                  echo \"claude_bin=$FLEET_CLAUDE_BIN\"\n\
                   echo \"user=$USER\"\n\
                   echo \"tmpdir=$TMPDIR\"\n\
                   echo \"lang=$LANG\"\n\
@@ -1143,7 +1251,6 @@ fn the_agent_binary_seams_reach_the_workflow_from_the_environment() {
         &cap_that_is_not_the_subject(),
     );
     let workflow = rig.workflow(ONE);
-    let named = "/a/binary/nobody/resolves";
     let temp = rig.root.join("a-temp-of-its-own");
     std::fs::create_dir_all(&temp).expect("the arm's own temp directory is created");
     let temp = temp.display().to_string();
@@ -1152,7 +1259,6 @@ fn the_agent_binary_seams_reach_the_workflow_from_the_environment() {
     let out = rig.run_with(
         &["run", &workflow, "--by", BY],
         &[
-            ("FLEET_CLAUDE_BIN", named),
             ("USER", user),
             ("TMPDIR", &temp),
             ("LANG", lang),
@@ -1176,11 +1282,6 @@ fn the_agent_binary_seams_reach_the_workflow_from_the_environment() {
         "HOME is the fleet process's own, as the rig set it: {said}"
     );
     assert_eq!(
-        echoed("claude_bin="),
-        named,
-        "FLEET_CLAUDE_BIN is forwarded as written, not resolved: {said}"
-    );
-    assert_eq!(
         echoed("user="),
         user,
         "USER reaches the seat a dispatch from this workflow starts: {said}"
@@ -1202,15 +1303,11 @@ fn the_agent_binary_seams_reach_the_workflow_from_the_environment() {
     );
 }
 
-/// The system directories and the one directory that holds `bd`, which the
-/// store shells out to by bare name — the whole of what a fleet process needs,
-/// and nothing a rig's runtime stub is ever written to.
+/// The system directories alone — the whole of what a fleet process needs, the
+/// store its policy names being an absolute path, and nothing a rig's runtime
+/// stub is ever written to.
 fn a_path_no_runtime_is_on() -> String {
-    let held = std::env::var("PATH").unwrap_or_default();
-    let bd = std::env::split_paths(&held)
-        .find(|dir| dir.join("bd").is_file())
-        .expect("bd is on this process's PATH");
-    format!("/usr/bin:/bin:{}", bd.display())
+    String::from("/usr/bin:/bin")
 }
 
 /// The pack's lines run on a `PATH` the caller constructs, with the directory
@@ -1312,5 +1409,879 @@ fn a_silent_exit_of_one_is_could_not_tell_with_nothing_read() {
     assert!(
         unread["payload"]["read"].is_null(),
         "nothing read is null and not an empty reason: {unread}"
+    );
+}
+
+// ---- the pack's settings: [packs.<name>] ----------------------------------------
+
+/// Three settings the scratch pack declares, in both of the spellings a
+/// declaration may take: one quoted whole, two as a dotted table path. One is
+/// set by the fleet, one falls to its default, and one has neither.
+const DECLARED: &str = "\n[config.\"greeting.word\"]\n\
+     description = \"the word the scratch workflow greets with\"\n\
+     type = \"string\"\n\
+     \n[config.greeting.times]\n\
+     description = \"how many times it greets\"\n\
+     type = \"integer\"\n\
+     default = 2\n\
+     \n[config.unset]\n\
+     description = \"declared, with no default, and set by nobody\"\n";
+
+/// A workflow that echoes the document it was handed and then waits, so the
+/// same run can be executed again.
+const ECHOES_AND_WAITS: &str = "echo \"stdin=$(cat)\"\n\
+     echo '{\"for\":\"a delivery\"}'\n\
+     exit 2";
+
+/// The policy the settings arms run under: the cap that is not the subject, and
+/// one `[packs.<name>]` section.
+fn policy_setting(section: &str) -> String {
+    format!("{}\n{section}", cap_that_is_not_the_subject())
+}
+
+/// The document the run child was handed on stdin, off its own log.
+fn handed(directory: &Path) -> serde_json::Value {
+    let said = std::fs::read_to_string(directory.join(workflow_run::STDOUT_LOG))
+        .expect("the log is readable");
+    let line = said
+        .lines()
+        .find_map(|line| line.strip_prefix("stdin="))
+        .unwrap_or_else(|| panic!("the workflow echoed its stdin: {said}"));
+    serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("stdin is one JSON document ({e}): {line}"))
+}
+
+/// A value `fleet.toml` sets for a declared key reaches the workflow on the
+/// channel its inputs ride, beside the default of a key it does not set; a key
+/// with neither is absent, which is what `run.config` answers undefined for.
+/// The same table is pinned in the run directory's inputs file.
+#[test]
+fn a_declared_setting_reaches_the_workflow_beside_its_declared_default() {
+    let rig = Rig::new(
+        "settings",
+        &Pack::running(ECHOES_AND_WAITS).declaring(DECLARED),
+        &policy_setting("[packs.scratch]\ngreeting.word = \"ahoy\"\n"),
+    );
+    let out = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let (id, _) = started_line(&out);
+    let directory = rig.machine.join(workflow_run::RUNS).join(&id);
+
+    let document = handed(&directory);
+    let config = &document["config"];
+    assert_eq!(
+        config["greeting.word"].as_str(),
+        Some("ahoy"),
+        "the value the fleet set: {document}"
+    );
+    assert_eq!(
+        config["greeting.times"].as_i64(),
+        Some(2),
+        "the default the pack declared, where the fleet set none: {document}"
+    );
+    assert!(
+        config.get("unset").is_none(),
+        "a key with no value and no default is absent: {document}"
+    );
+
+    let pinned = fleet_core::item::read_table(&directory.join(workflow_run::INPUTS))
+        .expect("the inputs parse as TOML");
+    assert_eq!(
+        pinned["config"]["greeting.word"].as_str(),
+        Some("ahoy"),
+        "the settings are pinned with the inputs: {pinned}"
+    );
+}
+
+/// A key the installed pack does not declare is refused before anything is
+/// written, naming the key and the pack.
+#[test]
+fn an_undeclared_setting_refuses_naming_the_key_and_the_pack_and_writes_nothing() {
+    let rig = Rig::new(
+        "undeclared",
+        &Pack::running(ECHOES_AND_WAITS).declaring(DECLARED),
+        &policy_setting("[packs.scratch]\ngreeting.wrod = \"ahoy\"\n"),
+    );
+    let said = refuses(
+        &rig,
+        &["run", &rig.workflow(ONE), "--by", BY],
+        "greeting.wrod",
+    );
+    assert!(
+        said.contains("`scratch`"),
+        "the refusal names the pack: {said}"
+    );
+    assert!(
+        said.contains("greeting.word"),
+        "and what the pack does declare: {said}"
+    );
+}
+
+/// A section for a pack that is not installed is refused the same way, naming
+/// the section — over an installed pack that declares no settings at all, so
+/// what refuses is the section and never a declaration.
+#[test]
+fn a_section_for_a_pack_not_installed_refuses_naming_it_and_writes_nothing() {
+    let rig = Rig::new(
+        "uninstalled",
+        &Pack::running(ECHOES_AND_WAITS),
+        &policy_setting("[packs.absent]\ngreeting.word = \"ahoy\"\n"),
+    );
+    let said = refuses(
+        &rig,
+        &["run", &rig.workflow(ONE), "--by", BY],
+        "[packs.absent]",
+    );
+    assert!(
+        said.contains("scratch"),
+        "the refusal names the packs that are installed: {said}"
+    );
+}
+
+/// A policy that still sets a TEST COMMAND under `[gates]` opens no run: the
+/// refusal names the key and the pack setting that replaces it, before
+/// anything is written — the workflow being opened is where the command is set
+/// now, and a run beside the old key would land untested while the person who
+/// wrote it believes otherwise.
+#[test]
+fn a_policy_setting_a_gates_test_command_opens_no_run_and_names_where_it_moved() {
+    for (key, setting) in [("suite", "takeoff.test"), ("touched", "takeoff.touched")] {
+        let rig = Rig::new(
+            &format!("moved-{key}"),
+            &Pack::running(ECHOES_AND_WAITS),
+            &policy_setting(&format!("[gates]\n{key} = \"make check\"\n")),
+        );
+        let said = refuses(
+            &rig,
+            &["run", &rig.workflow(ONE), "--by", BY],
+            &format!("[gates] {key}"),
+        );
+        assert!(
+            said.contains(&format!("`{setting}` under [packs.tiny]")),
+            "the refusal names the pack setting that replaces it: {said}"
+        );
+    }
+}
+
+/// A policy that still carries a `[gates]` table opens no run, whatever the
+/// table holds: the refusal names the table and where each of its keys is set
+/// now, before anything is written — a marker, a command list or a guard target
+/// left under the old name is one nothing reads.
+#[test]
+fn a_policy_carrying_a_gates_table_opens_no_run_and_names_the_new_homes() {
+    let rig = Rig::new(
+        "moved-gates",
+        &Pack::running(ECHOES_AND_WAITS),
+        &policy_setting("[gates]\nci_marker = \"printf '[skip ci]'\"\n"),
+    );
+    let said = refuses(
+        &rig,
+        &["run", &rig.workflow(ONE), "--by", BY],
+        "[gates] is not a policy table",
+    );
+    for home in [
+        "`ci_marker` under [landing]",
+        "`tool_commands` under [permissions]",
+        "`release_ref_glob` and the `prod_*` lists under [guards.targets]",
+    ] {
+        assert!(said.contains(home), "the refusal names {home}: {said}");
+    }
+}
+
+/// A policy that still sets a key NOTHING READS opens no run: the refusal names
+/// the key and says to delete it, before anything is written — a cap nothing
+/// enforces is one a person believes is in force. One key at the top of the
+/// policy and one a table down, so the refusal is not a reading of one table.
+#[test]
+fn a_policy_setting_a_key_nothing_reads_opens_no_run_and_names_it() {
+    for (label, section, named) in [
+        (
+            "returns",
+            "[core]\nmax_returns = 3\n",
+            "[core] max_returns is no longer read — delete it",
+        ),
+        (
+            "seats",
+            "[core.flight]\nmax_seats = 2\n",
+            "[core.flight] max_seats is no longer read — delete it",
+        ),
+    ] {
+        let rig = Rig::new(
+            &format!("retired-{label}"),
+            &Pack::running(ECHOES_AND_WAITS),
+            &policy_setting(section),
+        );
+        refuses(&rig, &["run", &rig.workflow(ONE), "--by", BY], named);
+    }
+}
+
+/// The stream a re-run in this process appends to: the same file, through the
+/// same log type, the binary's own writer uses.
+struct Stream(PathBuf);
+
+impl fleet_core::item::Events for Stream {
+    fn append(
+        &self,
+        kind: &str,
+        actor: &fleet_core::seat::actor::Actor,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
+        fleet_controller::events::EventLog::open(&self.0)
+            .append(
+                kind,
+                &fleet_controller::events::ActorRef::new(actor.kind.as_str(), actor.id.clone()),
+                payload,
+            )
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl workflow_run::Stream for Stream {
+    fn path(&self) -> PathBuf {
+        self.0.clone()
+    }
+
+    fn seq(&self) -> u64 {
+        fleet_controller::events::EventLog::open(&self.0).seq()
+    }
+}
+
+/// A run is pinned to the settings it was opened with: a re-run after
+/// `fleet.toml` changed hands the workflow the first value, while a fresh run
+/// over the same file reads the new one — the control that says the edit was
+/// readable and it is the pin that held.
+///
+/// THE RE-RUN IS CORE'S OWN ENTRY, called in this process as the controller's
+/// run pass calls it, with the edited file as the policy in force.
+#[test]
+fn a_rerun_reads_the_settings_the_run_was_opened_with_and_not_the_edited_file() {
+    let rig = Rig::new(
+        "pinned-settings",
+        &Pack::running(ECHOES_AND_WAITS).declaring(DECLARED),
+        &policy_setting("[packs.scratch]\ngreeting.word = \"ahoy\"\n"),
+    );
+    let out = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(outcome_line(&out), "waiting");
+    let (id, _) = started_line(&out);
+    let directory = rig.machine.join(workflow_run::RUNS).join(&id);
+    assert_eq!(
+        handed(&directory)["config"]["greeting.word"].as_str(),
+        Some("ahoy")
+    );
+
+    let policy_file = rig.project.join("fleet.toml");
+    rig.rewrite_policy(&policy_setting(
+        "[packs.scratch]\ngreeting.word = \"avast\"\n",
+    ));
+
+    let store = common::store_at(&rig.project);
+    let packs = fleet_core::item::brief::Packs::under(
+        &rig.machine.join("packs"),
+        &rig.machine.join(fleet_core::defaults::DIR),
+    )
+    .unwrap_or_else(|stop| panic!("the layers resolve: {}", stop.message));
+    let table = fleet_core::item::table_at(&policy_file);
+    let project = fleet_core::item::Project {
+        root: rig.project.clone(),
+        name: String::from("project"),
+        policy: table.clone(),
+        guards: table,
+    };
+    let stream = Stream(rig.machine.join("events.jsonl"));
+    let mut said = Vec::new();
+    let ended = workflow_run::rerun(
+        &mut said,
+        &workflow_run::Again {
+            run: &id,
+            by: &Actor::typed(BY).expect("typed").expect("a seat"),
+            at: "2026-09-22T00:00:00Z",
+            machine_dir: &rig.machine,
+            fleet_bin: Path::new(env!("CARGO_BIN_EXE_fleet")),
+        },
+        &workflow_run::Wiring {
+            store: &store,
+            project: &project,
+            packs: &packs,
+            policy_file: &policy_file,
+            events: &stream,
+            stream: &stream,
+            child_path: "",
+        },
+    )
+    .unwrap_or_else(|stop| panic!("the re-run executes: {}", stop.message));
+    assert_eq!(ended, workflow_run::Ended::Waiting);
+    assert_eq!(
+        handed(&directory)["config"]["greeting.word"].as_str(),
+        Some("ahoy"),
+        "the re-run is handed the value the run was opened with"
+    );
+
+    let fresh = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(fresh.status.code(), Some(0), "{}", stderr(&fresh));
+    let (fresh_id, _) = started_line(&fresh);
+    assert_eq!(
+        handed(&rig.machine.join(workflow_run::RUNS).join(&fresh_id))["config"]["greeting.word"]
+            .as_str(),
+        Some("avast"),
+        "a run opened after the edit reads the edited file"
+    );
+}
+
+/// The project's store with one reading bent: every read's proof carries a
+/// token nothing wrote, which is the one answer the pins' read-back asks of
+/// it.
+struct Planted(fleet_core::store::exec::Exec);
+
+impl fleet_core::store::Store for Planted {
+    fn resolve(&self, id: &str) -> Result<fleet_core::store::ItemId, StoreError> {
+        self.0.resolve(id)
+    }
+
+    fn list(
+        &self,
+        filter: &fleet_core::store::Filter,
+    ) -> Result<Vec<fleet_core::store::ItemSummary>, StoreError> {
+        self.0.list(filter)
+    }
+
+    fn show(&self, item: &str) -> Result<fleet_core::store::Item, StoreError> {
+        let mut read = self.0.show(item)?;
+        read.proof = fleet_core::store::ReadProof::of(format!(
+            "{}{}",
+            read.proof.as_str(),
+            fleet_core::item::control_token()
+        ));
+        Ok(read)
+    }
+
+    fn create(
+        &self,
+        item: &fleet_core::store::NewItem,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<fleet_core::store::ItemId, StoreError> {
+        self.0.create(item, by)
+    }
+
+    fn update(
+        &self,
+        id: &fleet_core::store::ItemId,
+        change: &fleet_core::store::Update,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<(), StoreError> {
+        self.0.update(id, change, by)
+    }
+
+    fn order_set(
+        &self,
+        id: &fleet_core::store::ItemId,
+        order: &fleet_core::store::Order,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<(), StoreError> {
+        self.0.order_set(id, order, by)
+    }
+
+    fn order_withdraw(
+        &self,
+        id: &fleet_core::store::ItemId,
+        fence: &fleet_core::store::WithdrawFence,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<(), StoreError> {
+        self.0.order_withdraw(id, fence, by)
+    }
+
+    fn run_set(
+        &self,
+        id: &fleet_core::store::ItemId,
+        run: &fleet_core::store::RunRecord,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<(), StoreError> {
+        self.0.run_set(id, run, by)
+    }
+
+    fn hold_raise(
+        &self,
+        id: &fleet_core::store::ItemId,
+        reason: &str,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<fleet_core::store::HoldId, StoreError> {
+        self.0.hold_raise(id, reason, by)
+    }
+
+    fn holds_open(&self) -> Result<Vec<fleet_core::store::HoldId>, StoreError> {
+        self.0.holds_open()
+    }
+
+    fn hold_clear(
+        &self,
+        hold: &fleet_core::store::HoldId,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<(), StoreError> {
+        self.0.hold_clear(hold, by)
+    }
+
+    fn close(
+        &self,
+        id: &fleet_core::store::ItemId,
+        reason: &str,
+        by: &fleet_core::seat::actor::Actor,
+    ) -> Result<(), StoreError> {
+        self.0.close(id, reason, by)
+    }
+
+    fn append(
+        &self,
+        item: &fleet_core::store::ItemId,
+        body: &fleet_core::entry::Body,
+        by: &Actor,
+    ) -> Result<String, StoreError> {
+        self.0.append(item, body, by)
+    }
+
+    fn timeline(
+        &self,
+        item: &fleet_core::store::ItemId,
+    ) -> Result<Vec<fleet_core::entry::Entry>, StoreError> {
+        self.0.timeline(item)
+    }
+
+    fn capabilities(&self) -> Result<fleet_core::store::types::Capabilities, StoreError> {
+        self.0.capabilities()
+    }
+
+    fn version(&self) -> Result<fleet_core::store::Version, StoreError> {
+        self.0.version()
+    }
+
+    fn export(&self, into: &Path) -> Result<PathBuf, StoreError> {
+        self.0.export(into)
+    }
+}
+
+/// THE NEGATIVE CONTROL on the pins' read-back: a read whose proof carries a
+/// token nothing wrote is not reading the record, however right its hash and
+/// workflow read — a could-not-tell naming the token, and no process started.
+///
+/// Core's own entry, called in this process as the cli calls it, over a store
+/// that plants the token in every read's proof.
+#[test]
+fn the_pins_read_back_catches_a_planted_token() {
+    let rig = Rig::new(
+        "planted",
+        &Pack::running("echo 'nothing runs'"),
+        &cap_that_is_not_the_subject(),
+    );
+    let store = Planted(common::store_at(&rig.project));
+    let packs = fleet_core::item::brief::Packs::under(
+        &rig.machine.join("packs"),
+        &rig.machine.join(fleet_core::defaults::DIR),
+    )
+    .unwrap_or_else(|stop| panic!("the layers resolve: {}", stop.message));
+    let policy_file = rig.project.join("fleet.toml");
+    let table = fleet_core::item::table_at(&policy_file);
+    let project = fleet_core::item::Project {
+        root: rig.project.clone(),
+        name: String::from("project"),
+        policy: table.clone(),
+        guards: table,
+    };
+    let stream = Stream(rig.machine.join("events.jsonl"));
+    let child_path = match std::env::var("PATH") {
+        Ok(held) => format!("{}:{held}", rig.stubs.display()),
+        Err(_) => rig.stubs.display().to_string(),
+    };
+    let workflow = rig.workflow(ONE);
+
+    let stop = workflow_run::run(
+        &mut Vec::new(),
+        &workflow_run::Order {
+            workflow: &workflow,
+            inputs: &[],
+            by: &Actor::typed(BY).expect("typed").expect("a seat"),
+            at: "2026-09-25T00:00:00Z",
+            machine_dir: &rig.machine,
+            fleet_bin: Path::new(env!("CARGO_BIN_EXE_fleet")),
+        },
+        &workflow_run::Wiring {
+            store: &store,
+            project: &project,
+            packs: &packs,
+            policy_file: &policy_file,
+            events: &stream,
+            stream: &stream,
+            child_path: &child_path,
+        },
+    )
+    .expect_err("a read that is not the record's is refused");
+
+    assert_eq!(stop.code, 3, "{}", stop.message);
+    assert!(
+        stop.message.contains(fleet_core::item::control_token())
+            && stop.message.contains("not reading this item"),
+        "{}",
+        stop.message
+    );
+}
+
+// ---- the cancel ----------------------------------------------------------------
+
+/// The same wiring the controller's run pass hands core's re-run, over this
+/// rig's project and its policy file as it stands.
+fn rerun_in_this_process(
+    rig: &Rig,
+    id: &str,
+) -> Result<workflow_run::Ended, fleet_core::item::Stop> {
+    let store = common::store_at(&rig.project);
+    let packs = fleet_core::item::brief::Packs::under(
+        &rig.machine.join("packs"),
+        &rig.machine.join(fleet_core::defaults::DIR),
+    )
+    .unwrap_or_else(|stop| panic!("the layers resolve: {}", stop.message));
+    let policy_file = rig.project.join("fleet.toml");
+    let table = fleet_core::item::table_at(&policy_file);
+    let project = fleet_core::item::Project {
+        root: rig.project.clone(),
+        name: String::from("project"),
+        policy: table.clone(),
+        guards: table,
+    };
+    let stream = Stream(rig.machine.join("events.jsonl"));
+    workflow_run::rerun(
+        &mut Vec::new(),
+        &workflow_run::Again {
+            run: id,
+            by: &the_controller(),
+            at: "2026-09-23T00:00:00Z",
+            machine_dir: &rig.machine,
+            fleet_bin: Path::new(env!("CARGO_BIN_EXE_fleet")),
+        },
+        &workflow_run::Wiring {
+            store: &store,
+            project: &project,
+            packs: &packs,
+            policy_file: &policy_file,
+            events: &stream,
+            stream: &stream,
+            child_path: "",
+        },
+    )
+}
+
+/// The ids of every hold the store still lists open.
+fn holds_open(rig: &Rig) -> Vec<String> {
+    use fleet_core::store::Store;
+    common::store_at(&rig.project)
+        .holds_open()
+        .expect("the store lists its holds")
+        .into_iter()
+        .map(|hold| hold.to_string())
+        .collect()
+}
+
+/// `fleet cancel` on a waiting run: the record is closed, `run.cancelled` names
+/// it, and the run is never executed again — not even where the re-run the
+/// controller's pass calls is asked for it outright, because a closed record
+/// is refused before anything is executed.
+#[test]
+fn a_cancelled_waiting_run_is_closed_announced_and_never_executed_again() {
+    let rig = Rig::new(
+        "cancel-wait",
+        &Pack::running(WAITS),
+        &cap_that_is_not_the_subject(),
+    );
+    let out = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let (id, _) = started_line(&out);
+    assert!(is_open(&rig, &id), "a waiting run holds its record open");
+
+    let from = rig.stream_length();
+    let out = rig.run(&["cancel", &id, "--by", PERSON]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), format!("{id} — cancelled"));
+    assert!(
+        !is_open(&rig, &id),
+        "the record leaves the open set `[core.run] max_open` counts"
+    );
+    let reason = rig.close_reason(&id);
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("cancelled")),
+        "and says why it closed: {reason:?}"
+    );
+    let cancelled = only(&rig, from, fleet_core::item::RUN_CANCELLED);
+    assert_eq!(cancelled["payload"]["run"].as_str(), Some(id.as_str()));
+    assert_eq!(
+        cancelled["actor"],
+        serde_json::json!({ "kind": "seat", "id": &PERSON["seat:".len()..] })
+    );
+    let keys: Vec<&str> = cancelled["payload"]
+        .as_object()
+        .expect("the payload is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        Some(keys.as_slice()),
+        fleet_core::item::payload_keys(fleet_core::item::RUN_CANCELLED),
+        "the payload carries the keys its kind declares"
+    );
+    none_of(&rig, from, fleet_core::item::ITEM_ENTRY);
+
+    let from = rig.stream_length();
+    let stop = rerun_in_this_process(&rig, &id).expect_err("a closed run is not executed");
+    assert_eq!(stop.code, 1, "{}", stop.message);
+    assert!(
+        stop.message.contains(&format!("{id} is closed")),
+        "refused as closed, before anything is read off the directory: {}",
+        stop.message
+    );
+    none_of(&rig, from, fleet_core::item::RUN_STARTED);
+}
+
+/// A record whose run is at a shape this binary does not read refuses the read
+/// of the record itself: could-not-tell naming the record, and never executed
+/// again as though its shape were known (fleet-4j6). The shape is the store's
+/// to recognise, so the store is put in that state directly: no verb here
+/// writes a record this fleet cannot read.
+#[test]
+fn a_run_object_at_an_unknown_version_is_could_not_tell_and_never_executed() {
+    let rig = Rig::new(
+        "rerun-version",
+        &Pack::running(WAITS),
+        &cap_that_is_not_the_subject(),
+    );
+    let out = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let (id, _) = started_line(&out);
+    common::with_state(&rig.project, |store| store.unreadable_run(&id));
+
+    let from = rig.stream_length();
+    let stop = rerun_in_this_process(&rig, &id).expect_err("the run is not executed");
+    assert_eq!(stop.code, 3, "{}", stop.message);
+    assert!(
+        stop.message
+            .contains(&format!("{id}'s run record is not one this fleet reads")),
+        "the record is named: {}",
+        stop.message
+    );
+    none_of(&rig, from, fleet_core::item::RUN_STARTED);
+}
+
+/// One run held on the project's store the way the controller's run pass
+/// leaves one at `[core.run] max_crashes`: a workflow nothing could classify,
+/// then the hold on its record. `entered` is the park the seam makes now, the
+/// hold and its held entry; unset, it is a bare hold nothing on the record
+/// names.
+fn a_run_held_at_the_cap(rig: &Rig, entered: bool) -> (String, String) {
+    use fleet_core::store::Store;
+    let out = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let (id, _) = started_line(&out);
+    let store = common::store_at(&rig.project);
+    let hold = if entered {
+        fleet_core::item::hold::park_at_the_cap(
+            &fleet_core::item::hold::Capped {
+                run: &id,
+                reason: "executed 3 time(s) and nothing could classify the last one",
+                directory: &rig.machine.join(workflow_run::RUNS).join(&id),
+                by: &the_controller(),
+            },
+            &store,
+        )
+        .unwrap_or_else(|stop| panic!("the park is made: {}", stop.message))
+        .0
+    } else {
+        store
+            .hold_raise(
+                &fleet_core::store::ItemId::from(id.as_str()),
+                "a hold nothing on the record names",
+                &the_controller(),
+            )
+            .expect("the bare hold is raised")
+            .to_string()
+    };
+    // A HOLD BLOCKS THE ITEM IT IS RAISED ON, and a store answers it among the
+    // item's blockers, which is where `fleet cancel` finds it. The stub holds
+    // its holds apart from its items, so the blocker is put there by hand.
+    common::with_state(&rig.project, |store| {
+        store.amend(&id, |held| {
+            held.blockers
+                .push(fleet_core::store::ItemId::from(hold.as_str()))
+        })
+    });
+    (id, hold)
+}
+
+/// The crash cap's park, cleared through the shipped binary on the project's
+/// store: `fleet clear` finds the hold the held entry names, writes the
+/// cleared entry, clears the hold the store raised, and says so on the stream.
+#[test]
+fn a_run_held_at_the_crash_cap_clears_through_fleet_clear() {
+    let rig = Rig::new(
+        "clear-park",
+        &Pack::running(STRANGE),
+        &cap_that_is_not_the_subject(),
+    );
+    let (id, hold) = a_run_held_at_the_cap(&rig, true);
+    assert!(holds_open(&rig).contains(&hold), "{hold} stands");
+
+    let from = rig.stream_length();
+    let out = rig.run(&["clear", &id, "B", "--by", PERSON]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!holds_open(&rig).contains(&hold), "the hold is cleared");
+
+    // The record: one held entry at the cap, by the controller, and the
+    // person's clearance of it — which the stream's one signal names.
+    use fleet_core::store::Store;
+    let entries = common::store_at(&rig.project)
+        .timeline(&fleet_core::store::ItemId::from(id.as_str()))
+        .expect("the record's timeline reads");
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    let cleared = only(&rig, from, fleet_core::item::ITEM_ENTRY);
+    assert_eq!(
+        cleared["payload"],
+        serde_json::json!({ "item": id, "entry": entries[1].id, "kind": "cleared" })
+    );
+    assert!(
+        matches!(
+            &entries[0].body,
+            fleet_core::entry::Body::Held(held)
+                if held.hold == hold
+                    && held.reason == fleet_core::entry::HoldReason::MaxCrashes
+                    && held.run_hash.is_some()
+        ),
+        "{entries:?}"
+    );
+    assert_eq!(entries[0].by, the_controller());
+    assert_eq!(
+        entries[1].body,
+        fleet_core::entry::Body::Cleared(fleet_core::entry::Cleared {
+            hold: hold.clone(),
+            how: fleet_core::entry::Clearance::Answer,
+            letter: Some(String::from("B")),
+            text: None,
+        })
+    );
+    assert_eq!(entries[1].by.to_string(), PERSON);
+}
+
+/// `fleet cancel` on a held run clears the hold standing on its record and
+/// closes it — here a bare hold nothing on the record names, which `fleet
+/// clear` cannot reach and which kept the record's close blocked. The holds
+/// are the store's own answer, so a held entry's hold is found the same way.
+#[test]
+fn a_cancel_clears_the_hold_on_a_held_runs_record_and_closes_it() {
+    let rig = Rig::new(
+        "cancel-park",
+        &Pack::running(STRANGE),
+        &cap_that_is_not_the_subject(),
+    );
+    let (id, bare) = a_run_held_at_the_cap(&rig, false);
+    assert!(holds_open(&rig).contains(&bare), "{bare} stands");
+
+    let from = rig.stream_length();
+    let out = rig.run(&["cancel", &id, "--by", PERSON]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out).trim(),
+        format!("{id} — cancelled, hold {bare} cleared"),
+        "the line names the hold it cleared"
+    );
+    assert!(
+        !holds_open(&rig).contains(&bare),
+        "the bare hold is cleared"
+    );
+    assert!(!is_open(&rig, &id), "and the record is closed");
+    only(&rig, from, fleet_core::item::RUN_CANCELLED);
+
+    // THE RECORD SAYS CANCELLED, and never a letter nobody chose: one cleared
+    // entry for the hold, by whoever cancelled, carrying no letter and no text
+    // — and one signal on the stream naming it, after the cancel.
+    //
+    // RED-PROOF: before the cleared entry, the only record of this was the
+    // stream's line, its letter null.
+    use fleet_core::store::Store;
+    let entries = common::store_at(&rig.project)
+        .timeline(&fleet_core::store::ItemId::from(id.as_str()))
+        .expect("the closed record's timeline reads");
+    let clearances: Vec<_> = entries
+        .iter()
+        .filter(|entry| matches!(entry.body, fleet_core::entry::Body::Cleared(_)))
+        .collect();
+    assert_eq!(clearances.len(), 1, "one per hold: {entries:?}");
+    let cleared = only(&rig, from, fleet_core::item::ITEM_ENTRY);
+    assert_eq!(
+        cleared["payload"],
+        serde_json::json!({ "item": id, "entry": clearances[0].id, "kind": "cleared" })
+    );
+    assert_eq!(
+        cleared["actor"],
+        serde_json::json!({ "kind": "seat", "id": &PERSON["seat:".len()..] }),
+        "by who cancelled"
+    );
+    let events = rig.events();
+    let at = |kind: &str| {
+        events
+            .iter()
+            .skip(from)
+            .position(|event| event["type"].as_str() == Some(kind))
+    };
+    assert!(
+        at(fleet_core::item::RUN_CANCELLED) < at(fleet_core::item::ITEM_ENTRY),
+        "the cancel precedes the clearance's signal: {events:?}"
+    );
+    assert_eq!(
+        clearances[0].body,
+        fleet_core::entry::Body::Cleared(fleet_core::entry::Cleared {
+            hold: bare.clone(),
+            how: fleet_core::entry::Clearance::Cancel,
+            letter: None,
+            text: None,
+        })
+    );
+    assert_eq!(clearances[0].by.to_string(), PERSON, "by who cancelled");
+}
+
+/// The refusals, each exit 1 on the record as it stands and each leaving it so:
+/// an id the store does not hold, an item that is not a run's record, and a run
+/// already closed. An empty `--by` is usage, exit 2.
+#[test]
+fn a_cancel_refuses_what_is_not_an_open_run() {
+    let rig = Rig::new(
+        "cancel-refuses",
+        &Pack::running(WAITS),
+        &cap_that_is_not_the_subject(),
+    );
+
+    refuses(
+        &rig,
+        &["cancel", "fx-nothing-here", "--by", BY],
+        "fx-nothing-here",
+    );
+
+    let item = common::filed(&rig.project, "an item that is not a run", &[]);
+    let said = refuses(&rig, &["cancel", &item, "--by", BY], &item);
+    assert!(said.contains("not a run"), "{said}");
+    assert!(is_open(&rig, &item), "the item is untouched");
+
+    let out = rig.run(&["run", &rig.workflow(ONE), "--by", BY]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let (id, _) = started_line(&out);
+    let out = rig.run(&["cancel", &id, "--by", BY]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let from = rig.stream_length();
+    let said = refuses(&rig, &["cancel", &id, "--by", BY], "closed");
+    assert!(said.contains(&id), "{said}");
+    none_of(&rig, from, fleet_core::item::RUN_CANCELLED);
+
+    // A verb always has an actor, so the one usage refusal left is an empty
+    // `--by`: a seat argument that names nothing at all.
+    let out = rig.run(&["cancel", &id, "--by", ""]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("fleet cancel: --by names no seat — the argument is empty"),
+        "{}",
+        stderr(&out)
     );
 }

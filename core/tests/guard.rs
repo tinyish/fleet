@@ -11,7 +11,7 @@
 //! one it routes around, so every reason is held to naming the fragment it is
 //! about, the rewrite, and the one variable that licenses that act.
 
-use fleet_core::guard::{self, Class, Policy, Verdict};
+use fleet_core::guard::{self, Class, Policy, Targets, Verdict};
 
 /// (label, command, refused?)
 type Case = (&'static str, &'static str, bool);
@@ -40,18 +40,21 @@ fn policy() -> Policy {
     Policy {
         enabled: true,
         item_prefix: Some(PREFIX.to_string()),
-        release_ref_glob: Some(RELEASE_GLOB.to_string()),
-        prod_buckets: vec![BUCKET.to_string()],
-        prod_projects: vec![PROJECT.to_string()],
-        prod_apps: vec![APP.to_string()],
-        prod_make_goals: vec![MAKE_GOAL.to_string()],
-        prod_dagger_functions: vec![DAGGER_FUNCTION.to_string()],
-        prod_workflow_refs: vec![WORKFLOW_REF.to_string()],
+        targets: Targets {
+            release_ref_glob: Some(RELEASE_GLOB.to_string()),
+            prod_buckets: vec![BUCKET.to_string()],
+            prod_projects: vec![PROJECT.to_string()],
+            prod_apps: vec![APP.to_string()],
+            prod_make_goals: vec![MAKE_GOAL.to_string()],
+            prod_dagger_functions: vec![DAGGER_FUNCTION.to_string()],
+            prod_workflow_refs: vec![WORKFLOW_REF.to_string()],
+        },
         // The two readings only a caller can make are left out of the shared
         // policy on purpose: every table below then measures the flag-named
         // path alone, and the pair gets its own arm with both answers.
         cwd_app: None,
         active_project: None,
+        cli: Some(String::from("tracker")),
     }
 }
 
@@ -104,63 +107,75 @@ fn a_backtick_inside_a_stored_string_is_refused_and_the_inert_spellings_are_not(
         Class::ShellTrap,
         "record-backtick",
         &[
-            ("a note", "bd note x-1 \"the `date` it ran\"", true),
-            ("a created title", "bd create \"a `hostname` title\"", true),
+            ("a note", "tracker note x-1 \"the `date` it ran\"", true),
+            (
+                "a created title",
+                "tracker create \"a `hostname` title\"",
+                true,
+            ),
             (
                 "an appended note",
-                "bd update x-1 --append-notes \"see `git log`\"",
+                "tracker update x-1 --append-notes \"see `git log`\"",
                 true,
             ),
             (
                 "a close reason",
-                "bd close x-1 --reason \"fixed by `whoami`\"",
+                "tracker close x-1 --reason \"fixed by `whoami`\"",
                 true,
             ),
-            ("a description", "bd update x-1 -d \"a `b` c\"", true),
+            ("a description", "tracker update x-1 -d \"a `b` c\"", true),
             // The two surfaces the shared table adds: this class reads the
             // record class's own list, so a title and a comment are guarded
             // here exactly as they are guarded there.
-            ("a title", "bd update x-1 --title \"the `b` thing\"", true),
-            ("a comment", "bd comment x-1 \"the `date` it ran\"", true),
+            (
+                "a title",
+                "tracker update x-1 --title \"the `b` thing\"",
+                true,
+            ),
+            (
+                "a comment",
+                "tracker comment x-1 \"the `date` it ran\"",
+                true,
+            ),
             (
                 "the second positional",
-                "bd note x-1 \"one\" \"two `three`\"",
+                "tracker note x-1 \"one\" \"two `three`\"",
                 true,
             ),
             (
                 "invoked by path",
-                "/usr/local/bin/bd note x-1 \"a `b`\"",
+                "/usr/local/bin/tracker note x-1 \"a `b`\"",
                 true,
             ),
             (
                 "behind another statement",
-                "cd /tmp && bd note x-1 \"a `b`\"",
+                "cd /tmp && tracker note x-1 \"a `b`\"",
                 true,
             ),
             (
                 "an inline flag value",
-                "bd update x-1 --design=\"a `b`\"",
+                "tracker update x-1 --design=\"a `b`\"",
                 true,
             ),
             (
                 "single quotes are inert",
-                "bd note x-1 'the `date` it ran'",
+                "tracker note x-1 'the `date` it ran'",
                 false,
             ),
             (
                 "the substitution form the rewrite prescribes",
-                "bd note x-1 \"$(cat /tmp/note.txt)\"",
+                "tracker note x-1 \"$(cat /tmp/note.txt)\"",
                 false,
             ),
             (
                 "a subcommand that stores nothing",
-                "bd show \"a `b`\"",
+                "tracker show \"a `b`\"",
                 false,
             ),
             ("not the work graph at all", "echo \"a `b`\"", false),
             (
                 "an ordinary note",
-                "bd note x-1 \"nothing quoted here\"",
+                "tracker note x-1 \"nothing quoted here\"",
                 false,
             ),
         ],
@@ -258,7 +273,7 @@ fn a_status_read_behind_a_formatting_pipe_is_refused_and_a_deciding_stage_is_not
         &[
             (
                 "behind tail",
-                "bd update x-1 --claim | tail -1; echo $?",
+                "tracker update x-1 --claim | tail -1; echo $?",
                 true,
             ),
             ("behind head", "make dev | head -5; echo $?", true),
@@ -392,43 +407,51 @@ fn the_flag_that_replaces_the_notes_field_is_refused_and_the_appending_forms_are
         Class::Record,
         "notes-replace",
         &[
-            ("the flag", "bd update x-1 --notes \"new\"", true),
-            ("the inline spelling", "bd update x-1 --notes=new", true),
+            ("the flag", "tracker update x-1 --notes \"new\"", true),
+            (
+                "the inline spelling",
+                "tracker update x-1 --notes=new",
+                true,
+            ),
             (
                 "behind another statement",
-                "cd /tmp && bd update x-1 --notes n",
+                "cd /tmp && tracker update x-1 --notes n",
                 true,
             ),
             (
                 "invoked by path",
-                "/usr/local/bin/bd update x-1 --notes n",
+                "/usr/local/bin/tracker update x-1 --notes n",
                 true,
             ),
-            ("the flag before the id", "bd update --notes n x-1", true),
+            (
+                "the flag before the id",
+                "tracker update --notes n x-1",
+                true,
+            ),
             (
                 "behind an assignment",
-                "FOO=1 bd update x-1 --notes n",
+                "FOO=1 tracker update x-1 --notes n",
                 true,
             ),
             (
                 "the appending twin",
-                "bd update x-1 --append-notes \"new\"",
+                "tracker update x-1 --append-notes \"new\"",
                 false,
             ),
-            ("the append verb", "bd note x-1 \"new\"", false),
+            ("the append verb", "tracker note x-1 \"new\"", false),
             (
                 "another field entirely",
-                "bd update x-1 --status open",
+                "tracker update x-1 --status open",
                 false,
             ),
             (
                 "its own escape",
-                "FLEET_NOTES_REPLACE_OK=1 bd update x-1 --notes n",
+                "FLEET_NOTES_REPLACE_OK=1 tracker update x-1 --notes n",
                 false,
             ),
             (
                 "prose naming the rule",
-                "echo 'bd update --notes is refused'",
+                "echo 'tracker update --notes is refused'",
                 false,
             ),
         ],
@@ -443,43 +466,51 @@ fn a_write_through_the_sql_route_is_refused_and_a_read_is_not() {
         &[
             (
                 "an update",
-                "bd sql \"UPDATE issues SET status = 'open'\"",
+                "tracker sql \"UPDATE issues SET status = 'open'\"",
                 true,
             ),
-            ("a delete", "bd sql \"DELETE FROM issues\"", true),
+            ("a delete", "tracker sql \"DELETE FROM issues\"", true),
             (
                 "behind a leading comment",
-                "bd sql \"/* why */ UPDATE issues SET a = 1\"",
+                "tracker sql \"/* why */ UPDATE issues SET a = 1\"",
                 true,
             ),
             (
                 "behind a CTE",
-                "bd sql \"WITH t AS (SELECT 1) UPDATE issues SET a = 1\"",
+                "tracker sql \"WITH t AS (SELECT 1) UPDATE issues SET a = 1\"",
                 true,
             ),
             (
                 "an insert",
-                "bd sql \"INSERT INTO issues VALUES (1)\"",
+                "tracker sql \"INSERT INTO issues VALUES (1)\"",
                 true,
             ),
-            ("a drop", "bd sql \"DROP TABLE issues\"", true),
-            ("a plain read", "bd sql \"SELECT * FROM issues\"", false),
+            ("a drop", "tracker sql \"DROP TABLE issues\"", true),
+            (
+                "a plain read",
+                "tracker sql \"SELECT * FROM issues\"",
+                false,
+            ),
             (
                 "a write keyword inside a literal",
-                "bd sql \"SELECT 'UPDATE' FROM issues\"",
+                "tracker sql \"SELECT 'UPDATE' FROM issues\"",
                 false,
             ),
             (
                 "a write keyword inside a comment",
-                "bd sql \"SELECT 1 -- UPDATE later\"",
+                "tracker sql \"SELECT 1 -- UPDATE later\"",
                 false,
             ),
             (
                 "its own escape",
-                "FLEET_SQL_WRITE_OK=1 bd sql \"UPDATE issues SET a = 1\"",
+                "FLEET_SQL_WRITE_OK=1 tracker sql \"UPDATE issues SET a = 1\"",
                 false,
             ),
-            ("another subcommand", "bd update x-1 --status open", false),
+            (
+                "another subcommand",
+                "tracker update x-1 --status open",
+                false,
+            ),
         ],
     );
 }
@@ -490,49 +521,222 @@ fn an_item_named_by_its_bare_suffix_is_refused_and_a_full_id_is_not() {
         Class::Record,
         "bare-id",
         &[
-            ("in a note", "bd note x-1 \"see a1b2 for the reason\"", true),
-            ("in a comment", "bd comment x-1 \"a1b2 says so\"", true),
-            ("a child id", "bd note x-1 \"a1b2.3 says so\"", true),
             (
-                "in a close reason",
-                "bd close x-1 --reason \"fixed by a1b2\"",
+                "in a note",
+                "tracker note x-1 \"see a1b2 for the reason\"",
                 true,
             ),
-            ("in a title", "bd create \"a1b2 follow-up\"", true),
+            ("in a comment", "tracker comment x-1 \"a1b2 says so\"", true),
+            ("a child id", "tracker note x-1 \"a1b2.3 says so\"", true),
+            (
+                "in a close reason",
+                "tracker close x-1 --reason \"fixed by a1b2\"",
+                true,
+            ),
+            ("in a title", "tracker create \"a1b2 follow-up\"", true),
             (
                 "in a design field",
-                "bd update x-1 --design \"per a1b2\"",
+                "tracker update x-1 --design \"per a1b2\"",
                 true,
             ),
             (
                 "two of them",
-                "bd update x-1 --append-notes \"a1b2 and z9y8\"",
+                "tracker update x-1 --append-notes \"a1b2 and z9y8\"",
                 true,
             ),
             (
                 "the full id",
-                "bd note x-1 \"see acme-a1b2 for the reason\"",
+                "tracker note x-1 \"see acme-a1b2 for the reason\"",
                 false,
             ),
-            ("a filename", "bd note x-1 \"the file a1b2.txt\"", false),
+            (
+                "a filename",
+                "tracker note x-1 \"the file a1b2.txt\"",
+                false,
+            ),
             (
                 "a branch name",
-                "bd note x-1 \"on branch seat/fix/a1b2\"",
+                "tracker note x-1 \"on branch seat/fix/a1b2\"",
                 false,
             ),
             (
                 "ordinary prose",
-                "bd note x-1 \"nothing that looks like an id\"",
+                "tracker note x-1 \"nothing that looks like an id\"",
                 false,
             ),
-            ("a year", "bd note x-1 \"measured 2026 on the box\"", false),
+            (
+                "a year",
+                "tracker note x-1 \"measured 2026 on the box\"",
+                false,
+            ),
             (
                 "its own escape",
-                "FLEET_BARE_ID_OK=1 bd note x-1 \"see a1b2\"",
+                "FLEET_BARE_ID_OK=1 tracker note x-1 \"see a1b2\"",
                 false,
             ),
-            ("not a guarded surface", "bd show a1b2", false),
+            ("not a guarded surface", "tracker show a1b2", false),
         ],
+    );
+}
+
+/// An entry is written by the verb that owns its act, never by hand: a comment
+/// whose text carries the entry key, or whose text the guard cannot read
+/// because it comes from a file or the input, is refused, and a person's own
+/// words pass.
+#[test]
+fn an_entry_written_by_hand_is_refused_and_a_persons_comment_is_not() {
+    run(
+        Class::Record,
+        "entry-forge",
+        &[
+            (
+                "a forged entry",
+                r#"tracker comments add fx-1 '{"fleet.entry":1,"kind":"landed"}'"#,
+                true,
+            ),
+            (
+                "double-quoted",
+                r#"tracker comments add fx-1 "{\"fleet.entry\":1,\"kind\":\"held\"}""#,
+                true,
+            ),
+            (
+                "the key anywhere in the text",
+                "tracker comments add fx-1 'see fleet.entry'",
+                true,
+            ),
+            (
+                "the text behind a flag",
+                r#"tracker comments add fx-1 --author a-seat '{"fleet.entry":1}'"#,
+                true,
+            ),
+            (
+                "from a file",
+                "tracker comments add fx-1 -f entry.json",
+                true,
+            ),
+            (
+                "from a file, the long flag",
+                "tracker comments add fx-1 --file entry.json",
+                true,
+            ),
+            (
+                "from a file, the inline spelling",
+                "tracker comments add fx-1 --file=entry.json",
+                true,
+            ),
+            (
+                "from a file, the value attached",
+                "tracker comments add fx-1 -fentry.json",
+                true,
+            ),
+            (
+                "the shorthand verb",
+                r#"tracker comment fx-1 '{"fleet.entry":1,"kind":"landed"}'"#,
+                true,
+            ),
+            (
+                "the shorthand from a file",
+                "tracker comment fx-1 --file entry.json",
+                true,
+            ),
+            (
+                "the shorthand from its input",
+                "tracker comment fx-1 --stdin < entry.json",
+                true,
+            ),
+            (
+                "behind another statement",
+                r#"cd /tmp && tracker comments add fx-1 '{"fleet.entry":1}'"#,
+                true,
+            ),
+            (
+                "invoked by path",
+                r#"/usr/local/bin/tracker comments add fx-1 '{"fleet.entry":1}'"#,
+                true,
+            ),
+            (
+                "a person's comment",
+                r#"tracker comments add fx-1 "looks good""#,
+                false,
+            ),
+            (
+                "a person's comment, unquoted",
+                "tracker comments add fx-1 looks good",
+                false,
+            ),
+            (
+                "a person's comment with an author",
+                r#"tracker comments add fx-1 "looks good" --author alberto"#,
+                false,
+            ),
+            (
+                "the shorthand's own",
+                r#"tracker comment fx-1 "looks good""#,
+                false,
+            ),
+            ("the listing", "tracker comments fx-1 --json", false),
+            (
+                "the listing, read for entries",
+                "tracker comments fx-1 --json | grep fleet.entry",
+                false,
+            ),
+            (
+                "a note naming the key",
+                r#"tracker note fx-1 "the fleet.entry key""#,
+                false,
+            ),
+            (
+                "its own escape",
+                r#"FLEET_ENTRY_FORGE_OK=1 tracker comments add fx-1 '{"fleet.entry":1}'"#,
+                false,
+            ),
+            (
+                "prose naming the rule",
+                r#"echo 'tracker comments add fx-1 {"fleet.entry":1}'"#,
+                false,
+            ),
+        ],
+    );
+}
+
+/// AC3 as it is worded: the forged comment is denied with the rewrite, a
+/// person's comment passes, and the flag that replaces the notes field is
+/// still refused, its reason restated — the field is a person's words, and
+/// fleet writes none.
+#[test]
+fn a_forged_entry_is_denied_with_the_rewrite_and_the_notes_flag_names_a_persons_words() {
+    let denial = refused(
+        Class::Record,
+        r#"tracker comments add fx-1 '{"fleet.entry":1,"kind":"landed"}'"#,
+    )
+    .expect("the forged entry is denied");
+    assert_eq!(denial.class, "record");
+    assert_eq!(denial.check, "entry-forge");
+    assert_eq!(denial.label, "ENTRY FORGED");
+    assert_eq!(
+        denial.rewrite,
+        "record through the verb that owns the act: fleet \
+         dispatch|deliver|review|hold|clear|land|cancel"
+    );
+    assert_eq!(
+        denial.why,
+        "an entry is the record every verb decides from; one written by hand skips the checks \
+         its verb makes before it writes"
+    );
+
+    assert_eq!(
+        verdict(Class::Record, r#"tracker comments add fx-1 "looks good""#),
+        Verdict::Silent,
+        "a person's comment passes"
+    );
+
+    let denial =
+        refused(Class::Record, "tracker update fx-1 --notes x").expect("the replacement is denied");
+    assert_eq!(denial.check, "notes-replace");
+    assert_eq!(
+        denial.why,
+        "this flag REPLACES the whole notes field, which is a person's own words on the item and \
+         not recoverable from the write itself"
     );
 }
 
@@ -601,12 +805,12 @@ fn a_push_whose_destination_matches_the_glob_is_refused_and_every_other_push_is_
             ),
             (
                 "a release ref inside a heredoc body",
-                "bd note x-1 \"$(cat <<'EOF'\ngit push origin release/1.2\nEOF\n)\"",
+                "tracker note x-1 \"$(cat <<'EOF'\ngit push origin release/1.2\nEOF\n)\"",
                 false,
             ),
             (
                 "a release ref inside a stored note",
-                "bd note x-1 \"never git push origin release/1.2 from a seat\"",
+                "tracker note x-1 \"never git push origin release/1.2 from a seat\"",
                 false,
             ),
         ],
@@ -934,16 +1138,20 @@ fn the_two_readings_the_caller_hands_in_refuse_only_when_what_they_name_is_liste
     );
 }
 
-/// R16, at the level the class itself answers it: a target that is absent or
-/// empty leaves its check refusing nothing, and the reader that the check flag
-/// prints from agrees with the judgment rather than restating it.
+/// An unconfigured target, at the level the class itself answers it: a target
+/// that is absent or empty leaves its check refusing nothing, and the reader
+/// that the check flag prints from agrees with the judgment rather than
+/// restating it.
 #[test]
 fn an_unconfigured_target_refuses_nothing_and_the_reader_says_so() {
     let empty = Policy {
-        release_ref_glob: None,
-        prod_buckets: Vec::new(),
-        prod_projects: Vec::new(),
-        prod_apps: Vec::new(),
+        targets: Targets {
+            release_ref_glob: None,
+            prod_buckets: Vec::new(),
+            prod_projects: Vec::new(),
+            prod_apps: Vec::new(),
+            ..policy().targets
+        },
         ..policy()
     };
     for command in [
@@ -967,7 +1175,10 @@ fn an_unconfigured_target_refuses_nothing_and_the_reader_says_so() {
     // A glob written and left blank is a key nobody filled in, not a pattern
     // that matches the empty ref.
     let blank = Policy {
-        release_ref_glob: Some(String::new()),
+        targets: Targets {
+            release_ref_glob: Some(String::new()),
+            ..policy().targets
+        },
         ..policy()
     };
     assert_eq!(
@@ -997,8 +1208,9 @@ fn an_unconfigured_target_refuses_nothing_and_the_reader_says_so() {
     }
 
     // The targets, off a file's text, through the census.
-    let text = "[gates]\nrelease_ref_glob = \"refs/heads/*\"\nprod_buckets = [\"a\", \"b\"]\n";
-    let targets = guard::targets_in(text);
+    let text =
+        "[guards.targets]\nrelease_ref_glob = \"refs/heads/*\"\nprod_buckets = [\"a\", \"b\"]\n";
+    let targets = guard::policy_in(Class::ProductionWrite, text).targets;
     assert_eq!(targets.release_ref_glob.as_deref(), Some("refs/heads/*"));
     assert_eq!(targets.prod_buckets, vec!["a".to_string(), "b".to_string()]);
     assert!(
@@ -1006,7 +1218,12 @@ fn an_unconfigured_target_refuses_nothing_and_the_reader_says_so() {
         "a key the file omits reads as the empty list"
     );
     assert_eq!(
-        guard::targets_in("[gates]\nprod_apps = \"one\"\n").prod_apps,
+        guard::policy_in(
+            Class::ProductionWrite,
+            "[guards.targets]\nprod_apps = \"one\"\n"
+        )
+        .targets
+        .prod_apps,
         Vec::<String>::new(),
         "a value of the wrong type reads as no target rather than as one"
     );
@@ -1017,14 +1234,71 @@ fn an_unconfigured_target_refuses_nothing_and_the_reader_says_so() {
     );
 }
 
+/// The policy a project's file carries, off ONE parse of its text: the class's
+/// switch, the item prefix and every target, each field written out here as the
+/// value the file says, and the rest the default. A file that does not parse
+/// reads as an empty table, which is the default policy whole.
+#[test]
+fn a_files_policy_is_read_off_one_parse_and_an_unparsable_file_is_the_default() {
+    let text = "[project]\nitem_prefix = \"acme\"\n\n\
+                [guards]\nproduction-write.enabled = false\n\n\
+                [guards.targets]\n\
+                release_ref_glob = \"refs/heads/*release/*\"\n\
+                prod_buckets = [\"live.example.test\"]\n\
+                prod_projects = [\"example-production\"]\n\
+                prod_apps = [\"example-frontdoor\"]\n\
+                prod_make_goals = [\"ship-it\"]\n\
+                prod_dagger_functions = [\"deployExecute\"]\n\
+                prod_workflow_refs = [\"pipeline.yml:backend/release/*\"]\n";
+    assert_eq!(
+        guard::policy_in(Class::ProductionWrite, text),
+        Policy {
+            enabled: false,
+            item_prefix: Some("acme".to_string()),
+            targets: Targets {
+                release_ref_glob: Some("refs/heads/*release/*".to_string()),
+                prod_buckets: vec!["live.example.test".to_string()],
+                prod_projects: vec!["example-production".to_string()],
+                prod_apps: vec!["example-frontdoor".to_string()],
+                prod_make_goals: vec!["ship-it".to_string()],
+                prod_dagger_functions: vec!["deployExecute".to_string()],
+                prod_workflow_refs: vec!["pipeline.yml:backend/release/*".to_string()],
+            },
+            cwd_app: None,
+            active_project: None,
+            cli: Some("bd".to_string()),
+        },
+        "every field the file names, read off the one table"
+    );
+    for class in guard::CLASSES {
+        assert_eq!(
+            guard::policy_in(class, "this is not toml at all ["),
+            Policy::default(),
+            "an unparsable file is the default policy — {}",
+            class.name()
+        );
+    }
+}
+
+/// A class reads back from the name it spells and from nothing else: the
+/// underscore spelling and the empty name are not classes.
+#[test]
+fn a_class_parses_from_its_own_name_alone() {
+    for class in guard::CLASSES {
+        assert_eq!(Class::parse(class.name()), Some(class), "{}", class.name());
+    }
+    assert_eq!(Class::parse("shell_trap"), None);
+    assert_eq!(Class::parse(""), None);
+}
+
 // ---- the two halves of the refusal ------------------------------------------
 
 /// One specimen per check, which the tables above have already proved refused.
-const SPECIMENS: [(Class, &str, &str); 12] = [
+const SPECIMENS: [(Class, &str, &str); 13] = [
     (
         Class::ShellTrap,
         "record-backtick",
-        "bd note x-1 \"the `date` it ran\"",
+        "tracker note x-1 \"the `date` it ran\"",
     ),
     (Class::ShellTrap, "modifier", "git show \"$S:tools/land\""),
     (
@@ -1038,13 +1312,22 @@ const SPECIMENS: [(Class, &str, &str); 12] = [
         "false-alternative",
         "grep -q x f && echo FOUND || echo MISSING",
     ),
-    (Class::Record, "notes-replace", "bd update x-1 --notes n"),
+    (
+        Class::Record,
+        "notes-replace",
+        "tracker update x-1 --notes n",
+    ),
     (
         Class::Record,
         "sql-write",
-        "bd sql \"UPDATE issues SET a = 1\"",
+        "tracker sql \"UPDATE issues SET a = 1\"",
     ),
-    (Class::Record, "bare-id", "bd note x-1 \"see a1b2\""),
+    (Class::Record, "bare-id", "tracker note x-1 \"see a1b2\""),
+    (
+        Class::Record,
+        "entry-forge",
+        "tracker comments add x-1 '{\"fleet.entry\":1,\"kind\":\"landed\"}'",
+    ),
     (
         Class::ReleaseRef,
         "push-target",
@@ -1098,12 +1381,12 @@ fn every_refusal_names_the_fragment_the_rewrite_and_the_escape() {
     }
 }
 
-/// The five escapes against the five acts that have one. Each licenses the act
+/// The six escapes against the six acts that have one. Each licenses the act
 /// it names and nothing else, so a session that meant to replace one field is
 /// not also issuing SQL writes on the strength of the same prefix.
 #[test]
 fn each_escape_licenses_its_own_act_and_no_other() {
-    let acts: [(Class, &str, &str, &str); 5] = [
+    let acts: [(Class, &str, &str, &str); 6] = [
         (
             Class::ShellTrap,
             "a shell trap",
@@ -1113,20 +1396,26 @@ fn each_escape_licenses_its_own_act_and_no_other() {
         (
             Class::Record,
             "a notes replacement",
-            "bd update x-1 --notes n",
+            "tracker update x-1 --notes n",
             guard::ESCAPE_NOTES_REPLACE,
         ),
         (
             Class::Record,
             "a SQL write",
-            "bd sql \"UPDATE issues SET a = 1\"",
+            "tracker sql \"UPDATE issues SET a = 1\"",
             guard::ESCAPE_SQL_WRITE,
         ),
         (
             Class::Record,
             "a bare id",
-            "bd note x-1 \"see a1b2\"",
+            "tracker note x-1 \"see a1b2\"",
             guard::ESCAPE_BARE_ID,
+        ),
+        (
+            Class::Record,
+            "an entry written by hand",
+            "tracker comments add x-1 '{\"fleet.entry\":1,\"kind\":\"landed\"}'",
+            guard::ESCAPE_ENTRY_FORGE,
         ),
         (
             Class::ProductionWrite,
@@ -1140,6 +1429,7 @@ fn each_escape_licenses_its_own_act_and_no_other() {
         guard::ESCAPE_NOTES_REPLACE,
         guard::ESCAPE_SQL_WRITE,
         guard::ESCAPE_BARE_ID,
+        guard::ESCAPE_ENTRY_FORGE,
         guard::ESCAPE_PROD_WRITE,
     ];
 
@@ -1154,8 +1444,9 @@ fn each_escape_licenses_its_own_act_and_no_other() {
             );
         }
 
-        // The sixth act has no escape at all, so NO leading assignment licenses
-        // it — not the five above, and not a variable named for the act itself.
+        // The seventh act has no escape at all, so NO leading assignment
+        // licenses it — not the six above, and not a variable named for the act
+        // itself.
         let push = format!("{escape}=1 git push origin release/1.2");
         assert!(
             refused(Class::ReleaseRef, &push).is_some(),
@@ -1194,7 +1485,7 @@ fn a_class_switched_off_refuses_nothing_and_an_absent_table_leaves_it_on() {
     };
     for (class, command) in [
         (Class::ShellTrap, "git show \"$S:tools/land\""),
-        (Class::Record, "bd update x-1 --notes n"),
+        (Class::Record, "tracker update x-1 --notes n"),
         (Class::ReleaseRef, "git push origin release/1.2"),
         (Class::ProductionWrite, "gsutil rm gs://live.example.test/x"),
     ] {
@@ -1260,23 +1551,30 @@ fn the_bare_id_check_refuses_nothing_until_its_target_is_configured() {
         ..policy()
     };
     assert_eq!(
-        guard::judge(Class::Record, "bd note x-1 \"see a1b2\"", &unconfigured),
+        guard::judge(
+            Class::Record,
+            "tracker note x-1 \"see a1b2\"",
+            &unconfigured
+        ),
         Verdict::Silent,
         "no item prefix, nothing to name an id by, nothing refused"
     );
     // The other two checks of the same class have no target and still refuse.
     assert!(
         matches!(
-            guard::judge(Class::Record, "bd update x-1 --notes n", &unconfigured),
+            guard::judge(Class::Record, "tracker update x-1 --notes n", &unconfigured),
             Verdict::Refused(_)
         ),
         "a check with no target is always configured"
     );
     assert_eq!(
-        guard::item_prefix_in("[project]\nitem_prefix = \"acme\"\n"),
+        guard::policy_in(Class::Record, "[project]\nitem_prefix = \"acme\"\n").item_prefix,
         Some("acme".to_string())
     );
-    assert_eq!(guard::item_prefix_in("[project]\nname = \"x\"\n"), None);
+    assert_eq!(
+        guard::policy_in(Class::Record, "[project]\nname = \"x\"\n").item_prefix,
+        None
+    );
 
     assert_eq!(
         Class::Record.target_of("bare-id"),
@@ -1289,6 +1587,124 @@ fn the_bare_id_check_refuses_nothing_until_its_target_is_configured() {
             None,
             "{check} has no target and is always configured"
         );
+    }
+}
+
+/// The store's command is the one policed: a store declaring `tk` has `tk`'s
+/// calls judged and its rewrite printed in `tk`'s word, and `tracker` is then a
+/// command like any other. A store declaring none has no call judged by the
+/// checks that read one, and the checks that read none still refuse.
+///
+/// RED-PROOF: with the command word fixed at `tracker`, the `tk` rows below are
+/// let through and the `tracker` rows refused.
+#[test]
+fn the_command_the_store_declares_is_the_one_policed_and_a_store_declaring_none_has_none() {
+    let tk = Policy {
+        cli: Some(String::from("tk")),
+        ..policy()
+    };
+    for (command, check) in [
+        ("tk update x-1 --notes n", "notes-replace"),
+        ("/opt/tk/bin/tk update x-1 --notes n", "notes-replace"),
+        ("tk sql \"UPDATE issues SET a = 1\"", "sql-write"),
+        ("tk note x-1 \"see a1b2\"", "bare-id"),
+        (
+            "tk comment x-1 '{\"fleet.entry\":1,\"kind\":\"landed\"}'",
+            "entry-forge",
+        ),
+    ] {
+        let Verdict::Refused(denial) = guard::judge(Class::Record, command, &tk) else {
+            panic!("{command} is a call of the store's own command, and refused");
+        };
+        assert_eq!(denial.check, check, "{command}");
+    }
+    let Verdict::Refused(denial) = guard::judge(Class::Record, "tk update x-1 --notes n", &tk)
+    else {
+        panic!("the notes flag is refused");
+    };
+    assert!(
+        denial
+            .rewrite
+            .contains("`tk note <id> <text>`, or `tk update <id> --append-notes <text>`"),
+        "the rewrite is in the store's own word: {}",
+        denial.rewrite
+    );
+    assert!(
+        matches!(
+            guard::judge(Class::ShellTrap, "tk note x-1 \"a `b` c\"", &tk),
+            Verdict::Refused(_)
+        ),
+        "the backtick is read in the store's own command's text"
+    );
+    for (class, command) in [
+        (Class::Record, "tracker update x-1 --notes n"),
+        (Class::Record, "tracker sql \"UPDATE issues SET a = 1\""),
+        (Class::ShellTrap, "tracker note x-1 \"a `b` c\""),
+    ] {
+        assert_eq!(
+            guard::judge(class, command, &tk),
+            Verdict::Silent,
+            "{command} calls no command the store declares"
+        );
+    }
+
+    let none = Policy {
+        cli: None,
+        ..policy()
+    };
+    for (class, command) in [
+        (Class::Record, "tracker update x-1 --notes n"),
+        (Class::Record, "tracker sql \"UPDATE issues SET a = 1\""),
+        (Class::Record, "tracker note x-1 \"see a1b2\""),
+        (Class::Record, "tracker update x-1 --notes \"unclosed"),
+        (Class::ShellTrap, "tracker note x-1 \"a `b` c\""),
+    ] {
+        assert_eq!(
+            guard::judge(class, command, &none),
+            Verdict::Silent,
+            "{command}: a store declaring no command has no call judged"
+        );
+    }
+    // THE CONTROL: a check that reads no store call still refuses.
+    assert!(matches!(
+        guard::judge(Class::ShellTrap, "git show \"$S:tools/land\"", &none),
+        Verdict::Refused(_)
+    ));
+
+    // THE DEFAULT is the default store adapter's name, which a caller that cannot
+    // read the declaration keeps.
+    assert_eq!(
+        Policy::default().cli.as_deref(),
+        Some(fleet_core::store::DEFAULT_ADAPTER)
+    );
+}
+
+/// A text with no subcommand word any check reads a store call by is judged
+/// the same whatever the store declares, so a caller asks the store only for
+/// the text this answers yes to.
+#[test]
+fn a_text_naming_no_store_subcommand_needs_no_declaration() {
+    for command in [
+        "tracker update x-1 --notes n",
+        "tk sql \"SELECT 1\"",
+        "tracker note x-1 t",
+        "tracker comments add x-1 t",
+        "tracker create --title t",
+        "tracker close x-1",
+    ] {
+        assert!(guard::reads_the_cli(command), "{command}");
+    }
+    for command in ["cargo build", "git status", "tracker show x-1", "ls -la"] {
+        assert!(!guard::reads_the_cli(command), "{command}");
+        for cli in [None, Some("tracker"), Some("tk")] {
+            for class in [Class::Record, Class::ShellTrap] {
+                let asked = Policy {
+                    cli: cli.map(str::to_string),
+                    ..policy()
+                };
+                assert_eq!(guard::judge(class, command, &asked), Verdict::Silent);
+            }
+        }
     }
 }
 
@@ -1332,8 +1748,8 @@ fn a_listed_build_goal_is_refused_and_a_dry_run_and_an_unlisted_goal_are_not() {
             // A conditional spelling IS an assignment, so it becomes the last
             // one — but only the exact escape is the escape, because `dry?=1`
             // sets the variable just when it is unset and the goal may still
-            // run for real. The reference reads it the same way, at
-            // .claude/hooks/prod-write-guard.py MAKE_DRY_ASSIGNMENT.
+            // run for real. The reference reads it the same way, at its
+            // prod-write guard's MAKE_DRY_ASSIGNMENT.
             (
                 "a conditional dry assignment is not the escape",
                 "make ship-it dry?=1",
@@ -1495,14 +1911,16 @@ type ListCase = (&'static str, &'static str, fn(&mut Policy));
 #[test]
 fn an_undeclared_product_list_disables_its_own_check_and_no_other() {
     let cases: [ListCase; 3] = [
-        ("make-goal", "make ship-it", |p| p.prod_make_goals.clear()),
+        ("make-goal", "make ship-it", |p| {
+            p.targets.prod_make_goals.clear()
+        }),
         ("module-function", "dagger call deployExecute", |p| {
-            p.prod_dagger_functions.clear()
+            p.targets.prod_dagger_functions.clear()
         }),
         (
             "workflow-ref",
             "gh workflow run pipeline.yml --ref backend/release/2.7",
-            |p| p.prod_workflow_refs.clear(),
+            |p| p.targets.prod_workflow_refs.clear(),
         ),
     ];
     for (check, command, clear) in cases {
@@ -1539,7 +1957,7 @@ fn an_undeclared_product_list_disables_its_own_check_and_no_other() {
 fn text_the_reader_cannot_read_allows_the_shell_trap_class_and_denies_the_two_that_fail_closed() {
     // An unterminated quote: the reader answers that it could not read this,
     // and the classes answer that differently on purpose.
-    let unreadable = "bd update x-1 --notes \"a quote that never closes";
+    let unreadable = "tracker update x-1 --notes \"a quote that never closes";
     assert_eq!(
         guard::judge(Class::ShellTrap, unreadable, &policy()),
         Verdict::Silent,
@@ -1554,7 +1972,7 @@ fn text_the_reader_cannot_read_allows_the_shell_trap_class_and_denies_the_two_th
         denial.label
     );
 
-    let sql = "bd sql \"UPDATE issues SET a = 'unterminated";
+    let sql = "tracker sql \"UPDATE issues SET a = 'unterminated";
     let denial = refused(Class::Record, sql).expect("the SQL route falls back too");
     assert_eq!(denial.check, "sql-write");
 
@@ -1563,7 +1981,7 @@ fn text_the_reader_cannot_read_allows_the_shell_trap_class_and_denies_the_two_th
     assert_eq!(
         guard::judge(
             Class::Record,
-            "echo \"never run bd update --notes on a record",
+            "echo \"never run tracker update --notes on a record",
             &policy()
         ),
         Verdict::Silent,
@@ -1576,11 +1994,22 @@ fn text_the_reader_cannot_read_allows_the_shell_trap_class_and_denies_the_two_th
     assert_eq!(
         guard::judge(
             Class::Record,
-            "FLEET_NOTES_REPLACE_OK=1 bd note x-1 \"see a1b2 and an unterminated quote",
+            "FLEET_NOTES_REPLACE_OK=1 tracker note x-1 \"see a1b2 and an unterminated quote",
             &policy()
         ),
         Verdict::Silent,
         "the bare-id check reads nothing it could not lex"
+    );
+    // Nor has the entry-forge check: a forged entry whose quote never closes
+    // is a command the shell will not run either, and it allows.
+    assert_eq!(
+        guard::judge(
+            Class::Record,
+            "tracker comments add x-1 '{\"fleet.entry\":1,\"kind\":\"landed\"}",
+            &policy()
+        ),
+        Verdict::Silent,
+        "the entry-forge check reads nothing it could not lex"
     );
 }
 
@@ -1691,7 +2120,7 @@ fn text_the_reader_cannot_read_falls_back_to_the_listed_entries_on_production_wr
 fn a_heredoc_body_is_skipped_rather_than_read_as_commands() {
     // The form every seat is told to write stored text through. Its body names
     // three of the traps and none of them is this command's.
-    let command = "bd note x-1 \"$(cat <<'EOF'\n\
+    let command = "tracker note x-1 \"$(cat <<'EOF'\n\
                    for x in $LIST; do echo hi; done\n\
                    git show \"$S:tools/land\"\n\
                    EOF\n\

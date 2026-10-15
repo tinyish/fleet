@@ -146,47 +146,206 @@ fn the_dependency_list_core_was_read_from_is_populated() {
     );
 }
 
-/// The run lifecycle's vocabulary is spelled in two crates and is one fact.
-///
-/// The controller crate depends on no other member of this workspace, so the
-/// six kinds its run pass folds and writes, and the environment variable a run's
-/// children carry, are spelled there as well as in core. This is the one member
-/// that can see both, which makes it the place the two spellings are held to one
-/// string — a kind spelled twice is two kinds, and a fold that met the second
-/// would report a stream with no runs in it.
+/// The stream kinds the verbs wrote before every entry was one signal —
+/// retired, and spelled nowhere a writer or a reader of the stream lives: no
+/// string literal in core, the binary or the controller. A line of one of them
+/// now would be a kind nothing reads. The SDK a workflow runs on is held to
+/// the same list by its own suite, in the fleet-packs repository.
 #[test]
-fn the_run_vocabulary_is_one_string_in_both_crates() {
-    use fleet_controller::runs;
-    use fleet_core::item;
-
-    for (controller, core) in [
-        (runs::RUN_STARTED, item::RUN_STARTED),
-        (runs::RUN_CLOSED, item::RUN_CLOSED),
-        (runs::RUN_FAILED, item::RUN_FAILED),
-        (runs::RUN_WAITING, item::RUN_WAITING),
-        (runs::RUN_COULD_NOT_TELL, item::RUN_COULD_NOT_TELL),
-        (runs::RUN_CLEANED, item::RUN_CLEANED),
-        (runs::ITEM_PARKED, item::ITEM_PARKED),
-        (runs::ENV_RUN_ID, item::run::ENV_RUN_ID),
-    ] {
-        assert_eq!(
-            controller, core,
-            "the controller's spelling and core's are one string"
+fn no_source_spells_a_retired_item_kind() {
+    const RETIRED: [&str; 7] = [
+        "item.delivered",
+        "item.reviewed",
+        "item.returned",
+        "item.landed",
+        "item.dispatched",
+        "item.held",
+        "hold.cleared",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the cli crate sits inside the workspace");
+    let grep = |needle: &str, paths: &[&str]| -> Vec<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["grep", "-n", "-F", "-e", needle, "--"])
+            .args(paths)
+            .output()
+            .expect("git grep runs");
+        // 0 is found and 1 is found nothing; anything else is git failing,
+        // which would read as a clean tree.
+        assert!(
+            matches!(out.status.code(), Some(0 | 1)),
+            "git grep answers: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let rust = ["core/src", "cli/src", "controller/src"];
+
+    // THE CONTROL: the kind that replaced them is found, as a literal, by the
+    // same search — so an empty answer below is the tree's and not the
+    // search's.
+    assert!(
+        !grep("\"item.entry\"", &rust).is_empty(),
+        "core and the controller spell item.entry"
+    );
+
+    let mut found: Vec<String> = Vec::new();
+    for kind in RETIRED {
+        found.extend(grep(&format!("\"{kind}\""), &rust));
     }
+    assert!(found.is_empty(), "retired kinds spelled: {found:#?}");
 }
 
-/// And the run's crash cap has one default, for the same reason: the controller
-/// reads `[core.run] max_crashes` off the policy in force and core's own reader
-/// answers the same key.
+/// Fleet reads and writes no notes: the marker grammar, the store's note write
+/// and its text rendering, and the item's notes field are spelled nowhere in
+/// core, the binary or the controller. The notes field is a person's.
+///
+/// `\b` is not a word boundary to every `git grep -E` — the one on macOS reads
+/// it as a literal `b` and answers nothing — so the boundary after `.notes` is
+/// spelled as the character class it stands for.
 #[test]
-fn the_run_crash_cap_has_one_default_in_both_crates() {
-    assert_eq!(
-        fleet_controller::policy::DEFAULT_RUN_MAX_CRASHES,
-        fleet_core::item::run::MAX_CRASHES,
-        "a fleet naming no cap gets the same number whichever crate answers"
+fn no_source_reads_or_writes_a_note() {
+    const RETIRED: &str = "last_region|opens_with|marker_block|label_value|show_text|\
+                           fn note\\(|\\.notes([^A-Za-z0-9_]|$)";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the cli crate sits inside the workspace");
+    let grep = |pattern: &str, paths: &[&str]| -> Vec<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["grep", "-n", "-E", "-e", pattern, "--"])
+            .args(paths)
+            .output()
+            .expect("git grep runs");
+        // 0 is found and 1 is found nothing; anything else is git failing,
+        // which would read as a clean tree.
+        assert!(
+            matches!(out.status.code(), Some(0 | 1)),
+            "git grep answers: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let rust = ["core/src", "cli/src", "controller/src"];
+
+    // THE CONTROL: the same search over this file finds the field's spelling
+    // in the doc comment above — the line a `\b` read as a literal misses — so
+    // an empty answer below is the tree's and not the search's.
+    let here = ["cli/tests/workspace.rs"];
+    assert!(
+        grep(RETIRED, &here)
+            .iter()
+            .any(|line| line.contains("so the boundary after")),
+        "the search finds `.notes` followed by a boundary: {:#?}",
+        grep(RETIRED, &here)
     );
-    assert_eq!(fleet_core::item::run::MAX_CRASHES, 2);
+
+    let found = grep(RETIRED, &rust);
+    assert!(found.is_empty(), "the note plumbing is spelled: {found:#?}");
+}
+
+/// The one agent that ever lived in this repository is a pack now, and the
+/// product's own paths — core, the binary, the controller and the docs —
+/// name it only as the claude-code pack. The search is the flight's own
+/// command, run exactly: every line of those four trees naming the agent,
+/// case aside, less the four kinds of line allowed to.
+///
+/// 1. `lessons claude-code D4` and its like, a letter and a number: a comment
+///    citing an entry that stayed in brain's file when the pack's own moved.
+/// 2. `.claude/skills/`: this repository's own development harness, which
+///    `docs/README.md` names, and not the agent a fleet runs.
+/// 3. `DEFAULT_AGENT_ADAPTER`: the one constant spelling the claude-code
+///    pack's adapter name, which the create menu, the file it writes and the
+///    suites all read rather than spell.
+/// 4. prose naming the claude-code pack, which is every other line allowed.
+///
+/// Any other line is refused, by file and line. README.md and CONTRIBUTING.md
+/// are this repository's, not the product's, and stand outside the search.
+///
+/// The arm's own name leaves the agent's out: a name spelling it would be a
+/// line of `cli/` this very search refuses.
+#[test]
+fn no_source_names_the_agent_except_as_its_pack() {
+    const NEEDLE: &str = "claude"; // the claude-code pack's agent, by the word
+    const ALLOWED: &str =
+        "lessons claude-code [A-D][0-9]+|.claude/skills/|DEFAULT_AGENT_ADAPTER|claude-code pack";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the cli crate sits inside the workspace");
+    // `grep -v` over `input`, as the pipe's second half runs: 1 is every line
+    // filtered out, and anything past it is grep failing, which would read as
+    // a clean tree.
+    let unallowed = |input: &str| -> Vec<String> {
+        let mut filter = Command::new("grep")
+            .args(["-v", "-i", "-E", ALLOWED])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("grep runs");
+        std::io::Write::write_all(
+            &mut filter.stdin.take().expect("grep's stdin is piped"),
+            input.as_bytes(),
+        )
+        .expect("grep takes the lines");
+        let out = filter.wait_with_output().expect("grep answers");
+        assert!(
+            matches!(out.status.code(), Some(0 | 1)),
+            "grep answers: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["grep", "-n", "-i", NEEDLE, "--"])
+        .args(["core", "cli", "controller", "docs"])
+        .output()
+        .expect("git grep runs");
+    // 0 is found and 1 is found nothing; anything else is git failing.
+    assert!(
+        matches!(out.status.code(), Some(0 | 1)),
+        "git grep answers: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let found = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // THE CONTROLS: the search finds the one allowed constant, so an empty
+    // answer below is the filter's and not the search's; and a line naming
+    // the agent in prose alone gets through the filter, so the filter is not
+    // one that lets nothing through.
+    assert!(
+        found
+            .lines()
+            .any(|line| line.contains("pub const DEFAULT_AGENT_ADAPTER")),
+        "the search finds the default adapter's one spelling"
+    );
+    let planted = format!("docs/planted.md:1:{NEEDLE} in prose\n");
+    assert_eq!(
+        unallowed(&planted),
+        vec![planted.trim_end().to_string()],
+        "the filter keeps a line it does not allow"
+    );
+
+    let named = unallowed(&found);
+    assert!(
+        named.is_empty(),
+        "named outside the claude-code pack: {named:#?}"
+    );
 }
 
 /// `run.cleaned` declares the keys it carries, where the four rows of the exit

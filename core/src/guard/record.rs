@@ -1,21 +1,27 @@
-//! The record class: three checks over one command's text.
+//! The record class: four checks over one command's text.
 //!
 //! The record is the work item, so what this class refuses is a write that
-//! destroys one, reaches one with no audit row, or leaves one a later reader
-//! cannot resolve. Two of the three FAIL CLOSED — a command the reader cannot
-//! read still reaches an invocation-shaped text match, and it denies — because
-//! a destroyed field is unrecoverable and a direct SQL write leaves nothing
-//! behind to find it by. The third has no fallback: it is a legibility layer
-//! over the record rather than its survival, and over-refusing there would
-//! block every note in the fleet.
+//! destroys one, reaches one with no audit row, puts an entry on one that no
+//! verb wrote, or leaves one a later reader cannot resolve. Two of the four
+//! FAIL CLOSED — a command the reader cannot read still reaches an
+//! invocation-shaped text match, and it denies — because a destroyed field is
+//! unrecoverable and a direct SQL write leaves nothing behind to find it by.
+//! The other two have no fallback. The entry check reads the text of a
+//! comment, and a command whose quoting the reader cannot close is one the
+//! shell will not run either. The bare-id check is a legibility layer over the
+//! record rather than its survival, and over-refusing there would block every
+//! note in the fleet.
 
-use super::lex::{basename, command_words, is_assignment, lex, statements, unquote, Token};
+use super::lex::{basename, command_words, lex, raw_invocations, statements, unquote, Token};
 use super::{
     leading_escape, subcommand_of, text_arguments, Denial, Policy, ESCAPE_BARE_ID,
-    ESCAPE_NOTES_REPLACE, ESCAPE_SQL_WRITE, WORK_GRAPH,
+    ESCAPE_ENTRY_FORGE, ESCAPE_NOTES_REPLACE, ESCAPE_SQL_WRITE,
 };
+use crate::entry;
 
-pub const CHECKS: [&str; 3] = ["notes-replace", "sql-write", "bare-id"];
+/// In the order the class runs them. The one legibility check is last, so an
+/// entry written by hand is refused as that before any id in it is read.
+pub const CHECKS: [&str; 4] = ["notes-replace", "sql-write", "entry-forge", "bare-id"];
 
 /// The statement's first keyword decides, so a mention of one inside a literal,
 /// a backtick identifier or a comment is not a write. A denylist: a statement
@@ -25,18 +31,21 @@ const SQL_WRITE_KEYWORDS: [&str; 7] = [
 ];
 
 pub fn judge(command: &str, policy: &Policy) -> Option<Denial> {
+    // Every check reads a call of the store's own command, so a store that
+    // declares none has no call here to refuse.
+    let cli = policy.cli.as_deref()?;
     let tokens = lex(command);
 
     if !leading_escape(command, ESCAPE_NOTES_REPLACE) {
         match &tokens {
             Ok(tokens) => {
-                if let Some(flag) = notes_replace(tokens) {
-                    return Some(notes_denial(flag, false));
+                if let Some(flag) = notes_replace(tokens, cli) {
+                    return Some(notes_denial(flag, false, cli));
                 }
             }
             Err(_) => {
-                if raw_invocation(command, "update", &["--notes"]) {
-                    return Some(notes_denial("--notes".to_string(), true));
+                if raw_invocation(command, cli, "update", &["--notes"]) {
+                    return Some(notes_denial("--notes".to_string(), true, cli));
                 }
             }
         }
@@ -45,14 +54,24 @@ pub fn judge(command: &str, policy: &Policy) -> Option<Denial> {
     if !leading_escape(command, ESCAPE_SQL_WRITE) {
         match &tokens {
             Ok(tokens) => {
-                if let Some(keyword) = sql_write(tokens) {
-                    return Some(sql_denial(keyword, false));
+                if let Some(keyword) = sql_write(tokens, cli) {
+                    return Some(sql_denial(keyword, false, cli));
                 }
             }
             Err(_) => {
-                if raw_invocation(command, "sql", &SQL_WRITE_KEYWORDS) {
-                    return Some(sql_denial("a write keyword".to_string(), true));
+                if raw_invocation(command, cli, "sql", &SQL_WRITE_KEYWORDS) {
+                    return Some(sql_denial("a write keyword".to_string(), true, cli));
                 }
+            }
+        }
+    }
+
+    // No fallback of its own either: a command the reader cannot read passes
+    // this check.
+    if !leading_escape(command, ESCAPE_ENTRY_FORGE) {
+        if let Ok(tokens) = &tokens {
+            if let Some(fragment) = entry_forge(tokens, cli) {
+                return Some(forge_denial(fragment));
             }
         }
     }
@@ -61,7 +80,7 @@ pub fn judge(command: &str, policy: &Policy) -> Option<Denial> {
     // check, which is the direction it fails in.
     if !leading_escape(command, ESCAPE_BARE_ID) {
         if let (Ok(tokens), Some(prefix)) = (&tokens, policy.item_prefix.as_deref()) {
-            if let Some(hits) = bare_ids(tokens) {
+            if let Some(hits) = bare_ids(tokens, cli) {
                 return Some(bare_denial(&hits, prefix));
             }
         }
@@ -72,10 +91,10 @@ pub fn judge(command: &str, policy: &Policy) -> Option<Denial> {
 
 // ---- 1. the flag that replaces the notes field ------------------------------
 
-fn notes_replace(tokens: &[Token]) -> Option<String> {
+fn notes_replace(tokens: &[Token], cli: &str) -> Option<String> {
     for (words, _) in statements(tokens) {
         let current = command_words(&words);
-        if subcommand_of(&current) != Some("update".to_string()) {
+        if subcommand_of(&current, Some(cli)) != Some("update".to_string()) {
             continue;
         }
         for word in &current[1..] {
@@ -87,7 +106,7 @@ fn notes_replace(tokens: &[Token]) -> Option<String> {
     None
 }
 
-fn notes_denial(flag: String, unreadable: bool) -> Denial {
+fn notes_denial(flag: String, unreadable: bool, cli: &str) -> Denial {
     Denial {
         class: "record",
         check: "notes-replace",
@@ -98,22 +117,21 @@ fn notes_denial(flag: String, unreadable: bool) -> Denial {
         },
         fragment: flag,
         rewrite: format!(
-            "append instead: `{WORK_GRAPH} note <id> <text>`, or `{WORK_GRAPH} update <id> \
-             --append-notes <text>`"
+            "append instead: `{cli} note <id> <text>`, or `{cli} update <id> --append-notes \
+             <text>`"
         ),
         escape: Some(ESCAPE_NOTES_REPLACE),
-        why: "this flag REPLACES the whole notes field, and a record's notes are the trail every \
-              later reader works from — what it overwrites is not recoverable from the write \
-              itself",
+        why: "this flag REPLACES the whole notes field, which is a person's own words on the \
+              item and not recoverable from the write itself",
     }
 }
 
 // ---- 2. the SQL route around the audit row ---------------------------------
 
-fn sql_write(tokens: &[Token]) -> Option<String> {
+fn sql_write(tokens: &[Token], cli: &str) -> Option<String> {
     for (words, _) in statements(tokens) {
         let current = command_words(&words);
-        if subcommand_of(&current) != Some("sql".to_string()) {
+        if subcommand_of(&current, Some(cli)) != Some("sql".to_string()) {
             continue;
         }
         for word in &current[1..] {
@@ -201,7 +219,7 @@ fn sql_words(statement: &str) -> Vec<String> {
     out
 }
 
-fn sql_denial(keyword: String, unreadable: bool) -> Denial {
+fn sql_denial(keyword: String, unreadable: bool, cli: &str) -> Denial {
     Denial {
         class: "record",
         check: "sql-write",
@@ -212,8 +230,8 @@ fn sql_denial(keyword: String, unreadable: bool) -> Denial {
         },
         fragment: keyword,
         rewrite: format!(
-            "make the change through the verb that owns it — `{WORK_GRAPH} update`, \
-             `{WORK_GRAPH} note`, `{WORK_GRAPH} close` — so the write carries its audit row"
+            "make the change through the verb that owns it — `{cli} update`, `{cli} note`, \
+             `{cli} close` — so the write carries its audit row"
         ),
         escape: Some(ESCAPE_SQL_WRITE),
         why: "the SQL route reaches the same fields with no confirmation and no audit row, so a \
@@ -221,13 +239,84 @@ fn sql_denial(keyword: String, unreadable: bool) -> Denial {
     }
 }
 
-// ---- 3. the item named by a bare suffix -------------------------------------
+// ---- 3. an entry written by hand --------------------------------------------
 
-fn bare_ids(tokens: &[Token]) -> Option<Vec<String>> {
+/// The word that makes a statement an entry written by hand, or `None` where
+/// no statement writes a comment or each one written is a person's own words.
+///
+/// A comment is where every entry lives, so the comment verbs are the one
+/// route by which an entry can reach the record without the verb that owns its
+/// act: `comments add`, and `comment`, its shorthand in the store's CLI. The text
+/// is refused where it carries the entry key anywhere in it, and so is a text
+/// the reader cannot see — one read from a file, or from the input.
+fn entry_forge(tokens: &[Token], cli: &str) -> Option<String> {
+    for (words, _) in statements(tokens) {
+        let current = command_words(&words);
+        let Some(arguments) = comment_arguments(&current, cli) else {
+            continue;
+        };
+        for word in arguments {
+            let text = word.text.as_str();
+            if text.starts_with('-') {
+                let unseen = (text.starts_with("-f") && !text.starts_with("--"))
+                    || text == "--file"
+                    || text.starts_with("--file=")
+                    || text == "--stdin";
+                if unseen {
+                    return Some(word.text.clone());
+                }
+                continue;
+            }
+            if word.value().contains(entry::KEY) {
+                return Some(word.text.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Every word after the comment verb's own path, or `None` where the statement
+/// is not a comment being written. `comments` with no `add` after it is the
+/// listing, which writes nothing.
+fn comment_arguments<'t>(current: &[&'t Token], cli: &str) -> Option<Vec<&'t Token>> {
+    let verb = subcommand_of(current, Some(cli))?;
+    let at = current[1..].iter().position(|w| !w.text.starts_with('-'))? + 1;
+    match verb.as_str() {
+        "comment" => Some(current[at + 1..].to_vec()),
+        "comments" => {
+            let add = current[at + 1..]
+                .iter()
+                .position(|w| !w.text.starts_with('-'))
+                .map(|p| at + 1 + p)?;
+            (current[add].text == "add").then(|| current[add + 1..].to_vec())
+        }
+        _ => None,
+    }
+}
+
+fn forge_denial(fragment: String) -> Denial {
+    Denial {
+        class: "record",
+        check: "entry-forge",
+        label: "ENTRY FORGED",
+        fragment,
+        rewrite: String::from(
+            "record through the verb that owns the act: fleet \
+             dispatch|deliver|review|hold|clear|land|cancel",
+        ),
+        escape: Some(ESCAPE_ENTRY_FORGE),
+        why: "an entry is the record every verb decides from; one written by hand skips the \
+              checks its verb makes before it writes",
+    }
+}
+
+// ---- 4. the item named by a bare suffix -------------------------------------
+
+fn bare_ids(tokens: &[Token], cli: &str) -> Option<Vec<String>> {
     let mut found: Vec<String> = Vec::new();
     for (words, _) in statements(tokens) {
         let current = command_words(&words);
-        for argument in text_arguments(&current) {
+        for argument in text_arguments(&current, Some(cli)) {
             for token in bare_hits(&argument.value()) {
                 if !found.contains(&token) {
                     found.push(token);
@@ -345,36 +434,26 @@ fn bare_denial(hits: &[String], prefix: &str) -> Denial {
 // ---- the fallback's own reader ----------------------------------------------
 
 /// The conservative text match, reached only for a command the reader could not
-/// read. It is INVOCATION-SHAPED — a chunk whose own command word is the work
-/// graph's — so prose that merely names the rule is not refused.
-fn raw_invocation(command: &str, subcommand: &str, needles: &[&str]) -> bool {
-    for line in command.lines() {
-        for chunk in line.split(['(', ')', ';', '&', '|']) {
-            let words: Vec<&str> = chunk.split_whitespace().collect();
-            let mut index = 0;
-            while index < words.len() && is_assignment(words[index]) {
-                index += 1;
-            }
-            let Some(head) = words.get(index) else {
-                continue;
-            };
-            if basename(head) != WORK_GRAPH {
-                continue;
-            }
-            // The quoting is what could not be read, so a word is compared with
-            // its quotes off: the write keyword of an unterminated statement
-            // arrives carrying the quote that never closed.
-            let rest: Vec<&str> = words[index + 1..].iter().map(|w| unquote(w)).collect();
-            if !rest.contains(&subcommand) {
-                continue;
-            }
-            if rest.iter().any(|w| {
-                needles
-                    .iter()
-                    .any(|n| w.eq_ignore_ascii_case(n) || w.starts_with(&format!("{n}=")))
-            }) {
-                return true;
-            }
+/// read. It is INVOCATION-SHAPED — a chunk whose own command word is the
+/// store's `cli` — so prose that merely names the rule is not refused.
+fn raw_invocation(command: &str, cli: &str, subcommand: &str, needles: &[&str]) -> bool {
+    for (head, words) in raw_invocations(command) {
+        if basename(head) != cli {
+            continue;
+        }
+        // The quoting is what could not be read, so a word is compared with
+        // its quotes off: the write keyword of an unterminated statement
+        // arrives carrying the quote that never closed.
+        let rest: Vec<&str> = words.iter().map(|w| unquote(w)).collect();
+        if !rest.contains(&subcommand) {
+            continue;
+        }
+        if rest.iter().any(|w| {
+            needles
+                .iter()
+                .any(|n| w.eq_ignore_ascii_case(n) || w.starts_with(&format!("{n}=")))
+        }) {
+            return true;
         }
     }
     false

@@ -1,26 +1,27 @@
-//! The four seat events, from the writing end (PRD R20).
+//! The four seat events, from the writing end.
 //!
 //! A seat's lifecycle is not a state this controller infers — the roster cannot
-//! tell a hibernated session from a deliberately stopped one (lessons
-//! claude-code A3) — so it is four events any workflow emits through the CLI,
-//! and the controller consumes them on its tick. There is no marker file and no
-//! write to the work graph anywhere in this path.
+//! tell a hibernated session from a deliberately stopped one
+//! (lessons claude-code A3) — so it is four events any workflow emits through
+//! the CLI, and the controller consumes them on its tick. There is no marker
+//! file and no write to the work graph anywhere in this path.
 
-use crate::clock;
 use crate::config;
-use crate::events::{self, EventLog};
+use crate::events::{self, ActorRef, EventLog};
+use crate::projection::Stale;
+use fleet_core::item::COULD_NOT_TELL;
+use fleet_core::seat::identity::SeatId;
 use std::path::Path;
 
 /// The refusals `rest` has, each its own status because each has its own fix.
 ///
 /// 5 is a fleet nobody is collecting — a controller to start. 4 is a seat that
-/// is already down — nothing to stop. 6 is a seat of the kind that never rests.
-/// 2 is what every other unverifiable answer in this binary is: the caller
-/// cannot act on it.
-pub const EXIT_READ_BACK_FAILED: u8 = 2;
+/// is already down — nothing to stop. 6 is a seat of the wrong kind either way.
+/// A line that does not read back is none of these: it is could-not-tell,
+/// because the writer acted and cannot say the act landed.
 pub const EXIT_NO_SESSION: u8 = 4;
 pub const EXIT_NO_COLLECTOR: u8 = 5;
-pub const EXIT_TRANSIENT: u8 = 6;
+pub const EXIT_WRONG_SEAT_KIND: u8 = 6;
 
 /// A clear-halt for a seat that is not halted. 1 rather than a status of its
 /// own: nothing about the fleet is wrong, the request simply names a seat with
@@ -29,10 +30,10 @@ pub const EXIT_NOT_HALTED: u8 = 1;
 
 /// How stale the projection may be before the collector counts as gone.
 ///
-/// Freshness is the collector's only liveness signal (PRD § The projection never
-/// answers liveness), so the check is the published document's age against the
-/// interval it says it is published at — three of them, which tolerates a poll
-/// spent inside a slow effect without tolerating a controller that stopped.
+/// Freshness is the collector's only liveness signal, so the check is the
+/// published document's age against the interval it says it is published at —
+/// three of them, which tolerates a poll spent inside a slow effect without
+/// tolerating a controller that stopped.
 pub const COLLECTOR_STALE_POLLS: u64 = 3;
 
 /// Write one seat event and confirm it landed.
@@ -44,18 +45,41 @@ pub const COLLECTOR_STALE_POLLS: u64 = 3;
 ///
 /// THE WRITE IS READ BACK BEFORE THIS ANSWERS 0. A caller acting on a 0 stops
 /// working and waits for a successor, so "it was written" has to be a reading of
-/// the file and not of this process's own intent.
+/// the file and not of this process's own intent. A line that cannot be
+/// appended is could-not-tell too: nothing was written, and the caller cannot
+/// act on that as a refusal.
+///
+/// The line's actor is the seat, `{seat, <id>}`, and the read-back compares the
+/// typed actor; the projection row a refusal reads is keyed on the same id.
+/// Every sentence names the seat by its machine name, off the seat list, which
+/// is what a person types back — and by the id where the list will not read.
 pub fn record(
     machine_dir: &Path,
     kind: &str,
-    seat: &str,
+    seat: &SeatId,
     reason: Option<&str>,
 ) -> Result<String, (u8, String)> {
+    let row = config::read(&config::path_in(machine_dir))
+        .ok()
+        .and_then(|config| config.by_id(seat).cloned());
+    let key = seat.to_string();
+    let named = Named {
+        key: &key,
+        name: row
+            .as_ref()
+            .map(config::Seat::machine_name)
+            .unwrap_or_else(|| key.clone()),
+        // A list that cannot be read answers not transient: refusing a named
+        // seat's rest over an unreadable file would leave the one kind of seat
+        // that does rest unable to ask.
+        transient: row.as_ref().is_some_and(|row| row.transient),
+    };
+    let seat = named.name.as_str();
     if kind == events::SEAT_RESTING {
-        rest_is_answerable(machine_dir, seat)?;
+        rest_is_answerable(machine_dir, &named)?;
     }
     if kind == events::SEAT_CLEAR_HALT {
-        clear_halt_is_answerable(machine_dir, seat)?;
+        clear_halt_is_answerable(machine_dir, &named)?;
     }
     let payload = match kind {
         events::SEAT_RESTING | events::SEAT_CLEAR_HALT => {
@@ -63,17 +87,21 @@ pub fn record(
         }
         _ => serde_json::json!({}),
     };
-    let stream = machine_dir.join("events.jsonl");
+    let stream = events::path_in(machine_dir);
     let mut log = EventLog::open(&stream);
-    if let Err(e) = log.append(kind, seat, payload) {
-        return Err((1, format!("could not append to {}: {e}", stream.display())));
+    let actor = ActorRef::seat(&key);
+    if let Err(e) = log.append(kind, &actor, payload) {
+        return Err((
+            COULD_NOT_TELL,
+            format!("could not append to {}: {e}", stream.display()),
+        ));
     }
     match events::read_after(&stream, log.seq().saturating_sub(1)).last() {
-        Some(record) if record.kind == kind && record.actor == seat => {
+        Some(record) if record.kind == kind && record.actor == actor => {
             Ok(format!("{kind} {seat} — seq {}", record.seq))
         }
         other => Err((
-            EXIT_READ_BACK_FAILED,
+            COULD_NOT_TELL,
             format!(
                 "the stream's last line reads {} rather than the {kind} for {seat} just \
                  written; the record is not confirmed",
@@ -85,18 +113,24 @@ pub fn record(
     }
 }
 
+/// One seat as a record names it: the id the stream and the projection key it
+/// on, the machine name its sentences say, and whether the seat list marks it
+/// transient.
+struct Named<'a> {
+    key: &'a str,
+    name: String,
+    transient: bool,
+}
+
 /// Whether a rest can be collected, or which half failed.
 ///
-/// The order is the PRD's: no collector outranks no session, because a fleet
+/// The order is fixed: no collector outranks no session, because a fleet
 /// nobody is polling would not act on a rest for a seat that IS live either.
-fn rest_is_answerable(machine_dir: &Path, seat: &str) -> Result<(), (u8, String)> {
+fn rest_is_answerable(machine_dir: &Path, named: &Named) -> Result<(), (u8, String)> {
     let document = fresh_projection(machine_dir)?;
+    let seat = named.name.as_str();
 
-    let seats = document["seats"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let row = seats.iter().find(|row| row["seat_dir"] == seat);
+    let row = crate::projection::published_row(&document, named.key);
     let state = match row {
         None => None,
         Some(row) => row["roster_state"].as_str(),
@@ -121,9 +155,9 @@ fn rest_is_answerable(machine_dir: &Path, seat: &str) -> Result<(), (u8, String)
     // seat's model nor its transience — it reports what was OBSERVED, and which
     // kind of seat a row is is a configuration — so this reads the same
     // `config.json` the controller parses it from.
-    if is_transient(machine_dir, seat) {
+    if named.transient {
         return Err((
-            EXIT_TRANSIENT,
+            EXIT_WRONG_SEAT_KIND,
             format!(
                 "{seat} is a transient row, and only named seats rest — use \
                  `fleet seat retire {seat}` instead"
@@ -133,7 +167,7 @@ fn rest_is_answerable(machine_dir: &Path, seat: &str) -> Result<(), (u8, String)
     Ok(())
 }
 
-/// Whether a clear-halt can be consumed, or which half failed (R14).
+/// Whether a clear-halt can be consumed, or which half failed.
 ///
 /// The same collector check a rest takes, and for the same reason: a clear-halt
 /// is a REQUEST the controller consumes on its tick, so writing one into a fleet
@@ -141,13 +175,10 @@ fn rest_is_answerable(machine_dir: &Path, seat: &str) -> Result<(), (u8, String)
 /// second half is the seat's own halt flag, read from the published row — a
 /// clear for a seat that is not halted is a typo, and the state it read is what
 /// tells the person which seat they meant.
-fn clear_halt_is_answerable(machine_dir: &Path, seat: &str) -> Result<(), (u8, String)> {
+fn clear_halt_is_answerable(machine_dir: &Path, named: &Named) -> Result<(), (u8, String)> {
     let document = fresh_projection(machine_dir)?;
-    let seats = document["seats"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let row = seats.iter().find(|row| row["seat_dir"] == seat);
+    let seat = named.name.as_str();
+    let row = crate::projection::published_row(&document, named.key);
     match row {
         Some(row) if row["halted"].as_bool() == Some(true) => Ok(()),
         Some(row) => Err((
@@ -166,71 +197,35 @@ fn clear_halt_is_answerable(machine_dir: &Path, seat: &str) -> Result<(), (u8, S
     }
 }
 
-/// Whether a collector is plainly consuming this machine's fleet.
-///
-/// THE COLLECTOR'S OWN RULE and not a second one beside it: it answers off the
-/// same [`fresh_projection`] a rest is refused by, so `fleet fly` deciding
-/// whether to run the advance in the foreground and `fleet event rest` deciding
-/// whether anybody would read it cannot disagree about whether a controller is
-/// up (flights PRD R7, S1b).
-///
-/// A projection that is absent, unparsable, undatable or older than
-/// [`COLLECTOR_STALE_POLLS`] intervals all answer `false` — none of them may be
-/// rounded into "a controller is running", because each of them is a fleet
-/// nobody is polling.
-pub fn collector_is_consuming(machine_dir: &Path) -> bool {
-    fresh_projection(machine_dir).is_ok()
-}
-
 /// The published document, refused unless a collector is plainly consuming.
 fn fresh_projection(machine_dir: &Path) -> Result<serde_json::Value, (u8, String)> {
-    let path = machine_dir.join("projection.json");
-    let refuse = |why: String| Err((EXIT_NO_COLLECTOR, why));
-    let Ok(body) = std::fs::read_to_string(&path) else {
-        return refuse(format!(
-            "no collector is consuming — there is no projection at {}, so nothing would read \
-             this rest",
-            path.display()
-        ));
-    };
-    let Ok(document) = serde_json::from_str::<serde_json::Value>(&body) else {
-        return refuse(format!(
-            "no collector is consuming — the projection at {} does not parse",
-            path.display()
-        ));
-    };
-    let poll_seconds = document["fleet"]["poll_seconds"]
-        .as_u64()
-        .unwrap_or(crate::policy::DEFAULT_POLL_SECONDS);
-    let generated_at = document["generated_at"].as_str().unwrap_or_default();
-    // A stamp that does not parse, and one in the future, are both `None` — and
-    // neither may be rounded into "fresh": a document nobody can date is not one
-    // anybody can call current.
-    match clock::seconds_since_stamp(generated_at) {
-        Some(age) if age <= poll_seconds * COLLECTOR_STALE_POLLS => {}
-        _ => {
-            return refuse(format!(
+    let path = crate::projection::path_in(machine_dir);
+    crate::projection::read_fresh(machine_dir).map_err(|stale| {
+        let why = match stale {
+            Stale::Unread => format!(
+                "no collector is consuming — there is no projection at {}, so nothing would read \
+                 this rest",
+                path.display()
+            ),
+            Stale::Unparsable => format!(
+                "no collector is consuming — the projection at {} does not parse",
+                path.display()
+            ),
+            Stale::Old {
+                at: generated_at,
+                poll: poll_seconds,
+                ..
+            }
+            | Stale::Undated {
+                at: generated_at,
+                poll: poll_seconds,
+            } => format!(
                 "no collector is consuming — the projection at {} was generated at \
                  {generated_at}, which is not inside {COLLECTOR_STALE_POLLS} poll intervals \
                  of {poll_seconds}s",
                 path.display()
-            ))
-        }
-    }
-    Ok(document)
-}
-
-/// Whether the seat list marks this row transient. A list that cannot be read
-/// answers `false`: refusing a named seat's rest over an unreadable file would
-/// leave the one kind of seat that does rest unable to ask.
-fn is_transient(machine_dir: &Path, seat: &str) -> bool {
-    config::read(&machine_dir.join("config.json"))
-        .ok()
-        .map(|config| {
-            config
-                .seats
-                .iter()
-                .any(|row| row.name == seat && row.transient)
-        })
-        .unwrap_or(false)
+            ),
+        };
+        (EXIT_NO_COLLECTOR, why)
+    })
 }

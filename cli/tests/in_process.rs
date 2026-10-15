@@ -10,11 +10,10 @@
 //! be setting it for every thread in the binary. Inside this one the rigs are
 //! serialised on the lock each holds for its whole life.
 
-use fleet_controller::adapter::StartOutcome;
 use fleet_controller::clock::Clock;
 use fleet_controller::platform::{self, Grant};
 use fleet_controller::run::{self, Options, Seams, StopHandler};
-use fleet_controller::test_support::{Answers, FakeClock, StubAgent};
+use fleet_controller::test_support::{self, Answers, Declined, FakeClock, FakeHost, StubAgent};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -29,8 +28,10 @@ mod common;
 static ENV: Mutex<()> = Mutex::new(());
 
 /// The one seat the rig configures, spelled once so the fixture and every
-/// assertion about it read the same value.
-const SEAT: &str = "a-seat";
+/// assertion about it read the same value: the id its row is keyed by, and the
+/// machine name everything the loop writes about it carries.
+const SEAT_ID: &str = "01a0d1f1-0aec-765f-9abe-5c21e8a04b17";
+const SEAT: &str = "agent-e8a04b17";
 const PROJECT: &str = "a-project";
 
 /// The poll interval the rig's policy file carries. Ten minutes, so the fake
@@ -79,14 +80,12 @@ impl Rig {
             &rig.machine.join("config.json"),
             &format!(
                 "{{\"fleet_toml\": \"{}\", \"children\": [\
-                 {{\"name\": \"{SEAT}\", \"worktrees\": {{\"{PROJECT}\": \"{}\"}}}}]}}\n",
+                 {{\"id\": \"{SEAT_ID}\", \"worktrees\": {{\"{PROJECT}\": \"{}\"}}}}]}}\n",
                 rig.root.join("fleet.toml").display(),
                 rig.worktree.display()
             ),
         );
-        for (key, value) in common::hermetic::vars(&rig.root, &rig.machine, None) {
-            std::env::set_var(key, value);
-        }
+        common::hermetic::export(common::hermetic::vars(&rig.root, &rig.machine));
         // The stop flag is process-wide and the arm below raises it, so every
         // rig starts from a fleet nobody has asked to stop.
         platform::clear_stop();
@@ -195,15 +194,27 @@ impl Drop for Watchdog {
     }
 }
 
-/// Every verb one tick of the loop must reach the agent for. The roster read,
-/// the version and the daemon are the observation; the start is the effect the
-/// absent seat's verdict asks for.
+/// Every verb one tick of the loop must reach the agent for. The capabilities
+/// are read once at the start and the version every poll; the launch is the
+/// effect the absent seat's verdict asks for, and the read is the start's
+/// watch asking after the pane it started.
 const A_TICKS_VERBS: [&str; 4] = [
-    StubAgent::STATUS,
+    StubAgent::CAPABILITIES,
     StubAgent::VERSION_CALL,
-    StubAgent::DAEMON,
-    StubAgent::START,
+    StubAgent::LAUNCH,
+    StubAgent::READ,
 ];
+
+/// A stub whose listing shows the one session a start on a fresh [`FakeHost`]
+/// brings up, by its pane's pid, so the start is believed at its first read
+/// and its watch spends no wall clock. The row stands in no seat's worktree,
+/// so the seat still reads absent on the tick that starts it.
+fn listing_its_arrival() -> StubAgent {
+    StubAgent::answering(Answers {
+        listing: Ok(test_support::listing(&test_support::arrivals(1))),
+        ..Answers::default()
+    })
+}
 
 fn assert_the_tick_ran(stub: &StubAgent) {
     let verbs = stub.verbs();
@@ -226,7 +237,8 @@ fn assert_the_tick_ran(stub: &StubAgent) {
 #[test]
 fn a_run_of_ticks_spends_its_poll_interval_in_fake_time_and_costs_no_wall_clock() {
     let rig = Rig::new("nap");
-    let stub = StubAgent::new();
+    let stub = listing_its_arrival();
+    let host = FakeHost::new();
     let clock = NapThenStop::new(Duration::from_secs(POLL_SECONDS));
     let watchdog = Watchdog::armed();
 
@@ -237,7 +249,9 @@ fn a_run_of_ticks_spends_its_poll_interval_in_fake_time_and_costs_no_wall_clock(
         None,
         Seams {
             clock: &clock,
+            adapter: "stub",
             agent: &stub,
+            host: &host,
             child_path: "",
             effects_off: None,
             stop_handler: StopHandler::Unarmed,
@@ -271,13 +285,14 @@ fn a_run_of_ticks_spends_its_poll_interval_in_fake_time_and_costs_no_wall_clock(
 /// And the tick itself, with no process behind any of it.
 ///
 /// One poll, driven through the same entry: the arm reads what the agent was
-/// ASKED for — the roster, the version, the daemon, and the start the absent
-/// seat's verdict calls for — and what the start was given, so a loop that
-/// returned before reaching its effect fails here rather than passing quietly.
+/// ASKED for — the roster, the version, and the start the absent seat's
+/// verdict calls for — and what the start was given, so a loop that returned
+/// before reaching its effect fails here rather than passing quietly.
 #[test]
 fn one_tick_reaches_the_agent_for_every_call_the_poll_makes_and_publishes_its_outcome() {
     let rig = Rig::new("tick");
-    let stub = StubAgent::new();
+    let stub = listing_its_arrival();
+    let host = FakeHost::new();
     let clock = FakeClock::new();
 
     let status = run::observe_seamed(
@@ -286,7 +301,9 @@ fn one_tick_reaches_the_agent_for_every_call_the_poll_makes_and_publishes_its_ou
         None,
         Seams {
             clock: &clock,
+            adapter: "stub",
             agent: &stub,
+            host: &host,
             child_path: "",
             effects_off: None,
             stop_handler: StopHandler::Unarmed,
@@ -303,7 +320,15 @@ fn one_tick_reaches_the_agent_for_every_call_the_poll_makes_and_publishes_its_ou
 
     let starts = stub.starts();
     assert_eq!(starts.len(), 1, "one seat, one start: {:?}", stub.verbs());
-    assert_eq!(starts[0].seat_dir, SEAT);
+    assert_eq!(
+        starts[0].seat.to_string(),
+        SEAT_ID,
+        "the start carries the seat's id"
+    );
+    assert_eq!(
+        starts[0].name, SEAT,
+        "and its session is named by the machine name"
+    );
     assert_eq!(
         Path::new(&starts[0].worktree),
         rig.worktree,
@@ -311,7 +336,7 @@ fn one_tick_reaches_the_agent_for_every_call_the_poll_makes_and_publishes_its_ou
     );
 
     let document = rig.projection();
-    assert_eq!(document["seats"][0]["seat_dir"], SEAT, "{document}");
+    assert_eq!(document["seats"][0]["seat"]["id"], SEAT_ID, "{document}");
     assert_eq!(document["seats"][0]["outcome"], "spawned", "{document}");
     assert_eq!(
         document["agent_version"],
@@ -329,12 +354,10 @@ fn one_tick_reaches_the_agent_for_every_call_the_poll_makes_and_publishes_its_ou
 fn a_start_the_agent_refuses_is_published_as_a_failed_outcome() {
     let rig = Rig::new("refused");
     let stub = StubAgent::answering(Answers {
-        start: StartOutcome::Failed {
-            cause: "the arm refused this start".to_string(),
-            log: String::new(),
-        },
+        launch: Err(Declined::Untold("the arm refused this start".to_string())),
         ..Answers::default()
     });
+    let host = FakeHost::new();
     let clock = FakeClock::new();
 
     let status = run::observe_seamed(
@@ -343,7 +366,9 @@ fn a_start_the_agent_refuses_is_published_as_a_failed_outcome() {
         None,
         Seams {
             clock: &clock,
+            adapter: "stub",
             agent: &stub,
+            host: &host,
             child_path: "",
             effects_off: None,
             stop_handler: StopHandler::Unarmed,
@@ -351,7 +376,7 @@ fn a_start_the_agent_refuses_is_published_as_a_failed_outcome() {
     );
     assert_eq!(status, 0);
 
-    assert_eq!(stub.calls_of(StubAgent::START).len(), 1);
+    assert_eq!(stub.calls_of(StubAgent::LAUNCH).len(), 1);
     let document = rig.projection();
     assert_eq!(document["seats"][0]["outcome"], "failed", "{document}");
 }

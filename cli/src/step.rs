@@ -8,15 +8,18 @@
 //!
 //! The append is the seat events' own: the machine directory's stream, the
 //! controller's `EventLog`, and a read-back of the last line before the exit
-//! reads 0 — a workflow that takes a 0 as "recorded" and moves to its next
+//! reads 0; an append that fails, or a read-back that does not find the line,
+//! exits 3 — a workflow that takes a 0 as "recorded" and moves to its next
 //! step must be reading the file and not this process's intent.
 
 use crate::exit::Exit;
 use crate::item;
 use clap::ValueEnum;
-use fleet_controller::events::{self, EventLog};
+use fleet_controller::events::{self, ActorRef, EventLog};
 use fleet_controller::platform;
+use fleet_controller::project::stream::stream_actor;
 use fleet_core::item::{STEP_CLOSED, STEP_STARTED};
+use fleet_core::seat::actor::Actor;
 
 /// The two halves of a step, as the positional word.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -67,9 +70,10 @@ pub struct StepArgs {
 
 /// Write one step event and confirm it landed.
 ///
-/// The actor is `FLEET_ACTOR` or `BEADS_ACTOR` where one is set, else the run
-/// id: the run's child is started with a cleared environment, so the run is
-/// the one name every writer under it can be attributed to.
+/// The actor is FLEET_ACTOR, else the run (run:<id>): the run's child is
+/// started with a cleared environment, so the run is the one name every writer
+/// under it can be attributed to. The variable is read as a typed actor only —
+/// a step has no roster to resolve a seat argument over.
 pub fn record(args: &StepArgs) -> Exit {
     let payload = match payload(args) {
         Ok(payload) => payload,
@@ -79,15 +83,24 @@ pub fn record(args: &StepArgs) -> Exit {
         }
     };
     let kind = args.phase.kind();
-    let actor = item::actor().unwrap_or_else(|| args.run.clone());
-    let stream = platform::machine_dir().join(STREAM);
+    let actor = match item::fleet_actor() {
+        None => ActorRef::new(events::RUN, args.run.as_str()),
+        Some(given) => match Actor::typed(&given) {
+            Some(Ok(actor)) => stream_actor(&actor),
+            _ => {
+                eprintln!("fleet event step: FLEET_ACTOR {given} is not kind:id");
+                return Exit::Usage;
+            }
+        },
+    };
+    let stream = events::path_in(&platform::machine_dir());
     let mut log = EventLog::open(&stream);
     if let Err(e) = log.append(kind, &actor, payload) {
         eprintln!(
             "fleet event step: could not append to {}: {e}",
             stream.display()
         );
-        return Exit::Refused;
+        return Exit::CouldNotTell;
     }
     match events::read_after(&stream, log.seq().saturating_sub(1)).last() {
         Some(record)
@@ -111,12 +124,10 @@ pub fn record(args: &StepArgs) -> Exit {
                 args.run,
                 args.n
             );
-            Exit::Usage
+            Exit::CouldNotTell
         }
     }
 }
-
-const STREAM: &str = "events.jsonl";
 
 /// The payload, or the usage error: `--result` must parse as one JSON value,
 /// because a close whose result the replay cannot read is a step it cannot

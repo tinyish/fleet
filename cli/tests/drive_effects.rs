@@ -30,9 +30,7 @@ mod effects {
     const LOW_THRESHOLD: u64 = 100;
 
     fn policy_with(extra: &str) -> String {
-        format!(
-            "[controller]\npoll_seconds = 1\n{extra}\n[substrate.claude_code]\nversion = \"9.9.9\"\n"
-        )
+        format!("[controller]\npoll_seconds = 1\n{extra}\n")
     }
 
     /// A transcript carrying one main-chain reading.
@@ -58,7 +56,7 @@ mod effects {
         // 5 — no collector. Nothing has published, so nothing would read it.
         let out = rig
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "x"])
+            .args(["event", "rest", SEAT, "--reason", "x"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
@@ -69,20 +67,47 @@ mod effects {
         );
 
         // 4 — a seat the projection carries no row for. The poll below publishes
-        // one seat, and any other name is one nothing knows.
+        // one seat, and a second row added to the list after it is a seat the
+        // collector has not published.
         rig.write_roster(&live_row(&rig.worktree(), "a-session"));
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert_eq!(seat_row(&rig)["roster_state"], "present");
+        rig.write_config(&format!(
+            r#"{{"fleet_toml": "{}", "children": [
+                 {{"id":"{SEAT_ID}","name":"Orla","worktrees":{{"demo":"{}"}}}},
+                 {{"id":"01a0d1f1-0aec-765f-9abe-5c21e8a04b17","name":"Pell",
+                   "worktrees":{{"demo":"{}"}}}}
+               ]}}"#,
+            rig.policy_path().display(),
+            rig.worktree().display(),
+            rig.root.join("wt").join("pell").display()
+        ));
 
+        let out = rig
+            .binary()
+            .args(["event", "rest", "Pell", "--reason", "x"])
+            .output()
+            .expect("the built binary runs");
+        assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("pell-e8a04b17 has no live session"),
+            "the seat is named by the machine name its argument resolved to: {}",
+            stderr(&out)
+        );
+
+        // 1 — a seat argument that names no seat at all, refused by the resolver
+        // before any stream is read, listing the seats it could have meant.
         let out = rig
             .binary()
             .args(["event", "rest", "builder-2", "--reason", "x"])
             .output()
             .expect("the built binary runs");
-        assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
         assert!(
-            stderr(&out).contains("has no live session"),
+            stderr(&out).contains(
+                "fleet event rest: builder-2 names no seat — the seats are orla-93b9739a"
+            ),
             "{}",
             stderr(&out)
         );
@@ -91,13 +116,16 @@ mod effects {
         // status is taken from the read-back rather than from the append.
         let out = rig
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "a nap"])
+            .args(["event", "rest", SEAT, "--reason", "a nap"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let last = rig.events().pop().expect("the stream carries the rest");
         assert_eq!(last["type"], "seat.resting");
-        assert_eq!(last["actor"], "builder-1");
+        assert_eq!(
+            last["actor"],
+            serde_json::json!({ "kind": "seat", "id": SEAT_ID })
+        );
         assert_eq!(last["payload"]["reason"], "a nap");
 
         // The other three verbs, each exiting 0 and each advancing the sequence
@@ -110,13 +138,16 @@ mod effects {
         ] {
             let out = rig
                 .binary()
-                .args(["event", verb, "builder-1"])
+                .args(["event", verb, SEAT])
                 .output()
                 .expect("the built binary runs");
             assert_eq!(out.status.code(), Some(0), "{verb}: {}", stderr(&out));
             let line = rig.events().pop().expect("the stream carries the record");
             assert_eq!(line["type"], kind);
-            assert_eq!(line["actor"], "builder-1");
+            assert_eq!(
+                line["actor"],
+                serde_json::json!({ "kind": "seat", "id": SEAT_ID })
+            );
             let seq = line["seq"].as_u64().expect("the line carries a seq");
             assert_eq!(
                 seq,
@@ -127,8 +158,8 @@ mod effects {
         }
     }
 
-    /// `--reason` belongs to `rest` and to no other seat writer (cli PRD
-    /// § `fleet event rest`, against § `fleet event woke|handed-off|exited`).
+    /// `--reason` belongs to `rest` and to no other seat writer: `woke`,
+    /// `handed-off` and `exited` refuse it.
     ///
     /// The refusal is clap's, at argv, so it is reached before anything the
     /// controller would read — which is why the stream's length is the reading
@@ -148,7 +179,7 @@ mod effects {
         for verb in ["woke", "handed-off", "exited"] {
             let out = rig
                 .binary()
-                .args(["event", verb, "builder-1", "--reason", "x"])
+                .args(["event", verb, SEAT, "--reason", "x"])
                 .output()
                 .expect("the built binary runs");
             assert_eq!(out.status.code(), Some(2), "{verb}: {}", stderr(&out));
@@ -168,7 +199,7 @@ mod effects {
             // the 2 above is the flag and not the verb.
             let out = rig
                 .binary()
-                .args(["event", verb, "builder-1"])
+                .args(["event", verb, SEAT])
                 .output()
                 .expect("the built binary runs");
             assert_eq!(out.status.code(), Some(0), "{verb}: {}", stderr(&out));
@@ -185,168 +216,17 @@ mod effects {
         // the payload, read back from the stream.
         let out = rig
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "a nap"])
+            .args(["event", "rest", SEAT, "--reason", "a nap"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let last = rig.events().pop().expect("the stream carries the rest");
         assert_eq!(last["type"], "seat.resting");
-        assert_eq!(last["actor"], "builder-1");
+        assert_eq!(
+            last["actor"],
+            serde_json::json!({ "kind": "seat", "id": SEAT_ID })
+        );
         assert_eq!(last["payload"]["reason"], "a nap");
-    }
-
-    /// The `seat` noun refuses the four writers and names the `event` one
-    /// (cli PRD P0 #7).
-    ///
-    /// The rig publishes nothing, so `event rest` on it exits 5 — no collector.
-    /// That 5 is the control the 2 needs: it is the same rig and the same seat,
-    /// so a 2 under `seat` is the spelling and not the state, and it is reached
-    /// at argv, before anything the controller would read.
-    #[test]
-    fn the_seat_noun_refuses_the_four_writers_and_names_the_event_one() {
-        let rig = Rig::new("seat-noun-refuses");
-
-        for (verb, rewrite) in [
-            ("rest", "fleet event rest"),
-            ("woke", "fleet event woke"),
-            ("handed-off", "fleet event handed-off"),
-            ("exited", "fleet event exited"),
-        ] {
-            let out = rig
-                .binary()
-                .args(["seat", verb, "builder-1"])
-                .output()
-                .expect("the built binary runs");
-            assert_eq!(out.status.code(), Some(2), "{verb}: {}", stderr(&out));
-            assert!(
-                stderr(&out).contains(rewrite),
-                "the refusal carries the rewrite ({rewrite}): {}",
-                stderr(&out)
-            );
-        }
-
-        // The control: the same seat under the noun that holds it reaches the
-        // controller, and answers with the state rather than with usage.
-        let out = rig
-            .binary()
-            .args(["event", "rest", "builder-1", "--reason", "x"])
-            .output()
-            .expect("the built binary runs");
-        assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
-
-        // And the rewrite is keyed on the four writers, not on the noun: a verb
-        // the `seat` noun does not hold gets clap's own unrecognised line, which
-        // names no `event` spelling. `ring` is the specimen because the naming
-        // ruling gave this act the word `nudge` (brain/naming.md), so it is a
-        // spelling this noun will not come to hold — which keeps the arm about
-        // the four writers rather than about a typo.
-        let out = rig
-            .binary()
-            .args(["seat", "ring", "builder-1"])
-            .output()
-            .expect("the built binary runs");
-        assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-        assert!(
-            stderr(&out).contains("unrecognized subcommand 'ring'")
-                && !stderr(&out).contains("fleet event"),
-            "{}",
-            stderr(&out)
-        );
-    }
-
-    /// The rewrite survives the options the verb is actually typed with.
-    ///
-    /// A rest always carries a reason, so `fleet seat rest s1 --reason x` is the
-    /// one invocation a ritual under the old spelling puts on the wire — and an
-    /// argument parser that claimed the flag for itself would answer it with a
-    /// sentence about `--reason` and never reach the rewrite. What holds the
-    /// flag out of clap's hands is each rewrite arm taking its words as a
-    /// trailing var-arg with the help flag disabled on it; drop either and this
-    /// arm reds — on clap's `unexpected argument '--reason' found` without the
-    /// var-arg, and on control two below without the disabled help flag, where
-    /// `seat woke --help` would print a hidden verb's page and exit 0. The three
-    /// controls fence the cost: the FAMILY's help flag still answers as help, a
-    /// verb carrying it still gets the rewrite, and a verb this noun does not
-    /// hold still names no `event` spelling.
-    #[test]
-    fn the_rewrite_survives_the_options_the_verb_carries() {
-        let rig = Rig::new("seat-noun-with-options");
-
-        for (args, rewrite) in [
-            (
-                vec!["seat", "rest", "builder-1", "--reason", "a nap"],
-                "fleet event rest",
-            ),
-            (
-                vec!["seat", "woke", "builder-1", "--reason", "x"],
-                "fleet event woke",
-            ),
-            (
-                vec!["seat", "handed-off", "builder-1", "--reason", "x"],
-                "fleet event handed-off",
-            ),
-            (
-                vec!["seat", "exited", "builder-1", "--reason", "x"],
-                "fleet event exited",
-            ),
-        ] {
-            let out = rig
-                .binary()
-                .args(&args)
-                .output()
-                .expect("the built binary runs");
-            assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
-            assert!(
-                stderr(&out).contains(rewrite),
-                "{args:?} carries the rewrite ({rewrite}): {}",
-                stderr(&out)
-            );
-        }
-
-        // Control one: the help flag is still help, on stdout and exiting 0.
-        // clap answers it before this family's words are matched at all, so the
-        // page below is clap's own and no hand branch stands behind it.
-        let out = rig
-            .binary()
-            .args(["seat", "--help"])
-            .output()
-            .expect("the built binary runs");
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        let printed = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            printed.contains("Usage: fleet seat") && printed.contains("what is done to a seat"),
-            "the family's own page: {printed}"
-        );
-
-        // Control two: a verb carrying the help flag is still the rewrite, so
-        // the branch above is keyed on the FIRST word and not on the flag.
-        let out = rig
-            .binary()
-            .args(["seat", "woke", "--help"])
-            .output()
-            .expect("the built binary runs");
-        assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-        assert!(
-            stderr(&out).contains("fleet event woke"),
-            "{}",
-            stderr(&out)
-        );
-
-        // Control three, the one the arm above this holds unchanged: an option
-        // beside a verb the `seat` noun does not hold is still clap's own
-        // unrecognised line, and still names no `event` spelling.
-        let out = rig
-            .binary()
-            .args(["seat", "ring", "builder-1", "--text", "x"])
-            .output()
-            .expect("the built binary runs");
-        assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-        assert!(
-            stderr(&out).contains("unrecognized subcommand 'ring'")
-                && !stderr(&out).contains("fleet event"),
-            "{}",
-            stderr(&out)
-        );
     }
 
     /// AC1's third refusal, and AC3(c): only named seats rest.
@@ -366,12 +246,12 @@ mod effects {
 
         let out = rig
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "x"])
+            .args(["event", "rest", SEAT, "--reason", "x"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
         assert!(
-            stderr(&out).contains("fleet seat retire builder-1"),
+            stderr(&out).contains(&format!("fleet seat retire {SEAT}")),
             "the refusal names the verb this kind of seat wants: {}",
             stderr(&out)
         );
@@ -384,17 +264,18 @@ mod effects {
         assert_eq!(control.observe().status.code(), Some(0));
         let out = control
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "x"])
+            .args(["event", "rest", SEAT, "--reason", "x"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
-        // Around the refusal: the event written into the file by hand. The
-        // consumer drops it with one line and issues nothing.
+        // Around the refusal: the event written into the file by hand, by the
+        // seat as every seat line is. The consumer drops it with one line and
+        // issues nothing.
         append_event(
             &rig,
             "seat.resting",
-            "builder-1",
+            serde_json::json!({ "kind": "seat", "id": SEAT_ID }),
             serde_json::json!({"reason": "x"}),
         );
         let out = rig.observe();
@@ -426,11 +307,16 @@ mod effects {
         assert_eq!(seat_row(&rig)["outcome"], "spawned");
 
         let argv = rig.start_argv();
-        assert_eq!(argv.first().map(String::as_str), Some("--bg"));
-        assert_eq!(flag_value(&argv, "--name"), "rook");
-        assert_eq!(flag_value(&argv, "--model"), "claude-opus-5");
-        assert_eq!(flag_value(&argv, "--permission-mode"), "auto");
-        assert_eq!(argv.last().map(String::as_str), Some("/wake builder-1"));
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some("--name"),
+            "an interactive session, with no --bg ahead of the name: {argv:?}"
+        );
+        assert!(!argv.iter().any(|word| word == "--bg"), "{argv:?}");
+        assert_eq!(flag_value(&argv, "--name"), SEAT);
+        assert_eq!(flag_value(&argv, "--model"), StubAgent::MODEL);
+        assert_eq!(flag_value(&argv, "--posture"), "auto");
+        assert_eq!(argv.last(), Some(&format!("/wake {SEAT}")));
         assert_eq!(
             rig.start_cwd(),
             std::fs::canonicalize(rig.worktree()).expect("the worktree resolves")
@@ -447,15 +333,17 @@ mod effects {
         );
         assert_eq!(rig.events_of("session.spawned"), 1);
 
-        // AC7 — the row the dispatch opened, before anything has sighted it.
+        // AC7 — the row the dispatch opened, before anything has sighted it:
+        // keyed by the seat's id, and recording the name the session was
+        // started under.
         let table = rig.sessions();
-        assert_eq!(table["schema"], 1);
+        assert_eq!(table["schema"], 2);
         let row = &table["sessions"][0];
-        assert_eq!(row["seat"], "builder-1");
-        assert_eq!(row["name"], "rook");
-        assert_eq!(row["model"], "claude-opus-5");
+        assert_eq!(row["seat"], SEAT_ID);
+        assert_eq!(row["name"], SEAT);
+        assert_eq!(row["model"], StubAgent::MODEL);
         assert_eq!(row["posture"], "auto");
-        assert_eq!(row["first_turn"], "/wake builder-1");
+        assert_eq!(row["first_turn"], format!("/wake {SEAT}"));
         let spawned = rig
             .events()
             .into_iter()
@@ -470,7 +358,10 @@ mod effects {
             "a row nothing has sighted carries neither: {row}"
         );
 
-        // The window: a second poll with the row still absent starts nothing.
+        // The second poll finds the session the start made: the pane the host
+        // holds for the seat, and the listing's row carrying that pane's pid
+        // (ruling 3). It starts nothing, and the row is the sighting the
+        // arrival window was waiting for.
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert_eq!(seat_row(&rig)["decision"], "leave-alone");
@@ -485,117 +376,159 @@ mod effects {
             rig.calls()
         );
 
-        // And a sighting fills the row it opened, which is what the window was
-        // waiting for.
-        rig.write_roster(&live_row(&rig.worktree(), "the-successor"));
-        let out = rig.observe();
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        // And that sighting filled the row the dispatch opened — by the pane's
+        // pid, the row carrying no address of its own (the claude-code pack's
+        // lessons B10).
+        assert_eq!(seat_row(&rig)["roster_state"], "present");
         let row = &rig.sessions()["sessions"][0];
-        assert_eq!(row["session_id"], "the-successor");
-        assert_eq!(row["short_id"], "the-successor");
+        assert_eq!(
+            row["session_id"],
+            format!("arrived-{}", fleet_controller::test_support::FIRST_PANE_PID)
+        );
+        assert!(row.get("short_id").is_none(), "{row}");
         assert!(row["first_seen_at"].as_u64().is_some());
     }
 
-    /// The plugin root end to end through the BUILT binary: the policy names a
-    /// relative directory, the start the loop issued carries it resolved against
-    /// the policy file's own directory, and the projection publishes the same
-    /// path for a reader of the document.
-    ///
-    /// The resolution is what only this suite can measure: the controller runs
-    /// with a working directory nobody configured, so a root resolved against
-    /// the process's cwd and one resolved against the file's differ here.
+    /// A seat with no name of its own is `agent-<short>` in every name a start
+    /// derives — its session's `--name` and the first turn's argument — while
+    /// the line the start writes carries the seat's full id, and so does the
+    /// host session it points a reader at.
     #[test]
-    fn a_start_carries_the_plugin_root_and_the_projection_reports_it() {
-        let rig = Rig::new("effect-plugin-root");
-        rig.write_policy(&policy_with("plugin_dir = \"the-overlay\""));
+    fn an_unnamed_seats_start_is_named_agent_short_and_its_line_carries_the_id() {
+        let rig = Rig::new("effect-unnamed");
+        rig.write_config(&format!(
+            r#"{{"fleet_toml": "{}", "children": [
+                 {{"id":"{SEAT_ID}","worktrees":{{"demo":"{}"}}}}
+               ]}}"#,
+            rig.policy_path().display(),
+            rig.worktree().display()
+        ));
         rig.write_roster("[]");
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert_eq!(seat_row(&rig)["outcome"], "spawned");
+        assert_eq!(
+            seat_row(&rig)["seat"]["id"],
+            SEAT_ID,
+            "the row is the seat's id"
+        );
 
-        let beside = rig
-            .policy_path()
-            .parent()
-            .expect("the policy file sits in a directory")
-            .join("the-overlay")
-            .display()
-            .to_string();
+        let named = "agent-93b9739a";
         let argv = rig.start_argv();
-        assert_eq!(flag_value(&argv, "--plugin-dir"), beside);
-        let at = argv
-            .iter()
-            .position(|word| word == "--plugin-dir")
-            .expect("the flag is in the argv");
-        assert_eq!(
-            argv.get(at + 2).map(String::as_str),
-            Some("/wake builder-1"),
-            "the element after the root's value is the first turn: {argv:?}"
-        );
-        assert_eq!(
-            rig.projection()["fleet"]["plugin_dir"],
-            serde_json::json!(beside),
-            "and the document names the root a reader would go looking for"
-        );
+        assert_eq!(flag_value(&argv, "--name"), named);
+        assert_eq!(argv.last(), Some(&format!("/wake {named}")));
 
-        // The control: a fleet whose policy names none starts with no such
-        // element and publishes null, so the readings above are the key's.
-        let bare = Rig::new("effect-plugin-root-control");
-        bare.write_roster("[]");
-        let out = bare.observe();
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        let argv = bare.start_argv();
-        assert!(
-            !argv.iter().any(|word| word == "--plugin-dir"),
-            "no root is named, so no element is passed: {argv:?}"
-        );
+        let spawned = rig
+            .events()
+            .into_iter()
+            .find(|e| e["type"] == "session.spawned")
+            .expect("the start wrote its event");
         assert_eq!(
-            bare.projection()["fleet"]["plugin_dir"],
-            serde_json::Value::Null
+            spawned["actor"],
+            serde_json::json!({ "kind": "seat", "id": SEAT_ID }),
+            "the line's actor is the seat, by its full id"
+        );
+        assert_eq!(spawned["payload"]["name"], named);
+        assert_eq!(
+            spawned["payload"]["output"],
+            format!("-L fleet -t {SEAT_ID}"),
+            "the session a reader is pointed at is named by the id, never the name"
+        );
+        assert!(
+            rig.host().sessions.contains_key(SEAT_ID),
+            "and it is on the host under that name: {:?}",
+            rig.host()
         );
     }
 
-    /// A NAMED seat's start writes no settings into its worktree: that checkout
-    /// is a person's, and their own permission rules stay theirs (R13's shape).
-    /// Only a transient spawn renders the pack's document, and this loop makes
-    /// none.
+    /// A start the BUILT CONTROLLER issues hands the session the controller's own
+    /// binary as `FLEET_BIN`, so the hooks in that session run the binary that
+    /// spawned it — and not some other build, which blocks every shell command
+    /// the session makes.
     ///
-    /// Read off the worktree the loop actually started a session in, which the
-    /// arm above proves the start was issued for.
+    /// Out of process, because the subject is WHICH EXECUTABLE IS RUNNING: in
+    /// this process the running executable is the test binary, and a value read
+    /// off an in-process poll would pass against a controller that named any
+    /// file at all.
+    ///
+    /// Asserted against the built binary's own path, canonical on both sides,
+    /// which is what tells it from a pass-through: this process's `FLEET_BIN` is
+    /// unset under a plain shell and names the seat's binary inside a flight.
     #[test]
-    fn a_named_seats_start_leaves_the_persons_own_settings_alone() {
-        let rig = Rig::new("effect-named-settings");
+    fn a_start_hands_the_session_the_controllers_own_binary_as_fleet_bin() {
+        let rig = Rig::new("effect-fleet-bin");
+        rig.write_roster("[]");
+
+        let out = rig.observe_out_of_process();
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(seat_row(&rig)["outcome"], "spawned");
+
+        let handed = rig.start_fleet_bin();
+        assert!(!handed.is_empty(), "the start carried a FLEET_BIN at all");
+        let handed = std::fs::canonicalize(&handed)
+            .unwrap_or_else(|e| panic!("the FLEET_BIN handed over, {handed}, resolves: {e}"));
+        let built =
+            std::fs::canonicalize(env!("CARGO_BIN_EXE_fleet")).expect("the built binary resolves");
+        assert_eq!(
+            handed, built,
+            "the session is handed the binary the controller is running"
+        );
+    }
+
+    /// A start hands the session `FLEET_ACTOR=seat:<id>` [ASSUMES D7], so the
+    /// seat's own bare `fleet deliver` acts as the seat and never as the
+    /// machine's person. Read off what the stub agent's start was given.
+    #[test]
+    fn a_start_hands_the_session_its_seat_as_fleet_actor() {
+        let rig = Rig::new("effect-fleet-actor");
         rig.write_roster("[]");
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert_eq!(seat_row(&rig)["outcome"], "spawned");
 
-        // The control on the absence below: the checkout the start named is
-        // there, so `.claude` is missing from a directory that exists rather
-        // than from one nothing made.
-        let worktree = rig.worktree();
-        assert!(worktree.is_dir(), "{} is there", worktree.display());
+        assert_eq!(rig.start_actor(), format!("seat:{SEAT_ID}"));
+    }
 
-        let claude = worktree.join(".claude");
-        assert!(
-            !claude.exists(),
-            "{} was written into a named seat's own checkout",
-            claude.display()
+    /// A start hands the session the machine directory the controller
+    /// resolved as `FLEET_DIR`, and no `FLEET_HOME` (shared.locations R29), so
+    /// the verbs the seat runs act on the controller's machine. The rig's
+    /// controller runs with `FLEET_HOME` set as well, and the session is
+    /// handed none of it.
+    #[test]
+    fn a_start_hands_the_session_the_controllers_machine_directory_as_fleet_dir() {
+        let rig = Rig::new("effect-fleet-dir");
+        rig.write_roster("[]");
+
+        let out = rig.observe();
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(seat_row(&rig)["outcome"], "spawned");
+
+        let start = rig.last_start();
+        assert_eq!(start.var("FLEET_DIR"), rig.machine().display().to_string());
+        assert_eq!(
+            start.var("FLEET_HOME"),
+            "",
+            "no FLEET_HOME: {:?}",
+            start.env
         );
     }
 
-    /// AC3(b), AC7 and AC8 — the rest collection, in the order the PRD fixes,
-    /// and the same collection with its stop failing.
+    /// AC3(b), AC7 and AC8 — the rest collection, in its fixed order of stop
+    /// then start the successor, both on the host, and the same collection with
+    /// its stop failing. Nothing is removed: the predecessor was the host's
+    /// session, and the stop took it.
     #[test]
-    fn a_rest_is_stop_then_start_then_remove_and_a_failed_stop_retries() {
+    fn a_rest_is_stop_then_start_and_a_failed_stop_retries() {
         let rig = Rig::new("effect-rest");
+        common::panes_die_on_interrupt(&rig.tmux_state_path());
         rig.write_roster(&live_row(&rig.worktree(), "ab12"));
         assert_eq!(rig.observe().status.code(), Some(0));
 
         let out = rig
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "a nap"])
+            .args(["event", "rest", SEAT, "--reason", "a nap"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -604,9 +537,9 @@ mod effects {
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let calls = rig.calls();
         assert_eq!(calls.len(), 3, "three calls, no more: {calls:?}");
-        assert_eq!(calls[0], "stop ab12", "{calls:?}");
-        assert!(calls[1].starts_with("start "), "{calls:?}");
-        assert_eq!(calls[2], "rm ab12", "{calls:?}");
+        assert_eq!(calls[0], "interrupt", "{calls:?}");
+        assert_eq!(calls[1], "kill", "{calls:?}");
+        assert!(calls[2].starts_with("start --name "), "{calls:?}");
         assert_eq!(rig.events_of("session.rested"), 1);
         assert_eq!(seat_row(&rig)["decision"], "rest");
         assert_eq!(seat_row(&rig)["outcome"], "rested");
@@ -619,7 +552,7 @@ mod effects {
             "the cursor moved past the event this tick consumed: {table}"
         );
         assert_eq!(table["sessions"].as_array().map(Vec::len), Some(1));
-        assert_eq!(table["sessions"][0]["seat"], "builder-1");
+        assert_eq!(table["sessions"][0]["seat"], SEAT_ID);
 
         // AC8 — the in-flight field is CLEARED once the effect returned.
         assert!(
@@ -629,21 +562,26 @@ mod effects {
         );
         assert_eq!(rig.projection()["effects"]["state"], "on");
 
-        // The other half: a stop that does not exit 0.
+        // The other half: a stop that does not land — the host keeps the
+        // session its kill answered for, and the pane is the agent measured,
+        // which one interrupt does not end, so the stop waits out its grace.
         let rig = Rig::new("effect-rest-failed-stop");
         rig.write_roster(&live_row(&rig.worktree(), "ab12"));
         assert_eq!(rig.observe().status.code(), Some(0));
-        rig.set_seam(STOP_EXIT, Some(1));
+        rig.keep_kills(true);
         let out = rig
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "a nap"])
+            .args(["event", "rest", SEAT, "--reason", "a nap"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        assert_eq!(rig.calls(), vec!["stop ab12".to_string()]);
+        assert_eq!(
+            rig.calls(),
+            vec!["interrupt".to_string(), "kill".to_string()]
+        );
         assert_eq!(rig.events_of("session.rested"), 0);
         assert_eq!(rig.events_of("session.spawned"), 0);
         assert_eq!(seat_row(&rig)["outcome"], "failed");
@@ -659,18 +597,18 @@ mod effects {
 
         // The retry: the same event is still standing, so the next poll takes it
         // again — and with the stop landing this time, the collection completes.
-        rig.set_seam(STOP_EXIT, None);
+        rig.keep_kills(false);
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let calls = rig.calls();
         assert_eq!(
             calls.len(),
-            4,
+            5,
             "the retry is a second collection: {calls:?}"
         );
-        assert_eq!(calls[1], "stop ab12", "{calls:?}");
-        assert!(calls[2].starts_with("start "), "{calls:?}");
-        assert_eq!(calls[3], "rm ab12", "{calls:?}");
+        assert_eq!(calls[2], "interrupt", "{calls:?}");
+        assert_eq!(calls[3], "kill", "{calls:?}");
+        assert!(calls[4].starts_with("start --name "), "{calls:?}");
         assert_eq!(rig.events_of("session.rested"), 1);
     }
 
@@ -679,12 +617,13 @@ mod effects {
     #[test]
     fn a_rest_whose_start_failed_says_its_predecessor_was_stopped() {
         let rig = Rig::new("effect-rest-failed-start");
+        common::panes_die_on_interrupt(&rig.tmux_state_path());
         rig.write_roster(&live_row(&rig.worktree(), "ab12"));
         assert_eq!(rig.observe().status.code(), Some(0));
-        rig.set_seam(START_EXIT, Some(1));
+        rig.set_start_exit(Some(1));
         let out = rig
             .binary()
-            .args(["event", "rest", "builder-1", "--reason", "a nap"])
+            .args(["event", "rest", SEAT, "--reason", "a nap"])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -692,9 +631,14 @@ mod effects {
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let calls = rig.calls();
-        assert_eq!(calls.len(), 2, "a stop and a start, no removal: {calls:?}");
-        assert_eq!(calls[0], "stop ab12", "{calls:?}");
-        assert!(calls[1].starts_with("start "), "{calls:?}");
+        assert_eq!(
+            calls.len(),
+            4,
+            "a stop, a start, and the failed start's own session killed: {calls:?}"
+        );
+        assert_eq!(calls[..2], ["interrupt", "kill"], "{calls:?}");
+        assert!(calls[2].starts_with("start --name "), "{calls:?}");
+        assert_eq!(calls[3], "kill", "{calls:?}");
         assert_eq!(seat_row(&rig)["outcome"], "failed");
         let lines = stderr(&out);
         assert_eq!(
@@ -719,7 +663,7 @@ mod effects {
         rig.write_policy(&policy_with(&format!(
             "rest_threshold_tokens = {LOW_THRESHOLD}\n"
         )));
-        rig.write_roster(&live_row(&rig.worktree(), "ab12"));
+        rig.write_roster_taking("ab12");
         rig.write_transcript("ab12", &transcript_of(LOW_THRESHOLD + 5));
 
         let out = rig.observe();
@@ -728,11 +672,10 @@ mod effects {
         assert_eq!(seat_row(&rig)["outcome"], "nudged");
         assert_eq!(rig.events_of("session.nudged"), 1);
         assert_eq!(
-            rig.calls()
-                .iter()
-                .filter(|c| c.starts_with("nudge "))
-                .count(),
-            1
+            rig.typed().len(),
+            1,
+            "the suggestion is typed into the seat's session: {:?}",
+            rig.typed()
         );
         let nudged = rig
             .events()
@@ -749,23 +692,22 @@ mod effects {
         }
         assert_eq!(rig.events_of("session.nudged"), 1);
         assert_eq!(
-            rig.calls()
-                .iter()
-                .filter(|c| c.starts_with("nudge "))
-                .count(),
+            rig.typed().len(),
             1,
             "the budget is per session, not per poll: {:?}",
-            rig.calls()
+            rig.typed()
         );
 
         // A new session for the same seat re-arms it, with no bookkeeping of its
-        // own — the map is keyed on the session id.
-        rig.write_roster(&live_row(&rig.worktree(), "cd34"));
+        // own — the map is keyed on the session id. The first one's turn has
+        // ended, so the seat reads idle again.
+        common::turns_end(&rig.tmux_state_path());
+        rig.write_roster_taking("cd34");
         rig.write_transcript("cd34", &transcript_of(LOW_THRESHOLD + 5));
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert_eq!(rig.events_of("session.nudged"), 2);
-        assert_eq!(rig.sessions()["nudged"]["builder-1"], "cd34");
+        assert_eq!(rig.sessions()["nudged"][SEAT_ID], "cd34");
     }
 
     /// AC3(e) — a start that exits non-zero inside the watch window is a failure
@@ -774,7 +716,7 @@ mod effects {
     fn a_start_that_fails_inside_the_window_is_a_crash_with_a_cause_and_no_row() {
         let rig = Rig::new("effect-failed-start");
         rig.write_roster("[]");
-        rig.set_seam(START_EXIT, Some(1));
+        rig.set_start_exit(Some(1));
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -809,11 +751,56 @@ mod effects {
         );
 
         // The control: the same poll with the stub exiting 0 opens one.
-        rig.set_seam(START_EXIT, None);
+        rig.set_start_exit(None);
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert_eq!(rig.events_of("session.spawned"), 1);
         assert_eq!(rig.sessions()["sessions"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// A launch the AGENT REFUSES is a start that must not be attempted: one
+    /// `session.crashed` whose cause carries the agent's own message and
+    /// reason, nothing started on the host, and no row — read through the Exec,
+    /// from the agent stub's exit 1.
+    #[test]
+    fn a_launch_the_agent_refuses_is_one_crash_naming_the_agents_message() {
+        use fleet_controller::test_support::Declined;
+        use fleet_core::agent::{Refusal, RefusalReason};
+
+        let rig = Rig::new("effect-launch-refused");
+        rig.write_roster("[]");
+        agent_stub::script(&rig.root, |a| {
+            a.launch = Err(Declined::Refused(Refusal {
+                reason: RefusalReason::Unsupported,
+                message: String::from("the stub takes no such posture"),
+            }))
+        });
+
+        let out = rig.observe();
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(seat_row(&rig)["outcome"], "failed");
+        assert_eq!(rig.events_of("session.crashed"), 1, "{:?}", rig.events());
+        assert_eq!(rig.events_of("session.spawned"), 0);
+        let crashed = rig
+            .events()
+            .into_iter()
+            .find(|e| e["type"] == "session.crashed")
+            .expect("the refusal is an event");
+        let cause = crashed["payload"]["cause"].as_str().unwrap_or_default();
+        assert!(
+            cause.contains("the stub takes no such posture") && cause.contains("unsupported"),
+            "the cause names the agent's refusal: {crashed}"
+        );
+        assert!(
+            rig.host_starts().is_empty(),
+            "nothing is started for a launch the agent refused: {:?}",
+            rig.host_starts()
+        );
+        assert_eq!(
+            agent_stub::calls_of(&rig.root, StubAgent::LAUNCH).len(),
+            1,
+            "the refusal was the agent's, asked once"
+        );
     }
 
     /// AC3(f) — a row whose model cannot honour the posture its start would ask
@@ -824,8 +811,8 @@ mod effects {
         rig.write_roster("[]");
         rig.write_config(&format!(
             r#"{{"fleet_toml": "{}", "children": [
-                 {{"name":"builder-1","chosen_name":"Rook",
-                   "model":"claude-haiku-4-5-20251001",
+                 {{"id":"{SEAT_ID}","name":"Orla",
+                   "model":"other-model-4",
                    "worktrees":{{"demo":"{}"}}}}
                ]}}"#,
             rig.policy_path().display(),
@@ -836,7 +823,7 @@ mod effects {
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let said = stderr(&out);
         assert!(
-            said.contains("claude-haiku-4-5-20251001") && said.contains("claude-opus-5"),
+            said.contains("other-model-4") && said.contains(StubAgent::AUTO_CAPABLE),
             "the drop names the model and the list it is outside of: {said}"
         );
         assert!(
@@ -876,19 +863,19 @@ mod effects {
             "a gate that is open carries no cause: {published}"
         );
 
-        // With the agent binary unresolvable the loop still observes and
-        // publishes, and says why it is issuing nothing.
-        let out = rig.observe_with_env(&[(
-            common::hermetic::CLAUDE_BIN,
-            Some(rig.root.join("no-such-agent").as_os_str()),
-        )]);
+        // With an adapter that answers no agent is installed — its version
+        // null — the loop still observes and publishes, and says why it is
+        // issuing nothing.
+        rig.set_version("SILENT");
+        let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let published = rig.projection();
         assert_eq!(published["effects"]["state"], "off");
         let cause = published["effects"]["cause"].as_str().unwrap_or_default();
         assert!(
-            cause.contains("no-such-agent"),
-            "the gate names what it could not resolve: {cause}"
+            cause.contains(&common::agent_stub_path().display().to_string())
+                && cause.contains("its version is null"),
+            "the gate names the adapter and why it is off: {cause}"
         );
         assert_eq!(
             published["seats"][0]["outcome"], "none",
@@ -896,37 +883,53 @@ mod effects {
         );
     }
 
-    /// AC2 — a revive DISPATCHES an attach of the row's short id, emits one
-    /// `session.revived`, and publishes `revived` as its outcome.
+    /// AC2 — a revive is a NEW SESSION ON THE HOST whose command resumes the
+    /// session's FULL id with the start's flags, believed only when the listing
+    /// shows the new pane's process carrying that same id; it emits one
+    /// `session.revived` and publishes `revived` as its outcome.
     ///
-    /// The attach is addressed by the SHORT id and never by the session id: the
-    /// two are different values, and a call issued against the identity reaches
-    /// no row (lessons claude-code A6, A9).
-    ///
-    /// So the row carries an `id` and a `sessionId` that DIFFER, and the
-    /// transcript is keyed under the identity — the arm cannot measure its own
-    /// claim from a row that writes one value into both.
+    /// What brings a seat here is a DEAD PANE, whose session the table names
+    /// (ruling 3). The listing names the resume's pane — the first session this
+    /// host starts — under the session it resumed, and stands it in no seat's
+    /// worktree, so the row is the resume's by its pid and by nothing else.
     #[test]
-    fn a_revive_attaches_the_rows_short_id_and_says_so_once() {
+    fn a_revive_resumes_the_full_id_as_a_new_session_and_says_so_once() {
         let rig = Rig::new("effect-revive");
-        // A pid-less row with no deliberate end and a reading under the
-        // threshold is a revive.
-        rig.write_roster(&ended_row_addressed(
-            &rig.worktree(),
-            "ab12",
-            "a-session",
-            now_ms(),
-        ));
+        // A dead pane with no deliberate end and a reading under the threshold
+        // is a revive.
+        rig.a_dead_session("a-session", Some(0));
         rig.write_transcript("a-session", &transcript_of(10));
+        rig.write_roster(&format!(
+            r#"[{{"sessionId":"a-session","cwd":"/nowhere/resumed","kind":"interactive",
+                  "pid":{FIRST_PANE_PID},"status":"idle"}}]"#
+        ));
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert_eq!(seat_row(&rig)["decision"], "revive");
         assert_eq!(seat_row(&rig)["outcome"], "revived");
+        let calls = rig.calls();
         assert_eq!(
-            rig.calls(),
-            vec!["attach ab12".to_string()],
-            "the attach takes the row's ADDRESS and the poll issues nothing else"
+            calls.len(),
+            2,
+            "the dead pane cleared, then the resume, and nothing else: {calls:?}"
+        );
+        assert_eq!(calls[0], "kill", "{calls:?}");
+        let resumed: Vec<&str> = calls[1].split(' ').collect();
+        assert_eq!(
+            resumed[..3],
+            ["start", "--resume", "a-session"],
+            "the FULL id the table recorded: {calls:?}"
+        );
+        for flag in ["--model", "--posture"] {
+            assert!(
+                resumed.contains(&flag),
+                "the start's {flag} rides: {calls:?}"
+            );
+        }
+        assert!(
+            !resumed.contains(&"--name"),
+            "and no name, which the session already has: {calls:?}"
         );
         assert_eq!(rig.events_of("session.revived"), 1);
         let revived = rig
@@ -935,11 +938,13 @@ mod effects {
             .find(|e| e["type"] == "session.revived")
             .expect("the event is in the stream");
         assert_eq!(revived["payload"]["session"], "a-session");
-        assert_eq!(revived["payload"]["address"], "ab12");
-        assert_eq!(revived["payload"]["outcome"], "dispatched");
+        assert!(
+            revived["payload"].get("address").is_none(),
+            "no address rides the line: {revived}"
+        );
 
         // The row is RE-OPENED as this dispatch's, so the arrival window is
-        // keyed to the attach and answered by a sighting. Without it the same
+        // keyed to the revive and answered by a sighting. Without it the same
         // row reads sighted and is revived again on the next poll.
         let row = &rig.sessions()["sessions"][0];
         assert!(
@@ -949,15 +954,17 @@ mod effects {
         assert_eq!(row["dispatch_id"], revived["id"]);
     }
 
-    /// AC2 — the revive counts toward the blind counter EVEN WHEN THE ATTACH
-    /// FAILS, because the call's own exit is not a witness either way (lessons
-    /// claude-code A7).
+    /// AC2 — a resume that comes up under ANOTHER id is a fork: the revive is
+    /// failed, its session killed, and it still counts toward the blind counter,
+    /// because a revive that keeps failing must reach the halt.
+    ///
+    /// The listing names the resume's pane only as the arrival every listing
+    /// here carries, whose id is not the session the table recorded.
     #[test]
-    fn a_revive_whose_attach_failed_still_counts_as_a_dispatch() {
-        let rig = Rig::new("effect-revive-failed");
-        rig.write_roster(&ended_row(&rig.worktree(), "ab12", now_ms()));
-        rig.write_transcript("ab12", &transcript_of(10));
-        rig.set_seam(ATTACH_EXIT, Some(1));
+    fn a_revive_that_forks_is_failed_killed_and_still_counts_as_a_dispatch() {
+        let rig = Rig::new("effect-revive-forked");
+        rig.a_dead_session("a-session", Some(0));
+        rig.write_transcript("a-session", &transcript_of(10));
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -970,11 +977,29 @@ mod effects {
             rig.projection()
         );
         assert_eq!(rig.events_of("dispatch.blind"), 1);
-        assert_eq!(rig.sessions()["seats"]["builder-1"]["blind"], 1);
+        assert_eq!(rig.sessions()["seats"][SEAT_ID]["blind"], 1);
+        assert!(
+            !rig.host().sessions.contains_key(SEAT_ID),
+            "the fork was killed, and nothing of the revive is left on the host: {:?}",
+            rig.host().sessions
+        );
+        let crashed: Vec<serde_json::Value> = rig
+            .events()
+            .into_iter()
+            .filter(|e| e["type"] == "session.crashed")
+            .collect();
+        assert_eq!(crashed.len(), 1, "{crashed:?}");
+        assert_eq!(crashed[0]["payload"]["phase"], "revive");
+        assert_eq!(rig.events_of("session.revived"), 0);
 
-        // And the failed attach opened no window: the row still carries its
-        // session, so the next poll decides about the same pid-less row again.
-        assert_eq!(rig.events_of("session.revived"), 1);
+        // And the failed revive opened no window: the row still carries its
+        // session, so the next poll decides about the seat again.
+        assert_eq!(
+            rig.sessions()["sessions"][0]["session_id"],
+            "a-session",
+            "{}",
+            rig.sessions()
+        );
     }
 
     /// AC3 — three consecutive blind dispatches halt the seat: one
@@ -986,7 +1011,7 @@ mod effects {
         // A seat with no row at all: every poll spawns, and the stub's start
         // never puts a row on the roster, so no sighting ever answers.
         rig.write_roster("[]");
-        rig.set_seam(START_EXIT, Some(1));
+        rig.set_start_exit(Some(1));
 
         for poll in 1..=3 {
             let out = rig.observe();
@@ -1010,7 +1035,7 @@ mod effects {
         let row = seat_row(&rig);
         assert_eq!(row["decision"], "halt");
         assert_eq!(row["outcome"], "halted");
-        assert_eq!(row["blind"], 3, "the R26 row carries its count: {row}");
+        assert_eq!(row["blind"], 3, "the seat row carries its count: {row}");
         assert_eq!(row["halted"], true);
         assert_eq!(
             rig.events_of("session.halted"),
@@ -1021,7 +1046,7 @@ mod effects {
         // The remedy: a person's request, consumed on the next tick.
         let out = rig
             .binary()
-            .args(["event", "clear-halt", "builder-1"])
+            .args(["event", "clear-halt", SEAT])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -1051,7 +1076,7 @@ mod effects {
         // 5 — nothing has published, so nothing would consume the request.
         let out = rig
             .binary()
-            .args(["event", "clear-halt", "builder-1"])
+            .args(["event", "clear-halt", SEAT])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
@@ -1070,7 +1095,7 @@ mod effects {
 
         let out = rig
             .binary()
-            .args(["event", "clear-halt", "builder-1"])
+            .args(["event", "clear-halt", SEAT])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
@@ -1084,49 +1109,6 @@ mod effects {
             0,
             "and a refused request writes nothing"
         );
-    }
-
-    /// AC4 — a pid-less row is held with the replacement-held reason while the
-    /// daemon is young, and dispatched against once the window closes.
-    #[test]
-    fn a_pidless_row_is_held_while_the_stub_daemon_is_young() {
-        let rig = Rig::new("effect-replacement");
-        rig.write_roster(&ended_row(&rig.worktree(), "ab12", now_ms()));
-        rig.write_transcript("ab12", &transcript_of(10));
-        // The arrival window is 45s by default, so a two-second daemon is inside
-        // it and a one-hour one is not.
-        rig.write_daemon(4242, "2s");
-
-        let out = rig.observe();
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        assert_eq!(seat_row(&rig)["decision"], "leave-alone");
-        assert!(
-            stderr(&out).contains("replacement window: held"),
-            "the hold names itself: {}",
-            stderr(&out)
-        );
-        assert!(
-            rig.calls().is_empty(),
-            "and nothing was dispatched: {:?}",
-            rig.calls()
-        );
-
-        // The window closes and the same row is revived.
-        rig.write_daemon(4242, "1h");
-        let out = rig.observe();
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        assert_eq!(seat_row(&rig)["decision"], "revive");
-        assert_eq!(rig.calls(), vec!["attach ab12".to_string()]);
-
-        // And an unreadable daemon read opens NO window on its own: the same row
-        // with the status call failing is dispatched against.
-        let rig = Rig::new("effect-replacement-unreadable");
-        rig.write_roster(&ended_row(&rig.worktree(), "cd34", now_ms()));
-        rig.write_transcript("cd34", &transcript_of(10));
-        rig.set_seam(DAEMON_EXIT, Some(1));
-        let out = rig.observe();
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        assert_eq!(seat_row(&rig)["decision"], "revive");
     }
 
     /// AC2, AC7 — a restart ADOPTS the live sessions its table names, and a
@@ -1158,7 +1140,10 @@ mod effects {
             .find(|e| e["type"] == "session.adopted")
             .expect("the event is in the stream");
         assert_eq!(adopted["payload"]["session"], "a-session");
-        assert_eq!(adopted["actor"], "builder-1");
+        assert_eq!(
+            adopted["actor"],
+            serde_json::json!({ "kind": "seat", "id": SEAT_ID })
+        );
         assert_eq!(
             rig.calls().len(),
             before,
@@ -1228,20 +1213,18 @@ mod effects {
 
     /// AC7 — the rebuild folds a STANDING halt out of the stream: a
     /// `session.halted` with no clear after it is a hold that survives the table
-    /// being lost, and the daemon pid starts at none.
+    /// being lost.
     #[test]
-    fn a_rebuilt_table_carries_a_standing_halt_and_no_daemon_pid() {
+    fn a_rebuilt_table_carries_a_standing_halt() {
         let rig = Rig::new("effect-rebuild-halt");
         rig.write_roster("[]");
-        rig.set_seam(START_EXIT, Some(1));
-        rig.write_daemon(4242, "1h");
+        rig.set_start_exit(Some(1));
         for _ in 0..3 {
             let out = rig.observe();
             assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         }
         assert_eq!(rig.events_of("session.halted"), 1);
-        assert_eq!(rig.sessions()["seats"]["builder-1"]["halted"], true);
-        assert_eq!(rig.sessions()["daemon_pid"], 4242);
+        assert_eq!(rig.sessions()["seats"][SEAT_ID]["halted"], true);
 
         write(&rig.machine().join("sessions.json"), "{not json at all");
         let out = rig.observe();
@@ -1262,7 +1245,7 @@ mod effects {
         // no hold at all.
         let out = rig
             .binary()
-            .args(["event", "clear-halt", "builder-1"])
+            .args(["event", "clear-halt", SEAT])
             .output()
             .expect("the built binary runs");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -1288,14 +1271,13 @@ mod effects {
     fn a_deleted_table_is_rebuilt_from_the_stream_and_the_halt_survives() {
         let rig = Rig::new("effect-deleted-table");
         rig.write_roster("[]");
-        rig.set_seam(START_EXIT, Some(1));
-        rig.write_daemon(4242, "1h");
+        rig.set_start_exit(Some(1));
         for _ in 0..3 {
             let out = rig.observe();
             assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         }
         assert_eq!(rig.events_of("session.halted"), 1);
-        assert_eq!(rig.sessions()["seats"]["builder-1"]["halted"], true);
+        assert_eq!(rig.sessions()["seats"][SEAT_ID]["halted"], true);
 
         // The control that the file was there to lose: the poll below reads a
         // path that resolves to nothing.
@@ -1334,124 +1316,94 @@ mod effects {
     }
 
     /// A seat event whose actor names no configured row is dropped with a line.
+    ///
+    /// The actor is a seat, matched on its id: another seat's id is no row of
+    /// this list, and neither is this seat's own machine name.
     #[test]
     fn a_seat_event_for_a_row_the_seat_list_does_not_carry_is_dropped() {
-        let rig = Rig::new("effect-unknown-actor");
+        const ANOTHER: &str = "01a0d1f1-0aec-765f-9abe-0000000000ff";
+        for actor in [ANOTHER, SEAT] {
+            let rig = Rig::new("effect-unknown-actor");
+            rig.write_roster(&live_row(&rig.worktree(), "ab12"));
+            assert_eq!(rig.observe().status.code(), Some(0));
+
+            append_event(
+                &rig,
+                "seat.resting",
+                serde_json::json!({ "kind": "seat", "id": actor }),
+                serde_json::json!({"reason": "x"}),
+            );
+            let out = rig.observe();
+            assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+            assert!(
+                stderr(&out).contains(&format!(
+                    "dropping a seat.resting whose actor `{actor}` names no seat row"
+                )),
+                "the drop is stated: {}",
+                stderr(&out)
+            );
+            assert!(rig.calls().is_empty(), "{actor}: {:?}", rig.calls());
+        }
+
+        // The control: the same line by this seat's id is taken, and asks for a
+        // rest the next poll collects.
+        let rig = Rig::new("effect-known-actor");
         rig.write_roster(&live_row(&rig.worktree(), "ab12"));
         assert_eq!(rig.observe().status.code(), Some(0));
-
         append_event(
             &rig,
             "seat.resting",
-            "nobody",
+            serde_json::json!({ "kind": "seat", "id": SEAT_ID }),
             serde_json::json!({"reason": "x"}),
         );
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         assert!(
-            stderr(&out).contains("names no seat row"),
-            "the drop is stated: {}",
+            !stderr(&out).contains("names no seat row"),
+            "{}",
             stderr(&out)
         );
-        assert!(rig.calls().is_empty(), "{:?}", rig.calls());
+        assert_eq!(seat_row(&rig)["decision"], "rest", "{}", seat_row(&rig));
     }
 
-    /// An effect execs the binary the GATE resolved, on the constructed path,
-    /// and not whatever `claude` this process's own search path finds first
-    /// (PRD R19, §7).
-    ///
-    /// The two are separated by putting a DIFFERENT `claude` first on the
-    /// controller's `PATH` from the one the constructed path resolves, with the
-    /// seam unset so both questions fall to the bare default. Every other arm in
-    /// this file sets `FLEET_CLAUDE_BIN` to one absolute path, which makes the
-    /// two resolutions one value and hides the difference — this arm is the only
-    /// one that can see it.
-    ///
-    /// The reading is the child's own `$0`, not the argv: the argv says what the
-    /// call passed and is byte-identical either way.
-    ///
-    /// THE PRECONDITION IS ASSERTED BEFORE THE POLL, and that ordering is the
-    /// safety as much as the reading. If some box carries a `claude` earlier on
-    /// the constructed path than the home's `.local/bin` — a package manager's
-    /// prefix holds one on a fleet member — this arm would otherwise EXEC A REAL
-    /// AGENT. So it resolves the constructed path itself first and reds naming
-    /// the shadow instead.
+    /// A seat event whose actor is not a seat is dropped with a line, BY ITS
+    /// KIND: a run whose id is this seat's own id is still a run, and a fold
+    /// that compared the id alone would take the run's line as the seat's.
     #[test]
-    fn an_effect_execs_the_resolved_binary_and_not_the_first_claude_on_this_processs_path() {
-        let rig = Rig::new("effect-binary");
-        rig.write_roster("[]");
+    fn a_seat_event_whose_actor_is_not_a_seat_is_dropped_by_its_kind() {
+        for kind in ["seat.woke", "seat.resting"] {
+            let rig = Rig::new("effect-run-actor");
+            rig.write_roster(&live_row(&rig.worktree(), "ab12"));
+            assert_eq!(rig.observe().status.code(), Some(0));
 
-        let constructed = rig.plant_stub_on_the_constructed_path();
-        let resolved = fleet_controller::platform::resolve_on_path(
-            &child_path(&rig.home()),
-            fleet_controller::adapter::claude_code::DEFAULT_BIN,
-        );
-        assert_eq!(
-            resolved.as_deref(),
-            Some(constructed.as_path()),
-            "a `claude` earlier on the constructed path than this rig's own shadows it; \
-             this arm will not exec a binary it did not plant"
-        );
-
-        // The decoy: the same recording stub under the same name, in a directory
-        // that is FIRST on the controller's own `PATH` and on no constructed
-        // one. It answers the listing and the version, so the poll gets as far
-        // as deciding — which is the point: the reads may run here, the effect
-        // may not.
-        let decoy_dir = rig.root.join("decoy-bin");
-        std::fs::create_dir_all(&decoy_dir).unwrap();
-        let decoy = decoy_dir.join(fleet_controller::adapter::claude_code::DEFAULT_BIN);
-        std::fs::copy(rig.stub_path(), &decoy).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let out = rig.observe_with_env(&[
-            (common::hermetic::CLAUDE_BIN, None),
-            ("PATH", Some(decoy_dir.as_os_str())),
-        ]);
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-
-        // The poll reached the effect at all, so the assertion below is about
-        // which binary ran and not about a start that never happened.
-        assert_eq!(seat_row(&rig)["decision"], "spawn-woken");
-        assert_eq!(seat_row(&rig)["outcome"], "spawned");
-        assert_eq!(rig.projection()["effects"]["state"], "on");
-
-        assert_eq!(
-            rig.start_bin(),
-            constructed,
-            "the effect exec'd the binary the gate resolved on the constructed path"
-        );
-        assert_ne!(
-            rig.start_bin(),
-            decoy,
-            "and not the first `claude` on this process's own search path"
-        );
-
-        // The control that makes the decoy a decoy: it IS what the reads run,
-        // because observe resolves its bare name on the process path. Without
-        // this, the arm would pass against a controller that could not see the
-        // decoy at all — and would then be measuring nothing.
-        assert_eq!(
-            fleet_controller::platform::resolve_on_path(
-                &decoy_dir.display().to_string(),
-                fleet_controller::adapter::claude_code::DEFAULT_BIN,
-            )
-            .as_deref(),
-            Some(decoy.as_path()),
-            "the decoy is on the path the reads resolve"
-        );
-        assert_eq!(
-            rig.projection()["agent_version"],
-            "9.9.9",
-            "and the version read answered through it: {}",
-            rig.projection()
-        );
+            append_event(
+                &rig,
+                kind,
+                serde_json::json!({ "kind": "run", "id": SEAT_ID }),
+                serde_json::json!({"reason": "x"}),
+            );
+            let out = rig.observe();
+            assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+            assert!(
+                stderr(&out).contains(&format!(
+                    "fleet observe: dropping a {kind} whose actor run:{SEAT_ID} is not a seat"
+                )),
+                "the drop is stated by kind: {}",
+                stderr(&out)
+            );
+            assert!(
+                !stderr(&out).contains("names no seat row"),
+                "{}",
+                stderr(&out)
+            );
+            assert_ne!(seat_row(&rig)["decision"], "rest", "{}", seat_row(&rig));
+            assert!(rig.calls().is_empty(), "{kind}: {:?}", rig.calls());
+        }
     }
 
     /// One line into the stream, written the way something other than the CLI
     /// would write it — which is the case the consumer's drops exist for.
-    fn append_event(rig: &Rig, kind: &str, actor: &str, payload: serde_json::Value) {
+    fn append_event(rig: &Rig, kind: &str, actor: serde_json::Value, payload: serde_json::Value) {
         let path = rig.events_path();
         let body = std::fs::read_to_string(&path).unwrap_or_default();
         let seq = body
@@ -1469,13 +1421,15 @@ mod effects {
     }
 }
 
-/// The per-row configuration directory, driven through the BUILT controller
-/// (flights PRD R13, Q1e; § The seat's isolation, as measured).
+/// The per-row configuration directory, driven through the whole loop: each
+/// spawned seat starts under a configuration directory of its own, and every
+/// question the loop puts to the agent about its session carries that one.
 ///
 /// The unit arms in `controller/tests/observe.rs` pin the fold over values they
-/// build themselves; these drive the whole path — the listing the loop asks for,
-/// the transcript it resolves, and the line it writes — which is where a read
-/// threaded to the wrong directory shows up.
+/// build themselves; these drive the whole path — the requests the loop sends
+/// the agent, the reading it gets back, and the line it writes — which is where
+/// a read threaded to the wrong directory shows up. How an agent reads under a
+/// directory is its adapter's; what the loop owes is asking under it.
 mod isolation {
     use super::*;
 
@@ -1484,7 +1438,7 @@ mod isolation {
     fn one_transient_seat(rig: &Rig) -> String {
         format!(
             r#"{{"fleet_toml": "{}", "children": [
-                 {{"name":"builder-1","chosen_name":"Rook","transient":true,
+                 {{"id":"{SEAT_ID}","name":"Orla","transient":true,
                    "worktrees":{{"demo":"{}"}}}}
                ]}}"#,
             rig.policy_path().display(),
@@ -1497,9 +1451,9 @@ mod isolation {
     /// and the item the order index named, sighted by nothing yet.
     fn table_naming(config_dir: &Path, item: &str, worktree: &Path) -> String {
         format!(
-            r#"{{"schema":1,"consumed_seq":0,"nudged":{{}},"seats":{{}},"sessions":[
-                 {{"seat":"builder-1","project":"demo","worktree":"{}",
-                   "name":"rook","model":"a-model","posture":"dontAsk",
+            r#"{{"schema":2,"consumed_seq":0,"nudged":{{}},"seats":{{}},"sessions":[
+                 {{"seat":"{SEAT_ID}","project":"demo","worktree":"{}",
+                   "name":"{SEAT}","model":"a-model","posture":"unattended",
                    "first_turn":"a brief","transient":true,
                    "config_dir":"{}","item":"{}",
                    "dispatch_id":"a-dispatch","dispatched_at":1000}}
@@ -1515,69 +1469,50 @@ mod isolation {
         rig.projection()["seats"][0].clone()
     }
 
-    /// The provider's logged-out first turn, as it was read off a real
-    /// transcript on this box on 2026-09-12 (2.1.261).
+    /// A session log whose first turn is the logged-out answer, in the stub's
+    /// own shape (`test_support::reading::logged_out_first_turn`): an entry
+    /// written in place of a model turn, its cause `authentication_failed`, its
+    /// window zero.
     const LOGGED_OUT: &str = concat!(
         r#"{"type":"user","isSidechain":false,"message":{"role":"user"}}"#,
         "\n",
         r#"{"type":"assistant","isSidechain":false,"isApiErrorMessage":true,"#,
-        r#""error":"authentication_failed","message":{"model":"<synthetic>","#,
-        r#""usage":{"input_tokens":0,"output_tokens":0,"#,
-        r#""cache_creation_input_tokens":0,"cache_read_input_tokens":0},"#,
-        r#""content":[{"type":"text","text":"Not logged in"}]}}"#,
+        r#""error":"authentication_failed","message":{"usage":{"input_tokens":0}}}"#,
         "\n",
     );
 
-    /// The transcript the adapter resolves for a session under one configuration
-    /// directory, written where the adapter will look for it.
-    fn write_transcript(config_dir: &Path, worktree: &Path, session: &str, body: &str) {
-        let path = config_dir
-            .join("projects")
-            .join(encoded(worktree))
-            .join(format!("{session}.jsonl"));
-        std::fs::create_dir_all(path.parent().expect("the transcript has a parent"))
-            .expect("the transcript directory is made");
-        write(&path, body);
-        assert!(
-            path.exists(),
-            "the fixture is on disk at {}",
-            path.display()
-        );
-    }
-
-    /// The agent's per-project directory name: every character that is not
-    /// alphanumeric becomes a dash (lessons claude-code C1).
-    fn encoded(worktree: &Path) -> String {
-        worktree
-            .display()
-            .to_string()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+    /// The configuration directory every `read` and `context` request asked
+    /// about the seat under, one per request, in call order.
+    fn asked_under(rig: &Rig) -> Vec<Option<String>> {
+        agent_stub::logged(&rig.root)
+            .into_iter()
+            .filter(|call| call.verb == StubAgent::READ || call.verb == StubAgent::CONTEXT)
+            .flat_map(|call| {
+                call.request["seats"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|seat| seat["seat"] == SEAT_ID)
+                    .map(|seat| seat["config_dir"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
-    /// AC2 — the controller asks for a transient row's listing UNDER THAT ROW'S
-    /// directory, and the row is seen there while the fleet's listing does not
-    /// name it.
-    ///
-    /// The two listings differ in content, so the arm cannot pass by reading
-    /// either one twice: the fleet's roster is empty and the per-row one carries
-    /// the session.
+    /// AC2 — the controller asks about a transient row's session UNDER THAT
+    /// ROW'S directory, and never under the fleet's own: every `read` and
+    /// `context` request naming the seat carries the directory the session
+    /// table recorded for it.
     #[test]
-    fn a_transient_rows_listing_is_read_under_its_own_configuration_directory() {
+    fn a_transient_rows_session_is_asked_about_under_its_own_configuration_directory() {
         let rig = Rig::new("isolation-per-row-listing");
-        let config_dir = rig.machine().join("config").join("builder-1");
+        let config_dir = rig.machine().join("config").join(SEAT);
         std::fs::create_dir_all(&config_dir).expect("the per-row directory is made");
         rig.write_config(&one_transient_seat(&rig));
-        // The FLEET's listing names nothing, which is what a per-row daemon
-        // leaves it saying.
-        rig.write_roster("[]");
-        // The row's own listing names the session, served by the stub out of the
-        // directory it was asked under.
-        write(
-            &config_dir.join("roster.json"),
-            &live_row(&rig.worktree(), "a-session"),
-        );
+        // The listing names the session, and the host its pane, by the row's
+        // pid (ruling 3).
+        rig.write_roster(&live_row(&rig.worktree(), "a-session"));
         write(
             &rig.machine().join("sessions.json"),
             &table_naming(&config_dir, "an-item", &rig.worktree()),
@@ -1586,16 +1521,18 @@ mod isolation {
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
-        // BOTH directories were asked, and the row's own is among them: this is
-        // what a fold reading every row under the fleet's own leaves out.
-        let dirs = rig.listing_dirs();
+        // The row's own directory was asked, and ONLY it: this is what a fold
+        // reading every row under the fleet's own leaves out, and a seat whose
+        // session came up under its own directory is asked about there alone.
+        let asked = asked_under(&rig);
+        let own = Some(config_dir.display().to_string());
         assert!(
-            dirs.iter().any(|d| Path::new(d) == config_dir),
-            "the row's own directory was read: {dirs:?}"
+            asked.contains(&own),
+            "the row's own directory was asked: {asked:?}"
         );
         assert!(
-            dirs.iter().any(|d| Path::new(d) != config_dir),
-            "and the fleet's was read too: {dirs:?}"
+            asked.iter().all(|dir| dir == &own),
+            "and no other, the fleet's included: {asked:?}"
         );
 
         let row = seat_row(&rig);
@@ -1607,28 +1544,20 @@ mod isolation {
 
     /// AC1's second half and AC3 — a transient row whose first turn answered
     /// LOGGED OUT puts exactly one `dispatch.failed` on the stream, naming the
-    /// seat and the item, and a row that answered puts none.
-    ///
-    /// Measured live on this box on 2026-09-12: the same start one variable apart
-    /// — the credential knob unset rather than defined-and-empty — wrote exactly
-    /// this transcript shape, while the defined-empty arm answered with a real
-    /// turn carrying 36,072 tokens of window.
+    /// seat and the item, and a row that answered puts none. The reading is the
+    /// agent's — blocked on `logged_out` — and the line is the loop's.
     #[test]
     fn a_logged_out_first_turn_writes_one_dispatch_failed_naming_the_seat_and_the_item() {
         let rig = Rig::new("isolation-logged-out");
-        let config_dir = rig.machine().join("config").join("builder-1");
+        let config_dir = rig.machine().join("config").join(SEAT);
         std::fs::create_dir_all(&config_dir).expect("the per-row directory is made");
         rig.write_config(&one_transient_seat(&rig));
-        rig.write_roster("[]");
-        write(
-            &config_dir.join("roster.json"),
-            &live_row(&rig.worktree(), "a-session"),
-        );
+        rig.write_roster(&live_row(&rig.worktree(), "a-session"));
         write(
             &rig.machine().join("sessions.json"),
             &table_naming(&config_dir, "an-item", &rig.worktree()),
         );
-        write_transcript(&config_dir, &rig.worktree(), "a-session", LOGGED_OUT);
+        rig.write_transcript("a-session", LOGGED_OUT);
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -1643,8 +1572,15 @@ mod isolation {
             .into_iter()
             .find(|e| e["type"] == "dispatch.failed")
             .expect("the line is on the stream");
-        assert_eq!(line["actor"], "builder-1");
-        assert_eq!(line["payload"]["seat"], "builder-1");
+        assert_eq!(
+            line["actor"],
+            serde_json::json!({ "kind": "seat", "id": SEAT_ID })
+        );
+        assert_eq!(
+            line["payload"]["seat"],
+            serde_json::json!({ "id": SEAT_ID, "name": "Orla", "kind": "agent" }),
+            "the seat as its object: {line}"
+        );
         assert_eq!(line["payload"]["item"], "an-item");
         assert_eq!(line["payload"]["cause"], "authentication_failed");
 
@@ -1668,21 +1604,15 @@ mod isolation {
     #[test]
     fn a_first_turn_that_answered_writes_no_dispatch_failed() {
         let rig = Rig::new("isolation-answered");
-        let config_dir = rig.machine().join("config").join("builder-1");
+        let config_dir = rig.machine().join("config").join(SEAT);
         std::fs::create_dir_all(&config_dir).expect("the per-row directory is made");
         rig.write_config(&one_transient_seat(&rig));
-        rig.write_roster("[]");
-        write(
-            &config_dir.join("roster.json"),
-            &live_row(&rig.worktree(), "a-session"),
-        );
+        rig.write_roster(&live_row(&rig.worktree(), "a-session"));
         write(
             &rig.machine().join("sessions.json"),
             &table_naming(&config_dir, "an-item", &rig.worktree()),
         );
-        write_transcript(
-            &config_dir,
-            &rig.worktree(),
+        rig.write_transcript(
             "a-session",
             "{\"type\":\"assistant\",\"isSidechain\":false,\
              \"message\":{\"usage\":{\"input_tokens\":36072}}}\n",
@@ -1690,12 +1620,12 @@ mod isolation {
 
         let out = rig.observe();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        // The positive control that the transcript was READ at all: the context
-        // reading is the same file, resolved through the same directory.
+        // The positive control that the log was READ at all: the context
+        // reading is the same log, asked about under the same directory.
         let row = seat_row(&rig);
         assert_eq!(
             row["context_tokens"], 36072,
-            "the transcript was read under the row's directory: {row}"
+            "the session's context was read: {row}"
         );
         assert_eq!(
             rig.events_of("dispatch.failed"),

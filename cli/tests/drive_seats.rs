@@ -11,87 +11,55 @@ include!("drive/rig.rs");
 
 mod common;
 
-/// The window is measured from the session's END, and this is the reading that
-/// separates that from the start: a session that RAN for 25 hours and finished
-/// a minute ago. Keyed on the start it is a day-old row and its transcript goes
-/// with it; keyed on the end it is the freshest stopped row there is.
+/// A DEAD PANE is a stopped seat (ruling 3): the host keeps the pane with the
+/// status its agent exited with, the listing names nothing — the row went with
+/// the process (the claude-code pack's lessons B10) — and the session the table
+/// recorded still answers for context, because its transcript outlives it (C4).
 ///
-/// The end is the transcript's last write, so the transcript is written here
-/// and left at its own mtime — writing it IS the session's last act.
+/// Each `observe --once` is a controller's FIRST poll, which did not see the
+/// pane die, so the one `session.ended` it writes is dated by the transcript;
+/// the second poll finds the end latched and writes none. There is no stopped
+/// window left to age the row out: it reads stopped for as long as the pane is
+/// kept.
 #[test]
-fn a_long_session_that_just_ended_reads_stopped_and_not_history() {
-    let rig = Rig::new("recency-just-ended");
-    rig.write_roster(&ended_row(
-        &rig.worktree(),
-        "a-session",
-        now_ms() - 25 * HOUR_MS,
-    ));
+fn a_dead_pane_reads_stopped_with_its_status_its_end_and_its_context() {
+    let rig = Rig::new("dead-pane");
+    rig.a_dead_session("a-session", Some(3));
+    // Held down, so the poll decides nothing for the seat and the next one
+    // reads the same dead pane: what is measured here is what a poll READS. A
+    // revive would replace the pane, and that is the effects suite's.
+    rig.hold_the_seat();
     rig.write_transcript(
         "a-session",
         "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":18}}}\n",
     );
 
-    assert_eq!(
-        rig.observe().status.code(),
-        Some(0),
-        "{}",
-        rig.root.display()
-    );
+    let out = rig.observe();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let row = &rig.projection()["seats"][0];
-    assert_eq!(
-        row["roster_state"], "stopped",
-        "a session that ended a minute ago is stopped however long it ran: {row}"
-    );
-    assert!(
-        row["roster_recency_fallback"].is_null(),
-        "and it was ranked on its END, so nothing fell back: {row}"
-    );
-    // The transcript is the evidence the row keeps by staying stopped: an absent
-    // row publishes no reading at all, so this is the same claim from the side a
-    // reader of the document cares about.
+    assert_eq!(row["roster_state"], "stopped", "{row}");
+    assert_eq!(row["exit_status"], 3, "{row}");
     assert_eq!(
         row["context_tokens"], 18,
         "the stopped row still answers for context: {row}"
     );
-}
+    let ends: Vec<serde_json::Value> = rig
+        .events()
+        .into_iter()
+        .filter(|e| e["type"] == "session.ended")
+        .collect();
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["payload"]["session"], "a-session");
+    assert_eq!(ends[0]["payload"]["status"], 3);
+    assert_eq!(ends[0]["payload"]["source"], "transcript");
+    assert!(ends[0]["payload"]["at"].is_string(), "{}", ends[0]);
+    assert_eq!(row["ended_at"], ends[0]["payload"]["at"], "{row}");
 
-/// The window itself is POLICY, read from `fleet.toml` like the poll interval.
-/// One row, one end, two files: the same 23-hour-old session is inside a 24 h
-/// window and outside a 12 h one.
-///
-/// Both readings are taken on the SAME rig so nothing but the policy figure
-/// moves between them.
-#[test]
-fn the_stopped_window_is_the_policys_and_not_a_constant() {
-    let rig = Rig::new("recency-policy");
-    rig.write_roster(&ended_row(
-        &rig.worktree(),
-        "a-session",
-        now_ms() - 23 * HOUR_MS,
-    ));
-    rig.write_transcript(
-        "a-session",
-        "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":18}}}\n",
-    );
-    rig.age_transcript("a-session", 23 * HOUR_MS);
-
-    rig.write_policy("[controller]\npoll_seconds = 1\nstopped_recency_hours = 24\n");
-    assert_eq!(rig.observe().status.code(), Some(0));
-    assert_eq!(
-        rig.projection()["seats"][0]["roster_state"],
-        "stopped",
-        "23 hours is inside a 24 hour window: {}",
-        rig.projection()["seats"][0]
-    );
-
-    rig.write_policy("[controller]\npoll_seconds = 1\nstopped_recency_hours = 12\n");
-    assert_eq!(rig.observe().status.code(), Some(0));
-    assert_eq!(
-        rig.projection()["seats"][0]["roster_state"],
-        "absent",
-        "and outside a 12 hour one — the figure is the file's: {}",
-        rig.projection()["seats"][0]
-    );
+    // The next poll reads the same dead pane and writes no second end.
+    let out = rig.observe();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(rig.events_of("session.ended"), 1);
+    assert_eq!(rig.projection()["seats"][0]["roster_state"], "stopped");
 }
 
 #[test]
@@ -113,8 +81,12 @@ fn a_poll_publishes_the_seat_and_the_context_it_is_carrying() {
     assert_eq!(published["agent_version_expected"], "9.9.9");
     assert_eq!(published["fleet"]["poll_seconds"], 1);
     assert!(published["fleet"]["mtime"].as_str().is_some());
-    assert_eq!(published["seats"][0]["seat_dir"], "builder-1");
-    assert_eq!(published["seats"][0]["chosen_name"], "Rook");
+    assert_eq!(
+        published["seats"][0]["seat"],
+        serde_json::json!({ "id": SEAT_ID, "name": "Orla", "kind": "agent" }),
+        "the row names the seat as its id, its own name and its kind: {}",
+        published["seats"][0]
+    );
     assert_eq!(published["seats"][0]["roster_state"], "present");
     assert_eq!(published["seats"][0]["context_tokens"], 18);
     assert_eq!(published["seats"][0]["project"], "demo");
@@ -137,8 +109,9 @@ fn a_poll_publishes_the_seat_and_the_context_it_is_carrying() {
 /// byte scan pins the VALUE, which the set cannot see: a model published into
 /// an existing field is a leak the shape holds still for. The set is the one
 /// this fixture's state produces, which the positive control above fixes: the
-/// two `skip_serializing_if` keys are absent exactly because this row is a
-/// found seat that is neither Unknown nor prompt-blocked.
+/// two cause keys are absent exactly because this row is a found seat that is
+/// neither Unknown nor prompt-blocked. The seat object's own keys are pinned the
+/// same way, so a model riding in beside the name is a red too.
 #[test]
 fn a_published_row_carries_neither_the_seats_model_nor_its_transience() {
     let rig = Rig::new("publish-no-porter-intent");
@@ -153,8 +126,7 @@ fn a_published_row_carries_neither_the_seats_model_nor_its_transience() {
     // this the absences below would pass over a document that never reached the
     // shape a leak rides.
     let row = &rig.projection()["seats"][0];
-    assert_eq!(row["seat_dir"], "builder-1");
-    assert_eq!(row["chosen_name"], "Rook");
+    assert_eq!(row["seat"]["id"], SEAT_ID);
     assert_eq!(row["roster_state"], "present");
 
     let keys: BTreeSet<&str> = row
@@ -166,8 +138,7 @@ fn a_published_row_carries_neither_the_seats_model_nor_its_transience() {
     assert_eq!(
         keys,
         BTreeSet::from([
-            "seat_dir",
-            "chosen_name",
+            "seat",
             "roster_state",
             "context_tokens",
             "project",
@@ -178,6 +149,17 @@ fn a_published_row_carries_neither_the_seats_model_nor_its_transience() {
             "halted",
         ]),
         "the published row carries a key outside the published shape:\n{row}"
+    );
+    let seat_keys: BTreeSet<&str> = row["seat"]
+        .as_object()
+        .expect("the row's seat is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        seat_keys,
+        BTreeSet::from(["id", "name", "kind"]),
+        "the seat object carries a key outside its shape:\n{row}"
     );
 
     let body = rig.projection_body();
@@ -233,46 +215,13 @@ fn a_seat_at_a_permission_dialog_publishes_prompt_blocked_and_no_reading() {
     assert!(row.get("waiting_for").is_none());
 }
 
-/// The transcript lives under the agent's configuration directory, which a
-/// scoped daemon moves (lessons claude-code A11), at an encoding that touches
-/// every non-alphanumeric character in the project path — here a worktree whose
-/// last component carries a dot.
-#[test]
-fn a_scoped_config_directory_and_a_dotted_worktree_still_read_a_context() {
-    let mut rig = Rig::with_leaf("scoped", "builder-1.wt");
-    let scoped = rig.root.join("elsewhere").join("agent-state");
-    rig.scoped_config_dir = Some(scoped.clone());
-    rig.write_roster(&live_row(&rig.worktree(), "a-session"));
-    rig.write_transcript_under(
-        &scoped,
-        "a-session",
-        "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":77}}}\n",
-    );
-
-    assert_eq!(rig.observe().status.code(), Some(0));
-    assert_eq!(
-        rig.projection()["seats"][0]["context_tokens"],
-        77,
-        "the transcript is read from the scoped directory, at the full encoding"
-    );
-
-    // The control: with no scoped directory the same transcript is not found,
-    // so the reading above came from the scope and not from a default that
-    // happened to hold it.
-    rig.scoped_config_dir = None;
-    assert_eq!(rig.observe().status.code(), Some(0));
-    assert!(rig.projection()["seats"][0]["context_tokens"].is_null());
-}
-
 #[test]
 fn an_unreadable_seat_list_refuses_at_startup_and_names_the_path() {
     let rig = Rig::new("no-seats");
     rig.write_config("{\"fleet_toml\": \"/somewhere\", \"children\": [");
 
-    // The bare path: this poll refuses at startup and never reaches the
-    // agent call, so no stub is spawned and the marker's absence is this
-    // arm's premise.
-    let out = rig.observe_unwitnessed();
+    // This poll refuses at startup and never reaches the agent.
+    let out = rig.observe();
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -292,10 +241,8 @@ fn an_absent_policy_file_refuses_at_startup_and_names_the_path() {
     let rig = Rig::new("no-policy");
     std::fs::remove_file(rig.policy_path()).unwrap();
 
-    // The bare path: this poll refuses at startup and never reaches the
-    // agent call, so no stub is spawned and the marker's absence is this
-    // arm's premise.
-    let out = rig.observe_unwitnessed();
+    // This poll refuses at startup and never reaches the agent.
+    let out = rig.observe();
     assert_eq!(out.status.code(), Some(3), "startup refuses without policy");
     assert!(
         stderr(&out).contains(&rig.policy_path().display().to_string()),
@@ -323,28 +270,31 @@ fn a_policy_that_stops_parsing_keeps_last_good_and_says_so_in_the_projection() {
     // The loop is re-entered rather than continued, which is the harder case:
     // last-good has to come from the file, and a broken file has none.
     rig.write_policy("[controller\npoll_seconds = 1\n");
-    // The bare path for THIS call only: it refuses at startup and never reaches
-    // the agent, so no stub is spawned. The two polls either side of it run
-    // normally and stay witnessed.
-    let out = rig.observe_unwitnessed();
+    // THIS call refuses at startup and never reaches the agent; the two polls
+    // either side of it run normally.
+    let out = rig.observe();
     assert_eq!(
         out.status.code(),
         Some(3),
         "a startup that cannot parse policy has no last-good and refuses"
     );
 
-    rig.write_policy(
-        "[controller]\npoll_seconds = 1\n\n[substrate.claude_code]\nversion = \"9.9.9\"\n",
-    );
+    rig.write_policy("[controller]\npoll_seconds = 1\n");
     assert_eq!(rig.observe().status.code(), Some(0));
     let restored = rig.projection();
     assert!(restored.get("fleet_parse_error").is_none());
     assert_eq!(restored["seats"][0]["context_tokens"], 18);
 }
 
+/// A seat whose pane the host holds alive, beside a listing that answered
+/// zero bytes (the claude-code pack's lessons B4): unknown, with the cause,
+/// and never present or absent. The pane is what makes the listing the
+/// question — a seat the host holds nothing for is absent on the host's own
+/// reading, and its agent is not asked about it.
 #[test]
 fn an_unreadable_listing_is_unknown_for_every_seat_and_never_absent() {
     let rig = Rig::new("silent");
+    common::live_pane(&rig.tmux_state_path(), SEAT_ID, &rig.worktree());
     rig.write_roster("");
     assert_eq!(rig.observe().status.code(), Some(0));
     let published = rig.projection();
@@ -358,13 +308,15 @@ fn an_unreadable_listing_is_unknown_for_every_seat_and_never_absent() {
 fn a_row_with_no_worktree_is_skipped_loudly_and_never_defaulted() {
     let rig = Rig::new("skipped");
     rig.write_config(&format!(
-        r#"{{"fleet_toml": "{}", "children": [{{"name":"builder-9"}}]}}"#,
+        r#"{{"fleet_toml": "{}", "children": [
+             {{"id":"01a0d1f1-0aec-765f-9abe-5c21e8a04b17","name":"Pell"}}
+           ]}}"#,
         rig.policy_path().display()
     ));
     let out = rig.observe();
     assert_eq!(out.status.code(), Some(0));
     assert!(
-        stderr(&out).contains("builder-9"),
+        stderr(&out).contains("pell-e8a04b17 carries no worktrees entry"),
         "the skipped row is named: {}",
         stderr(&out)
     );
@@ -372,5 +324,37 @@ fn a_row_with_no_worktree_is_skipped_loudly_and_never_defaulted() {
         rig.projection()["seats"].as_array().map(Vec::len),
         Some(0),
         "a skipped row is not published as a seat"
+    );
+}
+
+/// `common::stub_agent`, the one line a suite outside this family puts a fleet
+/// on the agent stub with: the `[agent]` key after the fleet's own policy and
+/// the stub's state reset to its defaults. A poll of that fleet reaches the
+/// stub through the Exec — the version it publishes is the stub's own, the
+/// adapter it names is the stub's path, and the stub logged the poll's read.
+#[test]
+fn a_fleet_the_common_helper_puts_on_the_agent_stub_polls_through_it() {
+    let rig = Rig::new("common-helper");
+    write(&rig.policy_path(), "[controller]\npoll_seconds = 1\n");
+    let stub = common::stub_agent(&rig.root);
+    // A live pane, so the poll asks the agent about the seat.
+    common::live_pane(&rig.tmux_state_path(), SEAT_ID, &rig.worktree());
+
+    assert_eq!(rig.observe().status.code(), Some(0));
+    let published = rig.projection();
+    assert_eq!(
+        published["agent_version"],
+        StubAgent::VERSION,
+        "{published}"
+    );
+    assert_eq!(
+        published["agent"]["adapter"],
+        serde_json::json!(stub.display().to_string()),
+        "{published}"
+    );
+    assert!(
+        agent_stub::verbs(&rig.root).contains(&StubAgent::READ),
+        "the poll's read reached the stub: {:?}",
+        agent_stub::verbs(&rig.root)
     );
 }

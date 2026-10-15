@@ -1,25 +1,25 @@
-//! `fleet observe`: the poll loop. It observes, decides, acts and publishes
-//! (PRD § Observe, decide, effect, publish).
+//! `fleet observe`: the poll loop. It observes, decides, acts and publishes.
 
-use crate::adapter::claude_code::ClaudeCode;
-use crate::adapter::{dir_key, Agent};
 use crate::clock::{self, Clock, SystemClock};
 use crate::config::{self, MachineConfig, Seat};
 use crate::decide::{self, FleetShape, SeatInput, Verdict};
 use crate::effect::{self, Outcome, Target};
-use crate::events::{self, EventLog, CONTROLLER};
+use crate::events::{self, ActorRef, EventLog};
 use crate::observe::{self, RosterState, SeatObservation};
 use crate::platform;
 use crate::policy::{self, Policy};
-use crate::projection::{self, InFlight, PolicyView, Projection, SeatRow};
+use crate::projection::dir_key;
+use crate::projection::{self, InFlight, PolicyView, Projection, SeatRow, SeatView};
 use crate::routines;
-use crate::sessions::{self, SeatState, Table};
+use crate::sessions::{self, Ended, SeatState, Table};
+use fleet_core::agent::{self, Agent, Capabilities, SeatContext, SeatRef};
+use fleet_core::seat::identity::SeatId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Startup could not read what it needs. There is no last-good before the first
-/// read, so the only honest answer is to refuse and name the path (R28).
+/// read, so the only honest answer is to refuse and name the path.
 pub const EXIT_NO_POLICY: u8 = 3;
 
 pub struct Options {
@@ -30,8 +30,6 @@ pub struct Options {
 /// What one seat's events this tick asked for.
 #[derive(Default, Clone)]
 struct Pending {
-    /// An unconsumed `seat.resting`.
-    rest: bool,
     /// An unconsumed `seat.resting` or `seat.exited` — the deliberate end the
     /// roster cannot report (lessons claude-code A3).
     deliberate_end: bool,
@@ -45,105 +43,133 @@ struct Pending {
     rest_seq: Option<u64>,
 }
 
-pub fn observe(options: &Options) -> u8 {
-    observe_with(
-        options,
-        platform::Grant::new(platform::directory_listing(), platform::GRANT_PROBE_TIMEOUT),
-    )
-}
-
-/// The loop with the file-access gate handed in and no run seam.
-///
-/// The gate's seam exists because the thing it guards cannot be raised from
-/// inside a suite: the dialog needs the service loaded in a desktop session and
-/// a reset aimed at the identifier of the service currently running this fleet
-/// (lessons claude-code D4). Above it is [`observe`], which hands in the
-/// platform's own listing and the D4 band.
-pub fn observe_with(options: &Options, grant: platform::Grant) -> u8 {
-    observe_runs(options, grant, None)
+/// What one poll reads for itself and hands from phase to phase of
+/// [`Observer::tick`]. A local of the tick and never a field: see
+/// [`Observer`] for where that line is drawn.
+struct Poll {
+    now_ms: u64,
+    startup: bool,
+    recorded_dirs: BTreeMap<SeatId, String>,
+    agent_name: Option<String>,
+    agent_version: Option<String>,
+    pending: BTreeMap<SeatId, Pending>,
+    read_to: Option<u64>,
+    observations: Vec<(usize, SeatObservation, Option<u64>)>,
+    rows: Vec<SeatRow>,
+    verdicts: Vec<Verdict>,
+    table_moved: bool,
+    observed: Vec<SeatObservation>,
+    logged_out: Vec<(SeatView, String, Option<String>)>,
+    expected: Option<String>,
 }
 
 /// The loop with the RUN seam handed in beside the gate.
 ///
-/// The seam exists because this crate depends on no other fleet crate and the
-/// three acts a run's advance needs are wired in the binary (controller PRD
-/// R35–R37). `None` is a loop that knows nothing of runs and polls exactly as it
+/// The seam exists so the loop can be driven without a project: the three acts
+/// a run's advance needs are [`crate::runs::Engine`]'s, and `None` stands in
+/// for it. `None` is a loop that knows nothing of runs and polls exactly as it
 /// did before they existed.
+///
+/// It resolves [`Wiring`] — one resolution, taken before the first tick — and
+/// hands its seams to [`observe_seamed`].
 pub fn observe_runs(
     options: &Options,
     grant: platform::Grant,
     runs: Option<&dyn crate::runs::Runs>,
-) -> u8 {
-    observe_clocked(options, grant, runs, &SystemClock)
-}
-
-/// The loop with the clock it spends its POLL INTERVAL against handed in too.
-///
-/// The clock reaches exactly one site — [`nap`], the wait between ticks — which
-/// is the only wait on this path whose subject is a DURATION. Every other wait
-/// the tick can reach bounds an external fact: a child's exit, a pipe's drain, a
-/// permission dialog's answer. No clock hurries one of those.
-///
-/// It resolves [`Wiring`] — one resolution, taken before the first tick — and
-/// hands its seams to [`observe_seamed`].
-pub fn observe_clocked(
-    options: &Options,
-    grant: platform::Grant,
-    runs: Option<&dyn crate::runs::Runs>,
-    clock: &dyn Clock,
 ) -> u8 {
     let wiring = Wiring::resolve();
     observe_seamed(
         options,
         grant,
         runs,
-        wiring.seams(clock, StopHandler::Armed),
+        wiring.seams(&SystemClock, StopHandler::Armed),
     )
 }
 
 /// What the loop acts through that somebody has to OWN: the agent this fleet
-/// runs, the `PATH` a routine's children carry, and why no effect may be issued.
+/// runs, the host its sessions run on, the `PATH` a routine's children carry,
+/// and why no effect may be issued.
 ///
-/// [`Seams`] borrows all three, so a caller driving ticks itself holds one of
+/// [`Seams`] borrows all four, so a caller driving ticks itself holds one of
 /// these for as long as its [`Observer`] lives.
 pub struct Wiring {
-    agent: ClaudeCode,
+    /// The name the projection's agent block publishes.
+    adapter: String,
+    agent: Box<dyn Agent>,
+    host: Box<dyn crate::host::Host>,
     child_path: String,
     effects_off: Option<String>,
 }
 
 impl Wiring {
-    /// The agent this fleet runs, built from the environment, with the binary
-    /// its effects exec resolved.
+    /// The agent this fleet runs, opened the one way every caller opens it
+    /// ([`fleet_core::agent::open`]), with its effects gate read off its own
+    /// answers.
     pub fn resolve() -> Wiring {
+        let home = platform::home_dir();
+        let child_path = platform::child_path(&home);
         let machine_dir = platform::machine_dir();
-        let mut agent = ClaudeCode::new(&platform::home_dir(), &machine_dir);
-        // The binary an EFFECT execs, resolved once and never by bare name
-        // (R19). Unresolvable is not fatal: the loop observes and publishes with
-        // effects off and the projection carries the cause, which is the shape
-        // the PRD gives the grant gate.
+        let fleet_toml = config::read(&config::path_in(&machine_dir))
+            .ok()
+            .map(|machine| machine.fleet_toml);
+        // `[agent] adapter` out of the file the seat list names, resolved
+        // through this machine's packs. A file that will not read names no
+        // adapter, so the default's is resolved — the start refuses over that
+        // file on its own.
+        let setting = agent::Setting::of(
+            fleet_toml
+                .as_deref()
+                .map(fleet_core::item::table_at)
+                .unwrap_or_default(),
+            fleet_toml.as_deref().unwrap_or(Path::new("")),
+            &machine_dir,
+        );
+        // An adapter that opens and cannot issue effects is not fatal: the
+        // loop observes and publishes with effects off and the projection
+        // carries the cause, which is the shape the grant gate has too.
         //
-        // ONE RESOLUTION, TWO USERS. The value below is both the gate the loop
-        // reads and the binary the adapter execs, because a controller that
-        // gated on one file and acted through another would issue effects nobody
-        // checked — which is what a service-launched process, whose own `PATH`
-        // is not the operator's shell, would do on every start.
+        // One that does not open at all — a name no installed pack carries,
+        // the default's among them — is held as an agent answering every verb
+        // with the opener's refusal, and NOT said here: the start reads the
+        // seat list and the policy first and refuses over either naming its
+        // path, and only then asks the agent its capabilities, which refuses
+        // with this cause. So a file that will not read is still refused as
+        // that file, and not as the default's name it left unread.
         //
         // The cause travels to the loop rather than being said here, so the line
         // it prints keeps its place in the order a reader meets the startup's
         // lines in.
-        let effect_bin = ClaudeCode::resolve_effect_bin(
-            crate::adapter::claude_code::configured_bin().as_deref(),
-            &agent.child_path,
-        );
-        if let Ok(bin) = &effect_bin {
-            agent = agent.with_effect_bin(bin.clone());
-        }
-        let child_path = agent.child_path.clone();
+        let (adapter, agent, agent_off): (String, Box<dyn Agent>, Option<String>) =
+            match agent::open(&setting.opening(&child_path)) {
+                Ok(opened) => (opened.name, Box::new(opened.agent), opened.effects_off),
+                Err(cause) => (
+                    agent::named(&setting.policy),
+                    Box::new(agent::Unanswered::new(cause.clone())),
+                    Some(cause),
+                ),
+            };
+        // The host every start runs its session on, resolved ONCE, on the
+        // constructed `PATH` a pack's adapter runs on. Unresolvable is effects
+        // off in the same way: every effect that starts a session needs it, so
+        // a loop without one publishes why rather than failing each start in
+        // turn. The agent's cause is named first where both fail — it is the
+        // older gate, and the one an operator already knows to read.
+        let host = crate::host::TmuxHost::resolve(&child_path);
+        let effects_off = match (&agent_off, &host) {
+            (Some(cause), _) => Some(cause.clone()),
+            (None, Err(cause)) => Some(cause.clone()),
+            (None, Ok(_)) => None,
+        };
+        let host: Box<dyn crate::host::Host> = match host {
+            Ok(host) => Box::new(host),
+            Err(cause) => Box::new(crate::host::Unresolved { cause }),
+        };
         Wiring {
+            adapter,
             agent,
+            host,
             child_path,
-            effects_off: effect_bin.err(),
+            effects_off,
         }
     }
 
@@ -156,7 +182,9 @@ impl Wiring {
     pub fn seams<'a>(&'a self, clock: &'a dyn Clock, stop_handler: StopHandler) -> Seams<'a> {
         Seams {
             clock,
-            agent: &self.agent,
+            adapter: &self.adapter,
+            agent: self.agent.as_ref(),
+            host: self.host.as_ref(),
             child_path: &self.child_path,
             effects_off: self.effects_off.clone(),
             stop_handler,
@@ -185,12 +213,19 @@ pub enum StopHandler {
 /// runs those.
 pub struct Seams<'a> {
     pub clock: &'a dyn Clock,
+    /// The name the agent's adapter answers to, which the projection's agent
+    /// block publishes.
+    pub adapter: &'a str,
     pub agent: &'a dyn Agent,
-    /// The `PATH` every child a routine's action starts carries (R19).
+    /// The host a start runs the seat's session on (`crate::host`). The agent
+    /// says what to run and this runs it (ruling 2), so the two are separate
+    /// seams and an in-process suite hands in a fake of each.
+    pub host: &'a dyn crate::host::Host,
+    /// The `PATH` every child a routine's action starts carries.
     pub child_path: &'a str,
-    /// Why no effect may be issued, or `None` for a fleet that can issue them.
-    /// The binary those effects exec is resolved by the caller, so the gate this
-    /// loop reads and the file the adapter execs are one value.
+    /// Why no effect may be issued, or `None` for a fleet that can issue them:
+    /// read by the caller off the agent's own answers and the host's
+    /// resolution.
     pub effects_off: Option<String>,
     /// Whether [`Observer::start`] arms the process's stop handlers.
     pub stop_handler: StopHandler,
@@ -232,30 +267,19 @@ pub fn observe_seamed(
 /// this one's.
 pub struct Observer<'a> {
     seams: Seams<'a>,
+    /// What the agent declared at startup ([`Agent::capabilities`]).
+    capabilities: Capabilities,
     runs: Option<&'a dyn crate::runs::Runs>,
     /// The file-access gate, whose own probe state lives across polls: one that
     /// outran its bound is read again rather than started again.
     grant: platform::Grant,
     machine_dir: PathBuf,
-    config_path: PathBuf,
     table_path: PathBuf,
-    /// The seat list's mtime as of the last read of it, and the document that
-    /// read produced.
-    config_seen: Option<std::time::SystemTime>,
-    raw_config: MachineConfig,
-    /// The policy file in force and its mtime: the path moves when the seat
-    /// list re-points it, and an mtime is comparable only against the same path.
-    policy_path: PathBuf,
-    policy_mtime: Option<std::time::SystemTime>,
-    file_policy: Policy,
-    unknown_override_said: BTreeSet<String>,
-    policy: Policy,
-    config: MachineConfig,
-    /// The mtime the "did the policy file move?" test compares against, and the
-    /// last-good policy's parse error while one stands.
-    policy_seen: Option<std::time::SystemTime>,
-    policy_error: Option<String>,
+    inputs: Inputs,
     events_log: EventLog,
+    /// Who the controller's own lines are by: this machine's identity, read
+    /// once at startup.
+    controller: ActorRef,
     /// The spread announced and not yet closed. Only a version that WAS READ
     /// and agrees with the pin clears it.
     announced_move: Option<(Option<String>, Option<String>)>,
@@ -268,50 +292,44 @@ pub struct Observer<'a> {
     /// poll.
     table_said: Option<String>,
     adopted: bool,
-    /// The seats standing in a hold, whichever of the two holds it is: the line
-    /// is written once per transition into one and not once per poll.
-    held: BTreeSet<String>,
-    /// When this controller last read a LIVE row for each seat, in epoch
-    /// milliseconds.
-    ///
-    /// THIS PROCESS'S OWN MEMORY and not the table's: the table records what
-    /// this fleet DISPATCHED, and the session whose host is replaced under a
-    /// controller is typically one another manager started, which no row names
-    /// and `Table::sight` therefore records nothing for. A restart starts this
-    /// empty, which is the seat's own pre-hold verdict and never a hold nobody
-    /// can account for.
-    live_seen: BTreeMap<String, u64>,
-    /// When this controller read the FIRST pid-less poll of the run of them each
-    /// seat is currently standing in, in epoch milliseconds.
-    ///
-    /// Written at the poll a seat's row goes pid-less and REMOVED at the poll it
-    /// is live again, so the value is always the start of an unbroken run and
-    /// never the start of an older one. It is the clock the re-host hold's
-    /// window is measured on, because the interval between two polls is not the
-    /// poll interval: a run's steps execute on this thread, and the poll after a
-    /// twenty-minute land step holds a live sighting twenty minutes old for
-    /// every seat on the fleet — the reading the poll after a run's land step turns on.
-    pidless_since: BTreeMap<String, u64>,
-    upgrade_shape: Option<FleetShape>,
+    fleet_shape: Option<FleetShape>,
     rest_failed_said: BTreeSet<String>,
     routines_state_said: BTreeSet<String>,
     grant_said: Option<String>,
 }
 
-impl<'a> Observer<'a> {
-    /// Read what the loop needs before its first poll, or refuse and name the
-    /// path (R28).
-    ///
-    /// `Err` carries the exit status the caller returns; there is no last-good
-    /// before the first read, so a startup that cannot read is not a tick that
-    /// went quiet.
-    pub fn start(
-        grant: platform::Grant,
-        runs: Option<&'a dyn crate::runs::Runs>,
-        seams: Seams<'a>,
-    ) -> Result<Observer<'a>, u8> {
-        let machine_dir = platform::machine_dir();
-        let config_path = machine_dir.join("config.json");
+/// The seat list and the policy file, and what each last read to, held across
+/// polls: each is re-read on its own mtime, and a read that fails leaves the
+/// last good one standing.
+struct Inputs {
+    config_path: PathBuf,
+    /// The seat list's mtime as of the last read of it, and the document that
+    /// read produced.
+    config_seen: Option<std::time::SystemTime>,
+    raw_config: MachineConfig,
+    /// The policy file in force and its mtime: the path moves when the seat
+    /// list re-points it, and an mtime is comparable only against the same path.
+    policy_path: PathBuf,
+    policy_mtime: Option<std::time::SystemTime>,
+    file_policy: Policy,
+    /// The policy file as a table, from the same read [`Inputs::file_policy`]
+    /// came from: the roster the routines' seat directory is built on.
+    /// Last-good with it, never ahead of it.
+    file_table: toml::Table,
+    unknown_override_said: BTreeSet<String>,
+    policy: Policy,
+    config: MachineConfig,
+    /// The mtime the "did the policy file move?" test compares against, and the
+    /// last-good policy's parse error while one stands.
+    policy_seen: Option<std::time::SystemTime>,
+    policy_error: Option<String>,
+}
+
+impl Inputs {
+    /// The first read of both files, and of what the agent declares, or the
+    /// exit status a start that cannot read them refuses with.
+    fn read(machine_dir: &Path, agent: &dyn Agent) -> Result<(Inputs, Capabilities), u8> {
+        let config_path = config::path_in(machine_dir);
         // Stat BEFORE the read, both here and in the loop: an edit that lands in
         // the window between them is recorded as already seen and never re-read.
         let config_seen = config::mtime(&config_path);
@@ -323,147 +341,60 @@ impl<'a> Observer<'a> {
             }
         };
         let policy_path = raw_config.fleet_toml.clone();
-        let policy_mtime = policy::mtime(&policy_path);
+        let policy_mtime = config::mtime(&policy_path);
         // The FILE's policy and the EFFECTIVE one are two values: `config.json` is
-        // local and beats policy per key (R28), so the overlay is recomputed
+        // local and beats policy per key, so the overlay is recomputed
         // wherever either document is re-read, and the file's own value is what the
         // "did policy move?" test compares.
-        let file_policy = match policy::load(&policy_path) {
-            Ok(policy) => policy,
+        let (file_policy, file_table) = match policy::load_with_table(&policy_path) {
+            Ok(read) => read,
             Err(why) => {
                 eprintln!("fleet observe: cannot read policy at {why}");
+                return Err(EXIT_NO_POLICY);
+            }
+        };
+        // What the agent declares, read ONCE: the model, the first turn and the
+        // gate a policy that names none falls to, and the release it expects.
+        // A declaration that does not read is no fleet to run: every start's
+        // model would be a guess.
+        let capabilities = match agent.capabilities() {
+            Ok(capabilities) => capabilities,
+            Err(why) => {
+                eprintln!("fleet observe: the agent's capabilities could not be read: {why}");
                 return Err(EXIT_NO_POLICY);
             }
         };
         // Once per key, never once per poll.
         let mut unknown_override_said: BTreeSet<String> = BTreeSet::new();
         let policy = overlaid(&file_policy, &raw_config, &mut unknown_override_said);
-        let config = gated(&raw_config, &policy);
+        let config = admitted(&raw_config, &policy, &capabilities);
         report_skipped(&config);
 
         let policy_seen = policy_mtime;
         let policy_error: Option<String> = None;
 
-        let mut events_log = EventLog::open(&machine_dir.join("events.jsonl"));
-        let announced_move: Option<(Option<String>, Option<String>)> = None;
-
-        if let Some(why) = &seams.effects_off {
-            eprintln!("fleet observe: effects are off — {why}");
-        }
-
-        let table_path = sessions::path_in(&machine_dir);
-        let (on_disk, table_error) = sessions::read(&table_path);
-        // A table that is missing, unparseable or of a schema this build refuses is
-        // REBUILT from the stream rather than started from empty (R17): every row
-        // and every counter it carries was written to the stream by the layer that
-        // did the thing, so the table is derivable and never a second source of
-        // truth. An empty one here would forget a standing halt.
-        //
-        // The trigger is the ABSENCE OF A TABLE and not the presence of a fault: a
-        // deleted file is a read that found nothing rather than one that failed, and
-        // a controller that rebuilt only on the fault would start empty on exactly
-        // the loss the hold exists to survive. A first-ever start rebuilds too, from
-        // a stream that is not there either, which is the same empty table it would
-        // otherwise have made.
-        let table = match on_disk {
-            Some(table) => table,
-            None => {
-                let rebuilt = sessions::rebuild(&machine_dir.join("events.jsonl"));
-                eprintln!(
-                    "fleet observe: the session table was rebuilt from the event stream — \
-                     {} row(s), cursor {}; {}",
-                    rebuilt.sessions.len(),
-                    rebuilt.consumed_seq,
-                    table_error.unwrap_or_else(|| format!("{} is not there", table_path.display()))
-                );
-                rebuilt
-            }
-        };
-        // Every session the table names that the roster still holds live is claimed
-        // on the FIRST poll and never again — a restart re-hosts nothing.
-        let adopted = false;
-        // Once per transition into a hold, and once per transition into the
-        // upgrade shape: both are observations, not decisions, and a line per
-        // poll would drown the one a person came to read.
-        let held: BTreeSet<String> = BTreeSet::new();
-        // No seat has been seen live before the first poll, so the first poll
-        // decides every seat exactly as it did before this memory existed.
-        let live_seen: BTreeMap<String, u64> = BTreeMap::new();
-        // And no seat is standing in a run of pid-less polls until one is read.
-        let pidless_since: BTreeMap<String, u64> = BTreeMap::new();
-        let upgrade_shape: Option<FleetShape> = None;
-        // For a rest whose stop failed: the retry is silent and the first
-        // failure is loud.
-        let rest_failed_said: BTreeSet<String> = BTreeSet::new();
-        // And for a routines state that will not read: once per cause, never once
-        // per poll.
-        let routines_state_said: BTreeSet<String> = BTreeSet::new();
-
-        // The gate's state lives across polls: a probe that outran its bound is read
-        // again rather than started again. It is built by the caller, BEFORE the
-        // first poll, so the dialog it raises is answered in the minute the service
-        // loads (R1, lessons claude-code D4).
-        //
-        // Once per transition into pending, never once per poll.
-        let grant_said: Option<String> = None;
-
-        if seams.stop_handler == StopHandler::Armed {
-            platform::install_stop_handler();
-        }
-        log_event(
-            &mut events_log,
-            events::CONTROLLER_STARTED,
-            CONTROLLER,
-            serde_json::json!({
-                "controller_version": env!("CARGO_PKG_VERSION"),
-                "machine_dir": machine_dir.display().to_string(),
-                "policy": policy_path.display().to_string(),
-                "seats": config.seats.len(),
-                "effects": seams.effects_off.is_none(),
-                "plugin_dir": policy.plugin_dir.as_ref().map(|dir| dir.display().to_string()),
-            }),
-        );
-        Ok(Observer {
-            seams,
-            runs,
-            grant,
-            machine_dir,
-            config_path,
-            table_path,
-            config_seen,
-            raw_config,
-            policy_path,
-            policy_mtime,
-            file_policy,
-            unknown_override_said,
-            policy,
-            config,
-            policy_seen,
-            policy_error,
-            events_log,
-            announced_move,
-            table_base: table.clone(),
-            table_said: None,
-            table,
-            adopted,
-            held,
-            live_seen,
-            pidless_since,
-            upgrade_shape,
-            rest_failed_said,
-            routines_state_said,
-            grant_said,
-        })
+        Ok((
+            Inputs {
+                config_path,
+                config_seen,
+                raw_config,
+                policy_path,
+                policy_mtime,
+                file_policy,
+                file_table,
+                unknown_override_said,
+                policy,
+                config,
+                policy_seen,
+                policy_error,
+            },
+            capabilities,
+        ))
     }
 
-    /// One poll: observe, decide, act and publish once, against the state this
-    /// [`Observer`] carries.
-    ///
-    /// A caller drives it on its own thread, editing what the loop reads between
-    /// calls. Nothing here waits on the clock — the interval between ticks is
-    /// [`Observer::nap`]'s.
-    pub fn tick(&mut self) {
-        let agent = self.seams.agent;
+    /// Re-read whichever of the two files moved since the last poll, and
+    /// re-gate the seat list against the policy when either landed.
+    fn refresh(&mut self, capabilities: &Capabilities) {
         // config.json is re-read whenever its mtime moves. A re-read that cannot
         // parse leaves the seat list standing: the empty fleet a broken file
         // parses to is a configuration nobody asked for.
@@ -494,11 +425,11 @@ impl<'a> Observer<'a> {
             }
         }
 
-        let file_mtime = policy::mtime(&self.policy_path);
+        let file_mtime = config::mtime(&self.policy_path);
         if policy_repointed || file_mtime != self.policy_seen {
             self.policy_seen = file_mtime;
-            match policy::load(&self.policy_path) {
-                Ok(fresh) => {
+            match policy::load_with_table(&self.policy_path) {
+                Ok((fresh, table)) => {
                     if fresh != self.file_policy {
                         eprintln!(
                             "fleet observe: policy re-read from {}",
@@ -506,6 +437,7 @@ impl<'a> Observer<'a> {
                         );
                     }
                     self.file_policy = fresh;
+                    self.file_table = table;
                     self.policy_mtime = file_mtime;
                     self.policy_error = None;
                     // The gate is the policy's list against the row's model, so
@@ -525,362 +457,538 @@ impl<'a> Observer<'a> {
                 &self.raw_config,
                 &mut self.unknown_override_said,
             );
-            self.config = gated(&self.raw_config, &self.policy);
+            self.config = admitted(&self.raw_config, &self.policy, capabilities);
             report_skipped(&self.config);
         }
+    }
+}
 
-        // ONE LISTING PER DISTINCT CONFIGURATION DIRECTORY, and the fleet's own
-        // beside them (flights PRD R13). A seat started under its own directory
-        // is held by its own daemon and named by no other listing, so a poll
-        // that read once would publish every spawned seat absent.
+impl<'a> Observer<'a> {
+    /// Read what the loop needs before its first poll, or refuse and name the
+    /// path.
+    ///
+    /// `Err` carries the exit status the caller returns; there is no last-good
+    /// before the first read, so a startup that cannot read is not a tick that
+    /// went quiet.
+    pub fn start(
+        grant: platform::Grant,
+        runs: Option<&'a dyn crate::runs::Runs>,
+        seams: Seams<'a>,
+    ) -> Result<Observer<'a>, u8> {
+        let machine_dir = platform::machine_dir();
+        let (inputs, capabilities) = Inputs::read(&machine_dir, seams.agent)?;
+
+        let mut events_log = EventLog::open(&events::path_in(&machine_dir));
+        let controller = events::controller(&machine_dir);
+
+        if let Some(why) = &seams.effects_off {
+            eprintln!("fleet observe: effects are off — {why}");
+        }
+
+        let table_path = sessions::path_in(&machine_dir);
+        let (on_disk, table_error) = sessions::read(&table_path);
+        // A table that is missing, unparseable or of a schema this build refuses is
+        // REBUILT from the stream rather than started from empty: every row
+        // and every counter it carries was written to the stream by the layer that
+        // did the thing, so the table is derivable and never a second source of
+        // truth. An empty one here would forget a standing halt.
+        //
+        // The trigger is the ABSENCE OF A TABLE and not the presence of a fault: a
+        // deleted file is a read that found nothing rather than one that failed, and
+        // a controller that rebuilt only on the fault would start empty on exactly
+        // the loss the hold exists to survive. A first-ever start rebuilds too, from
+        // a stream that is not there either, which is the same empty table it would
+        // otherwise have made.
+        let table = match on_disk {
+            Some(table) => table,
+            None => {
+                let rebuilt = sessions::rebuild(&events::path_in(&machine_dir));
+                eprintln!(
+                    "fleet observe: the session table was rebuilt from the event stream — \
+                     {} row(s), cursor {}; {}",
+                    rebuilt.sessions.len(),
+                    rebuilt.consumed_seq,
+                    table_error.unwrap_or_else(|| format!("{} is not there", table_path.display()))
+                );
+                rebuilt
+            }
+        };
+        // A row written before postures were fleet's own reads as unknown and
+        // is never guessed into one (ruling 17): said once, as the table is
+        // read, and the row rolls off as the seat's next dispatch replaces it.
+        for line in table.unknown_postures() {
+            eprintln!("fleet observe: {line}");
+        }
+
+        if seams.stop_handler == StopHandler::Armed {
+            platform::install_stop_handler();
+        }
+        log_event(
+            &mut events_log,
+            events::CONTROLLER_STARTED,
+            &controller,
+            serde_json::json!({
+                "controller_version": env!("CARGO_PKG_VERSION"),
+                "machine_dir": machine_dir.display().to_string(),
+                "policy": inputs.policy_path.display().to_string(),
+                "seats": inputs.config.seats.len(),
+                "effects": seams.effects_off.is_none(),
+            }),
+        );
+        Ok(Observer {
+            seams,
+            capabilities,
+            runs,
+            // The gate's state lives across polls: a probe that outran its bound is read
+            // again rather than started again. It is built by the caller, BEFORE the
+            // first poll, so the dialog it raises is answered in the minute the service
+            // loads (lessons claude-code D4).
+            grant,
+            machine_dir,
+            table_path,
+            inputs,
+            events_log,
+            controller,
+            announced_move: None,
+            table_base: table.clone(),
+            table_said: None,
+            table,
+            // Every session the table names that the roster still holds live is claimed
+            // on the FIRST poll and never again — a restart re-hosts nothing.
+            adopted: false,
+            // Once per transition into the fleet shape: an observation, not a
+            // decision, and a line per poll would drown the one a person came to
+            // read.
+            fleet_shape: None,
+            // For a rest whose stop failed: the retry is silent and the first
+            // failure is loud.
+            rest_failed_said: BTreeSet::new(),
+            // And for a routines state that will not read: once per cause, never once
+            // per poll.
+            routines_state_said: BTreeSet::new(),
+            // Once per transition into pending, never once per poll.
+            grant_said: None,
+        })
+    }
+
+    /// One poll: observe, decide, act and publish once, against the state this
+    /// [`Observer`] carries.
+    ///
+    /// A caller drives it on its own thread, editing what the loop reads between
+    /// calls. Nothing here waits on the clock — the interval between ticks is
+    /// [`Observer::nap`]'s.
+    pub fn tick(&mut self) {
+        self.inputs.refresh(&self.capabilities);
+        let mut poll = self.read_fleet();
+        self.adopt(&mut poll);
+        self.fold_requests(&mut poll);
+        self.observe_rows(&mut poll);
+        self.report_rows(&poll);
+        self.decide_all(&mut poll);
+        let (mut document, acting) = self.gate_and_document(&mut poll);
+        let (registry, mut routines_state, routines_now) = self.load_routines(&mut document);
+        let hold_at = self.act_all(&mut poll, &mut document, acting);
+        self.publish(&mut poll, hold_at, &document);
+        self.pass_routines(
+            &poll,
+            &registry,
+            &mut routines_state,
+            routines_now,
+            acting,
+            &document,
+        );
+        self.pass_runs();
+        self.announce_substrate(&poll);
+    }
+
+    /// The poll's reads of the fleet: each seat's recorded directory, the one
+    /// host listing, the agent's version, the time, and the agent's reading of
+    /// every seat.
+    fn read_fleet(&self) -> Poll {
+        let agent = self.seams.agent;
+        // THE DIRECTORY EACH SEAT'S SESSION CAME UP UNDER, which every question
+        // put to the agent about that seat carries: a session started under its
+        // own directory is known to the agent under that directory and no
+        // other, so a read made under the fleet's would find nothing for it.
         //
         // The directories come off the session table, which is what the
         // controller remembers about what it started: the seat list carries no
         // such field, and a directory derived from the seat's name here would be
         // a second spelling that a spawn could already have decided otherwise.
-        let recorded_dirs: BTreeMap<String, String> = self
+        let recorded_dirs: BTreeMap<SeatId, String> = self
+            .inputs
             .config
             .seats
             .iter()
             .filter_map(|seat| {
                 self.table
-                    .newest_for(&seat.name)
+                    .newest_for(&seat.id.to_string())
                     .and_then(|row| row.config_dir.clone())
-                    .map(|dir| (seat.name.clone(), dir))
+                    .map(|dir| (seat.id, dir))
             })
             .collect();
-        let rosters = observe::Rosters::gather(
-            &self.config.seats,
-            &|seat: &str| recorded_dirs.get(seat).cloned(),
-            &|dir: Option<&Path>| agent.status(dir),
-        );
-        let agent_version = agent.version();
+        // And ONE READ OF THE HOST (reviewer call 2026-09-25, E1): fleet's own
+        // server, whose sessions are every seat's presence. Once per poll and
+        // shared by every seat — two seats must not decide against different
+        // readings of the same moment.
+        let host_read = self.seams.host.list();
+        let agent_read = agent.version().ok();
+        let agent_version = agent_read
+            .as_ref()
+            .and_then(|version| version.version.clone());
         // Through the clock seam, so the windows a rig drives the loop across
         // age with the fake time its naps spend.
         let now_ms = self.seams.clock.now_ms();
-        let mut table_moved = false;
-
-        // The daemon, read ONCE for the whole poll exactly as the roster is: two
-        // seats must not decide against different beliefs about whether the
-        // fleet is mid-replacement (R11).
-        //
-        // A pid this read could not take does not overwrite the one the last
-        // poll recorded: forgetting it would make the next good read compare
-        // against nothing and miss the replacement it is there to catch.
-        let daemon = agent.daemon();
-        let daemon_pid_changed = match (self.table.daemon_pid, daemon.pid()) {
-            (Some(was), Some(now)) => was != now,
-            // Neither "not running" nor "could not read" is a change.
-            _ => false,
-        };
-        if let Some(pid) = daemon.pid() {
-            if self.table.daemon_pid != Some(pid) {
-                self.table.daemon_pid = Some(pid);
-                table_moved = true;
-            }
+        // ONE READ OF THE AGENT about every seat whose pane is alive, each
+        // asked about by the session the table last sighted for it and by its
+        // pane (fleet-14p8.2), under its own directory.
+        let table = &self.table;
+        let observed = observe::observe_fleet(
+            agent,
+            &host_read,
+            &self.inputs.config.seats,
+            &|seat: &SeatId| observe::Held {
+                session_id: table
+                    .newest_for(&seat.to_string())
+                    .and_then(|row| row.session_id.clone()),
+                config_dir: recorded_dirs.get(seat).cloned(),
+            },
+            now_ms,
+        );
+        // What the later phases fill starts empty here.
+        Poll {
+            now_ms,
+            startup: false,
+            recorded_dirs,
+            agent_name: agent_read.map(|version| version.name),
+            agent_version,
+            pending: BTreeMap::new(),
+            read_to: None,
+            observations: Vec::new(),
+            rows: Vec::new(),
+            verdicts: Vec::new(),
+            table_moved: false,
+            observed,
+            logged_out: Vec::new(),
+            expected: None,
         }
+    }
 
-        // Adoption, on the first poll and against the roster this poll read
-        // (R17). Not gated on effects: it issues none, and a controller that
-        // could not exec the agent still knows which sessions it owns.
+    /// Adoption of the sessions the table names, on this controller's first
+    /// poll.
+    fn adopt(&mut self, poll: &mut Poll) {
+        // Adoption, on the first poll and against the reading this poll took.
+        // Not gated on effects: it issues none, and a controller that could not
+        // exec the agent still knows which sessions it owns.
         //
-        // ONCE PER PROCESS is the WRITE and never the reading: the claim goes on
-        // the row, and the verdicts below ask the table for it every poll. A
-        // term filled from what this call claimed would be false on every poll
-        // after the first, which is the whole of the defect it exists to close.
+        // ONCE PER PROCESS is the WRITE: the claim goes on the row
+        // (`SessionRow::adopted`), which outlives this process because the table is
+        // what a restart reads back.
+        // This controller's FIRST poll, read before adoption marks it taken: a
+        // dead pane it meets here died before this process was looking, so its
+        // end is dated by the agent's last write rather than by this poll.
+        poll.startup = !self.adopted;
         if !self.adopted {
             self.adopted = true;
-            // EVERY listing's rows, folded: a session under a per-row directory
-            // is in that directory's listing alone, and a controller that
-            // restarted has to be able to claim it like any other (R13, R17).
-            {
-                let rows = rosters.all_rows();
-                let claimed = effect::adopt(&rows, &mut self.table, &mut self.events_log, now_ms);
-                if !claimed.is_empty() {
-                    table_moved = true;
-                    eprintln!(
-                        "fleet observe: adopted {} session(s) the table names: {}",
-                        claimed.len(),
-                        claimed.join(", ")
-                    );
-                }
+            // EVERY session the agent named for a live pane, whatever
+            // directory it was read under: a controller that restarted has to
+            // be able to claim a spawned seat's session like any other.
+            let live: Vec<String> = poll
+                .observed
+                .iter()
+                .filter_map(|observation| observation.session_id.clone())
+                .collect();
+            let claimed = effect::adopt(&live, &mut self.table, &mut self.events_log, poll.now_ms);
+            if !claimed.is_empty() {
+                poll.table_moved = true;
+                eprintln!(
+                    "fleet observe: adopted {} session(s) the table names: {}",
+                    claimed.len(),
+                    claimed.join(", ")
+                );
             }
         }
+    }
 
-        // The stopped-row window, from policy, with the end each row is judged
-        // on resolved through the same adapter and the same worktree spelling
-        // the context read below uses.
-
+    /// The stream after the cursor, folded into what each seat's events ask
+    /// for.
+    fn fold_requests(&self, poll: &mut Poll) {
         // The stream, from the line after the cursor. Read BEFORE deciding, so
         // what a seat asked for between polls is in hand when its verdict is
         // reached.
-        let known: BTreeSet<&str> = self.config.seats.iter().map(|s| s.name.as_str()).collect();
-        let transient: BTreeSet<&str> = self
+        let known: BTreeSet<SeatId> = self.inputs.config.seats.iter().map(|s| s.id).collect();
+        let transient: BTreeSet<SeatId> = self
+            .inputs
             .config
             .seats
             .iter()
             .filter(|s| s.transient)
-            .map(|s| s.name.as_str())
+            .map(|s| s.id)
             .collect();
-        let stream = events::read_after(
-            &self.machine_dir.join("events.jsonl"),
-            self.table.consumed_seq,
-        );
-        let read_to = stream.iter().map(|record| record.seq).max();
-        let pending = fold(&stream, &known, &transient);
+        let stream =
+            events::read_after(&events::path_in(&self.machine_dir), self.table.consumed_seq);
+        poll.read_to = stream.iter().map(|record| record.seq).max();
+        poll.pending = fold(&stream, &known, &transient);
+    }
 
-        let mut observations: Vec<(usize, SeatObservation, Option<u64>)> = Vec::new();
-        let mut seats = Vec::with_capacity(self.config.seats.len());
-        let mut logged_out: Vec<(String, Option<String>)> = Vec::new();
-        for (index, seat) in self.config.seats.iter().enumerate() {
-            // The seat's own directory, threaded through every read about it:
-            // the listing that can see it, the end its stopped-row window is
-            // judged on, and the transcript its context is read from.
-            let under: Option<PathBuf> = recorded_dirs.get(&seat.name).map(PathBuf::from);
-            // The stopped-row window, from policy, with the end each row is
-            // judged on resolved through the same adapter and the same worktree
-            // spelling the context read below uses.
-            let recency = observe::Recency {
-                window_ms: self.policy.stopped_recency_hours * 60 * 60 * 1000,
-                ended_at: &|worktree: &str, session_id: &str| {
-                    agent.ended_at(under.as_deref(), dir_key(worktree), session_id)
-                },
-            };
-            let observation =
-                observe::observe_seat(rosters.for_seat(&seat.name), seat, now_ms, &recency);
-            // Context comes from the transcript and never from the listing,
-            // which carries no token field (lessons claude-code B2). An ended
-            // row still answers, because the transcript outlives the process.
-            //
-            // The worktree is the CONFIGURED spelling, so it goes through the
-            // same normalisation the seat match uses: the agent keys its
-            // transcript directory on the directory itself, and a configured
-            // trailing separator encodes to one the agent never wrote.
-            let body = match &observation.session_id {
-                Some(session_id) if observation.state.has_context_reading() => {
-                    observation.worktree.as_deref().and_then(|worktree| {
-                        agent.transcript(under.as_deref(), dir_key(worktree), session_id)
-                    })
+    /// Each seat's row for the projection, from the poll's reading of it, the
+    /// table's record and the agent's context.
+    fn observe_rows(&mut self, poll: &mut Poll) {
+        let agent = self.seams.agent;
+        // A dead pane's session is the one this controller started there, and
+        // the agent names nothing for it once its process is gone
+        // (the claude-code pack's lessons B10) — so the session, and where it
+        // stood, are the table's, which recorded both when it was sighted. The
+        // context read below, and the discriminator's revive, need the id;
+        // nothing else on this poll can supply it.
+        for (seat, observation) in self
+            .inputs
+            .config
+            .seats
+            .iter()
+            .zip(poll.observed.iter_mut())
+        {
+            if observation.state != RosterState::Stopped {
+                continue;
+            }
+            if let Some(row) = self.table.newest_for(&seat.id.to_string()) {
+                observation.session_id = row.session_id.clone();
+                if observation.worktree.is_none() {
+                    observation.project = Some(row.project.clone());
+                    observation.worktree = Some(row.worktree.clone());
                 }
-                _ => None,
-            };
-            let context_tokens = body.as_deref().and_then(observe::context_tokens_in);
-            // A seat that came up LOGGED OUT (R13). The roster cannot say so — a
-            // logged-out session is live and idle, with a pid, exactly like one
-            // waiting for work — so the transcript is the only surface that
-            // carries the reading, and it is read from the same body the context
-            // came from rather than from a second read that could disagree.
+            }
+        }
+        // Context is the agent's `context` and never its `read`, which carries
+        // no token field (the claude-code pack's lessons B2); asked once for
+        // every seat whose session answers for it, and only of an agent that
+        // declares the verb. An ended session still answers — its transcript
+        // outlives the process — and its last write is what dates an end this
+        // controller did not see.
+        //
+        // The worktree is the CONFIGURED spelling, put in the one form a
+        // comparison uses: the agent keys its own records on the directory
+        // itself, and a configured trailing separator is one it never wrote.
+        let asked: Vec<SeatRef> = self
+            .inputs
+            .config
+            .seats
+            .iter()
+            .zip(poll.observed.iter())
+            .filter(|(_, observation)| observation.state.has_context_reading())
+            .filter_map(|(seat, observation)| {
+                Some(SeatRef {
+                    seat: seat.id,
+                    session_id: Some(observation.session_id.clone()?),
+                    pid: None,
+                    config_dir: poll.recorded_dirs.get(&seat.id).cloned(),
+                    worktree: dir_key(observation.worktree.as_deref()?).to_string(),
+                    screen: None,
+                })
+            })
+            .collect();
+        let contexts: BTreeMap<SeatId, SeatContext> =
+            agent::contexts(agent, self.capabilities.context, &asked);
+
+        poll.rows = Vec::with_capacity(self.inputs.config.seats.len());
+        let observed = std::mem::take(&mut poll.observed);
+        for (index, (seat, observation)) in
+            self.inputs.config.seats.iter().zip(observed).enumerate()
+        {
+            let machine_name = seat.machine_name();
+            // What the session table and the projection key this seat on.
+            let key = seat.id.to_string();
+            let context = contexts.get(&seat.id);
+            if observation.state == RosterState::Stopped {
+                poll.table_moved |= ended(
+                    &mut self.table,
+                    &mut self.events_log,
+                    &key,
+                    &observation,
+                    context
+                        .and_then(|context| context.last_write.as_ref())
+                        .and_then(|stamp| clock::secs_of_stamp(stamp.as_str()))
+                        .map(|secs| secs * 1000),
+                    poll.startup,
+                    poll.now_ms,
+                );
+            }
+            let context_tokens = context.and_then(|context| context.tokens);
+            // A seat that came up LOGGED OUT. The host cannot say so — a
+            // logged-out session is live, with a pid, exactly like one waiting
+            // for work — so the agent's own reading is what carries it:
+            // blocked on `logged_out`.
             //
-            // Once per ROW, at its first sighting: the reading stands for as long
-            // as the transcript does, and a line per poll is the noise the stream
-            // rule is against.
+            // Once per ROW, at its first sighting: the reading stands for as
+            // long as the session does, and a line per poll is the noise the
+            // stream rule is against.
             let sighted = self
                 .table
-                .newest_for(&seat.name)
+                .newest_for(&key)
                 .is_none_or(|row| row.first_seen_at.is_some());
             if observe::logged_out_dispatch(
                 seat.transient,
                 observation.state,
                 sighted,
-                body.as_deref(),
+                observation.blocked_on,
             ) {
-                logged_out.push((
-                    seat.name.clone(),
-                    self.table
-                        .newest_for(&seat.name)
-                        .and_then(|row| row.item.clone()),
+                poll.logged_out.push((
+                    SeatView::from(&seat.as_ref()),
+                    machine_name.clone(),
+                    self.table.newest_for(&key).and_then(|row| row.item.clone()),
                 ));
             }
             // A sighting answers a dispatch's arrival window, and it is the
-            // ROSTER's answer rather than the start's own return (A7). Only a
-            // LIVE row is one: a pid-less row is a session that has ended or has
-            // not started, and neither is a seat that arrived.
+            // AGENT's answer rather than the start's own return (A7). Only a
+            // LIVE session is one: a dead pane is a session that has ended and
+            // a starting one has not arrived yet, and neither is a seat that
+            // arrived.
             if matches!(
                 observation.state,
                 RosterState::Present | RosterState::PromptBlocked
             ) {
-                // The same reading the sighting below is taken on, kept for
-                // every seat rather than for the rows this controller opened:
-                // the session whose host is replaced under a poll is usually
-                // one another manager started, and `sight` records nothing for
-                // a session no row names. It is written BEFORE the verdicts and
-                // only on a live row, so the seat it decides about — a pid-less
-                // one — reads the stamp an earlier poll left.
-                self.live_seen.insert(seat.name.clone(), now_ms);
                 if let (Some(session_id), Some(worktree)) =
                     (&observation.session_id, &observation.worktree)
                 {
-                    table_moved |= self.table.sight(
-                        &seat.name,
-                        dir_key(worktree),
-                        session_id,
-                        observation.short_id.as_deref(),
-                        now_ms,
-                    );
+                    poll.table_moved |=
+                        self.table
+                            .sight(&key, dir_key(worktree), session_id, poll.now_ms);
                 }
             }
-            // The run of pid-less polls this seat stands in, opened at the poll
-            // its row goes pid-less and closed at the poll the row reads
-            // anything else. The hold's window is measured from the open, so a
-            // row that came back and went again is a new run rather than the old
-            // one's tail — and a seat the loop did not look at for twenty
-            // minutes opens its run at the poll that finally looked.
-            match observation.state {
-                RosterState::Stopped | RosterState::Absent => {
-                    self.pidless_since
-                        .entry(seat.name.clone())
-                        .or_insert(now_ms);
-                }
-                _ => {
-                    self.pidless_since.remove(&seat.name);
-                }
+            // The row names the seat as its object: the id, the seat's own name
+            // where it has one, and its kind.
+            let mut row = SeatRow::from_observation(seat, &observation, context_tokens);
+            // The end, as the table latched it: a stopped seat's pane carries
+            // its status and no clock, and the latch is the one record of when.
+            if observation.state == RosterState::Stopped {
+                row.ended_at = self
+                    .table
+                    .newest_for(&key)
+                    .and_then(|row| row.ended.as_ref())
+                    .and_then(|ended| ended.at)
+                    .map(|at| clock::stamp_secs(at / 1000));
             }
-            seats.push(SeatRow::from_observation(
-                &seat.name,
-                seat.chosen_name.as_deref(),
-                &observation,
-                context_tokens,
-            ));
-            observations.push((index, observation, context_tokens));
+            poll.rows.push(row);
+            poll.observations.push((index, observation, context_tokens));
         }
+    }
 
-        // The logged-out dispatches, one line each (R13). WRITTEN AND NOTHING
+    /// The lines the rows owe this poll: each logged-out dispatch's, and the
+    /// fleet shape's.
+    fn report_rows(&mut self, poll: &Poll) {
+        // The logged-out dispatches, one line each. WRITTEN AND NOTHING
         // ELSE: holding the item and retiring the seat are a workflow's, and a
         // controller that acted here would be deciding a run's business from
         // inside the poll.
-        for (seat, item) in &logged_out {
-            if let Err(e) = self.events_log.append(
+        for (seat, machine_name, item) in &poll.logged_out {
+            self.events_log.append_or_say(
                 events::DISPATCH_FAILED,
-                seat,
+                &ActorRef::seat(&seat.id),
                 events::dispatch_failed_payload(
                     seat,
                     item.as_deref(),
                     observe::AUTHENTICATION_FAILED,
                 ),
-            ) {
-                eprintln!(
-                    "fleet observe: {seat} came up logged out and the line could not be \
-                     appended: {e}"
-                );
-            }
+                |e| {
+                    format!(
+                        "fleet observe: {machine_name} came up logged out and the line could not be \
+                         appended: {e}"
+                    )
+                },
+            );
         }
 
         // One verdict per seat, from terms this poll reads for itself — nothing
         // here is a restored belief, so the answer survives a restart. The halt
         // latch and the blind count are slice 4's, so they are passed as the
         // constants they are here rather than left unstated.
-        // The upgrade shape: one line rather than N independent absences, once
-        // per transition into it (R15). Reported like an observation and not
+        // The server-gone shape: one line rather than N independent absences,
+        // once per transition into it. Reported like an observation and not
         // like a decision, and threaded into no seat's verdict.
         let shape = decide::fleet_shape(
-            &observations
+            &poll
+                .observations
                 .iter()
                 .map(|(_, observation, _)| observation.state)
                 .collect::<Vec<_>>(),
         );
-        if shape != self.upgrade_shape {
+        if shape != self.fleet_shape {
             if let Some(shape) = &shape {
                 eprintln!("fleet observe: {}", shape.describe());
             }
-            self.upgrade_shape = shape;
+            self.fleet_shape = shape;
         }
+    }
 
-        // The clear-halt requests, consumed BEFORE the verdicts (R14), so a halt
+    /// The clear-halt requests, then one verdict per seat written into its row.
+    fn decide_all(&mut self, poll: &mut Poll) {
+        // The clear-halt requests, consumed BEFORE the verdicts, so a halt
         // a person cleared does not survive one more poll and dispatch nothing
         // for another interval.
-        for seat in &self.config.seats {
-            if !pending
-                .get(seat.name.as_str())
+        for seat in &self.inputs.config.seats {
+            if !poll
+                .pending
+                .get(&seat.id)
                 .map(|asked| asked.clear_halt)
                 .unwrap_or(false)
             {
                 continue;
             }
-            let was = self.table.seat_state(&seat.name);
+            let machine_name = seat.machine_name();
+            let key = seat.id.to_string();
+            let was = self.table.seat_state(&key);
             if was.blind == 0 && !was.halted {
                 continue;
             }
-            self.table.set_seat_state(&seat.name, SeatState::default());
-            table_moved = true;
+            self.table.set_seat_state(&key, SeatState::default());
+            poll.table_moved = true;
             eprintln!(
-                "fleet observe: {}'s blind counter reset from {} and its halt lifted by request",
-                seat.name, was.blind
+                "fleet observe: {machine_name}'s blind counter reset from {} and its halt lifted \
+                 by request",
+                was.blind
             );
         }
 
-        let mut verdicts: Vec<Verdict> = Vec::with_capacity(observations.len());
-        for (index, observation, context_tokens) in &observations {
-            let seat = &self.config.seats[*index];
-            let asked = pending.get(seat.name.as_str()).cloned().unwrap_or_default();
-            let newest = self.table.newest_for(&seat.name);
-            let carried = self.table.seat_state(&seat.name);
+        poll.verdicts = Vec::with_capacity(poll.observations.len());
+        for (index, observation, context_tokens) in &poll.observations {
+            let seat = &self.inputs.config.seats[*index];
+            let key = seat.id.to_string();
+            let asked = poll.pending.get(&seat.id).cloned().unwrap_or_default();
+            let newest = self.table.newest_for(&key);
+            let carried = self.table.seat_state(&key);
             let input = SeatInput {
-                seat_dir: &seat.name,
                 state: observation.state,
-                unknown_cause: observation.unknown_cause.as_deref(),
                 transient: seat.transient,
-                pending_rest: asked.rest,
+                pending_rest: asked.rest_seq.is_some(),
                 pending_deliberate_end: asked.deliberate_end,
                 context_tokens: *context_tokens,
-                rest_threshold_tokens: self.policy.rest_threshold_tokens,
-                session_id: observation.session_id.as_deref(),
+                rest_threshold_tokens: self.inputs.policy.rest_threshold_tokens,
                 already_nudged: observation
                     .session_id
                     .as_deref()
-                    .map(|id| self.table.is_nudged(&seat.name, id))
+                    .map(|id| self.table.is_nudged(&key, id))
                     .unwrap_or(false),
-                dispatch_age_ms: newest.map(|row| now_ms.saturating_sub(row.dispatched_at)),
+                dispatch_age_ms: newest.map(|row| poll.now_ms.saturating_sub(row.dispatched_at)),
                 sighted: newest.map(|row| row.session_id.is_some()).unwrap_or(false),
-                // The claim from the table, which carries it across polls and
-                // across restarts, and the listing from THIS poll's own row:
-                // a session whose row NAMES an end is not owned any more,
-                // however long ago it was claimed. A pid-less row reading
-                // `done` is not such a row — it is hibernation, a stop from
-                // idle and a kill in one reading — so the claim holds it and
-                // the controller's own record ends it (R10).
-                adopted_and_listed: !observation.state_names_an_end
-                    && observation
-                        .session_id
-                        .as_deref()
-                        .map(|id| self.table.is_adopted(id))
-                        .unwrap_or(false),
-                arrival_window_ms: self.policy.arrival_window_seconds * 1000,
+                arrival_window_ms: self.inputs.policy.arrival_window_seconds * 1000,
                 halted: carried.halted,
                 blind: carried.blind,
-                pidless_row: observation.pidless_row,
-                daemon_pid_changed,
-                daemon_uptime_ms: daemon.uptime_ms(),
-                // This controller's own earlier sighting, which is what tells a
-                // session being re-hosted from one that is gone while the
-                // daemon holding it stands unchanged — and the age of the
-                // pid-less run itself, which is what the window is spent on.
-                seen_live: self.live_seen.contains_key(seat.name.as_str()),
-                since_pidless_ms: self
-                    .pidless_since
-                    .get(seat.name.as_str())
-                    .map(|at| now_ms.saturating_sub(*at)),
             };
             let verdict = decide::decide(&input);
-            // The hold's own line, from the same function the arm reaches its
-            // verdict through, once per transition into it.
-            match decide::hold(&input) {
-                Some(why) if self.held.insert(seat.name.clone()) => {
-                    eprintln!("fleet observe: {why}")
-                }
-                None => {
-                    self.held.remove(&seat.name);
-                }
-                _ => {}
-            }
-            seats[*index].decision = verdict.as_str().to_string();
-            seats[*index].blind = carried.blind;
-            seats[*index].halted = carried.halted;
-            verdicts.push(verdict);
+            poll.rows[*index].decision = verdict.as_str().to_string();
+            poll.rows[*index].blind = carried.blind;
+            poll.rows[*index].halted = carried.halted;
+            poll.verdicts.push(verdict);
         }
+    }
 
+    /// The grant's poll and the projection document this poll publishes, with
+    /// whether effects are issued.
+    fn gate_and_document(&mut self, poll: &mut Poll) -> (Projection, bool) {
         // The gate, read every poll while it is pending. Every configured
         // worktree of every seat, in one listing each.
         let probed: Vec<PathBuf> = self
+            .inputs
             .config
             .seats
             .iter()
@@ -905,97 +1013,130 @@ impl<'a> Observer<'a> {
         // either: a dispatch nobody issued is not a dispatch nobody answered.
         let acting = effects.acting;
 
-        let mut document = Projection {
+        // The expectation is the adapter's own (ruling 8): the releases it
+        // declares it was measured against, which the live one is held to.
+        poll.expected = projection::expected_version(
+            &self.capabilities.measured,
+            poll.agent_version.as_deref(),
+        );
+        let document = Projection {
             version: projection::VERSION,
             generated_at: clock::now_stamp(),
             controller_version: env!("CARGO_PKG_VERSION").to_string(),
-            agent_version: agent_version.clone(),
-            agent_version_expected: self.policy.claude_code_pin.clone(),
-            fleet: PolicyView {
-                path: self.policy_path.display().to_string(),
-                mtime: self.policy_mtime.and_then(clock::stamp_of),
-                poll_seconds: self.policy.poll_seconds,
-                claude_code: self.policy.claude_code_pin.clone(),
-                plugin_dir: self
-                    .policy
-                    .plugin_dir
-                    .as_ref()
-                    .map(|dir| dir.display().to_string()),
+            // The agent, in words that name no vendor (E13): which adapter
+            // answers, which agent it drives at which version, what it is
+            // expected at and the postures it takes. The two fields after it
+            // are its mirrors.
+            agent: projection::AgentView {
+                adapter: self.seams.adapter.to_string(),
+                name: poll.agent_name.clone(),
+                version: poll.agent_version.clone(),
+                expected: poll.expected.clone(),
+                postures: self.capabilities.postures.clone(),
             },
-            fleet_parse_error: self.policy_error.clone(),
+            agent_version: poll.agent_version.clone(),
+            agent_version_expected: poll.expected.clone(),
+            fleet: PolicyView {
+                path: self.inputs.policy_path.display().to_string(),
+                mtime: self.inputs.policy_mtime.and_then(clock::stamp_of),
+                poll_seconds: self.inputs.policy.poll_seconds,
+            },
+            fleet_parse_error: self.inputs.policy_error.clone(),
             in_flight: None,
             effects: effects.view,
             grant: grant_read.state.to_string(),
             grant_detail: grant_read.detail.clone(),
-            seats,
+            seats: std::mem::take(&mut poll.rows),
             orders: Vec::new(),
         };
+        (document, acting)
+    }
 
+    /// The routines' registry and state, re-read, and the document's orders
+    /// from them.
+    fn load_routines(
+        &mut self,
+        document: &mut Projection,
+    ) -> (routines::load::Registry, routines::state::State, u64) {
         // The routines, re-read every tick: a directory listing and a parse each,
         // so a file dropped into a routines directory is live on the next
         // evaluation with no restart.
         let routines_now = routines::now_secs();
-        let seat_names: Vec<String> = self.config.seats.iter().map(|s| s.name.clone()).collect();
         // The directory holding the policy file in force, which is this
-        // machine's fleet root. A daemon's own working directory is the service
-        // manager's and names nothing, so the walk-up the CLI does is not a
-        // reading here.
-        let routines_root = self.policy_path.parent().map(Path::to_path_buf);
+        // machine's fleet root. A service's own working directory is the
+        // service manager's and names nothing, so the walk-up the CLI does is
+        // not a reading here.
+        let routines_root = self.inputs.policy_path.parent().map(Path::to_path_buf);
+        // The seats a routine may name: the rows this machine runs for a
+        // nudge, and every seat the policy lists besides for an item's
+        // assignee — read off the policy file that last parsed, from the
+        // same read as the policy in force.
         let registry = match &routines_root {
-            Some(root) => routines::load::load(
-                &routines::load::roots(root, &self.machine_dir, &projects_of(root)),
-                &seat_names,
+            Some(root) => routines::load::registry_for(
+                root,
+                &self.machine_dir,
+                &self.inputs.config.seats,
+                &self.inputs.file_table,
             ),
             None => routines::load::Registry::default(),
         };
-        let (mut routines_state, routines_state_error) = routines::state::read(&self.machine_dir);
+        let (routines_state, routines_state_error) = routines::state::read(&self.machine_dir);
         if let Some(why) = routines_state_error {
             if self.routines_state_said.insert(why.clone()) {
                 eprintln!("fleet observe: the routines state stands empty; {why}");
             }
         }
         document.orders = routines::rows(&registry, &routines_state, routines_now);
+        (registry, routines_state, routines_now)
+    }
 
+    /// Each seat's verdict acted on where effects are issued, and the line the
+    /// cursor may not pass this tick.
+    fn act_all(&mut self, poll: &mut Poll, document: &mut Projection, acting: bool) -> Option<u64> {
+        let agent = self.seams.agent;
         // The line the cursor may not pass this tick: the oldest `seat.resting`
         // whose collection did not happen. A rest that was asked for and not
-        // collected is the PRD's alarm, and an alarm the cursor walked past
+        // collected is the alarm, and an alarm the cursor walked past
         // would be a request the fleet silently forgot.
         let mut hold_at: Option<u64> = None;
         if acting {
             for ((index, observation, context_tokens), verdict) in
-                observations.iter().zip(verdicts.iter())
+                poll.observations.iter().zip(poll.verdicts.iter())
             {
-                let seat = &self.config.seats[*index];
+                let seat = &self.inputs.config.seats[*index];
                 let outcome = act(
                     agent,
-                    &self.policy,
+                    self.seams.host,
+                    &self.inputs.policy,
+                    &self.capabilities,
                     seat,
                     observation,
                     *context_tokens,
                     *verdict,
-                    &mut document,
+                    document,
                     &self.machine_dir,
                     &mut self.events_log,
                     &mut self.table,
-                    now_ms,
+                    poll.now_ms,
                     &mut self.rest_failed_said,
                 );
                 if outcome != Outcome::None {
-                    table_moved = true;
+                    poll.table_moved = true;
                 }
                 document.seats[*index].outcome = outcome.as_str().to_string();
                 // The counter, moved once per poll on the state this poll SAW
-                // and the verdict it reached (R13, R14). It is computed only
-                // where effects are on: a poll that dispatched nothing has no
-                // blind dispatch to count, and counting one would halt a seat
-                // this controller never acted for.
-                let carried = self.table.seat_state(&seat.name);
+                // and the verdict it reached. It is computed only where effects
+                // are on: a poll that dispatched nothing has no blind dispatch
+                // to count, and counting one would halt a seat this controller
+                // never acted for.
+                let key = seat.id.to_string();
+                let carried = self.table.seat_state(&key);
                 let blind = decide::blind_after(carried.blind, observation.state, *verdict);
                 if blind != carried.blind || carried.halted != (blind >= decide::BLIND_LIMIT) {
                     let halted = carried.halted || blind >= decide::BLIND_LIMIT;
                     if blind > carried.blind {
                         effect::blind_dispatch(
-                            &seat.name,
+                            &seat.id,
                             blind,
                             verdict.as_str(),
                             &mut self.events_log,
@@ -1003,21 +1144,21 @@ impl<'a> Observer<'a> {
                     }
                     // Once per transition INTO the halt, never once per poll.
                     if halted && !carried.halted {
-                        effect::halted(&seat.name, blind, &mut self.events_log);
+                        effect::halted(&seat.id, &seat.machine_name(), blind, &mut self.events_log);
                     }
-                    self.table
-                        .set_seat_state(&seat.name, SeatState { blind, halted });
+                    self.table.set_seat_state(&key, SeatState { blind, halted });
                     document.seats[*index].blind = blind;
                     document.seats[*index].halted = halted;
-                    table_moved = true;
+                    poll.table_moved = true;
                 }
                 // A rest is consumed by the collection that answered it, or by
                 // the successor a stopped row got instead. Anything else leaves
                 // it standing for the next tick.
                 let collected = matches!(outcome, Outcome::Rested | Outcome::Spawned);
-                if let Some(seq) = pending
-                    .get(seat.name.as_str())
-                    .filter(|asked| asked.rest && !collected)
+                if let Some(seq) = poll
+                    .pending
+                    .get(&seat.id)
+                    .filter(|_| !collected)
                     .and_then(|asked| asked.rest_seq)
                 {
                     hold_at = Some(hold_at.unwrap_or(seq).min(seq));
@@ -1026,86 +1167,120 @@ impl<'a> Observer<'a> {
         } else {
             // No effect was issued, so nothing was collected and every rest read
             // this tick is still standing.
-            hold_at = pending.values().filter_map(|asked| asked.rest_seq).min();
+            hold_at = poll
+                .pending
+                .values()
+                .filter_map(|asked| asked.rest_seq)
+                .min();
         }
+        hold_at
+    }
 
+    /// The cursor advanced, the session table put back and the projection
+    /// written.
+    fn publish(&mut self, poll: &mut Poll, hold_at: Option<u64>, document: &Projection) {
         // The cursor moves once the tick's verdicts are computed and its effects
         // are taken, so a controller that dies mid-tick re-reads the same events
         // and acts once against a roster that has already moved.
-        if let Some(seq) = read_to {
+        if let Some(seq) = poll.read_to {
             let advanced = match hold_at {
                 Some(held) => seq.min(held.saturating_sub(1)),
                 None => seq,
             };
             if advanced > self.table.consumed_seq {
                 self.table.consumed_seq = advanced;
-                table_moved = true;
+                poll.table_moved = true;
             }
         }
-        self.commit_table(table_moved);
-        write_projection(&self.machine_dir, &document);
+        self.commit_table(poll.table_moved);
+        write_projection(&self.machine_dir, document);
+    }
 
+    /// The routines' own pass.
+    fn pass_routines(
+        &mut self,
+        poll: &Poll,
+        registry: &routines::load::Registry,
+        routines_state: &mut routines::state::State,
+        routines_now: u64,
+        acting: bool,
+        document: &Projection,
+    ) {
+        let agent = self.seams.agent;
         // The routines' own pass, after the document this tick publishes and
         // before the substrate read. The array above carries the state as it
         // stood at the top of this tick, so a firing here is published by the
         // next one — the document says what was OBSERVED and never what is
         // happening inside it.
-        {
-            let mut pass = routines::Pass {
-                machine: routines::action::Machine {
-                    machine_dir: &self.machine_dir,
-                    child_path: self.seams.child_path,
-                    policy: &self.policy,
-                    seats: &seat_views(&self.config.seats, &observations, &recorded_dirs),
-                    // THE SAME GATE the per-seat effects take. A routine's ring
-                    // is an effect — it starts a turn in a seat's worktree —
-                    // and a pending grant means no effect is issued, so a pass
-                    // that read only the binary would fire one while the
-                    // projection said effects were off with the grant as cause.
-                    agent: acting.then_some(agent),
-                    effects_off: document.effects.cause.clone(),
-                },
-                events: &mut self.events_log,
-                state: &mut routines_state,
-            };
-            routines::tick(&registry, &mut pass, routines_now);
-        }
+        let mut pass = routines::Pass {
+            machine: routines::action::Machine {
+                machine_dir: &self.machine_dir,
+                child_path: self.seams.child_path,
+                policy: &self.inputs.policy,
+                seats: &seat_views(
+                    &self.inputs.config.seats,
+                    &poll.observations,
+                    &poll.recorded_dirs,
+                    &self.table,
+                ),
+                // THE SAME GATE the per-seat effects take. A routine's ring
+                // is an effect — it types a turn into a seat's session —
+                // and a pending grant means no effect is issued, so a pass
+                // that read only the binary would fire one while the
+                // projection said effects were off with the grant as cause.
+                agent: acting.then_some(agent),
+                host: self.seams.host,
+                effects_off: document.effects.cause.clone(),
+            },
+            events: &mut self.events_log,
+            state: routines_state,
+        };
+        routines::tick(registry, &mut pass, routines_now);
+    }
 
+    /// The runs' own pass.
+    fn pass_runs(&mut self) {
         // The runs' own pass, after the routines'. The DECISION is this crate's
         // — a fold of the stream this loop already owns — and only the three
         // acts a run's advance needs are the seam's, so the pass is a call here
         // and the seam is what it acts through. A refusal is logged and the
         // loop goes on: the poll's other work is what every seat depends on.
         if let Some(runs) = self.runs {
-            let stream = self.machine_dir.join("events.jsonl");
+            let stream = events::path_in(&self.machine_dir);
             let mut pass = crate::runs::Pass {
                 runs,
                 events: &mut self.events_log,
+                controller: &self.controller,
                 stream: &stream,
-                max_crashes: self.policy.run_max_crashes,
+                max_crashes: self.inputs.policy.run_max_crashes,
             };
             if let Err(why) = crate::runs::tick(&mut pass) {
                 eprintln!("{}: {why}", crate::runs::REFUSED);
             }
         }
+    }
 
-        // A live version that differs from the pin is a flag to re-measure,
-        // never a failure (R29) — and one event per move, not one per poll.
+    /// The live agent version held against the adapter's expectation, and the
+    /// event a move between them owes.
+    fn announce_substrate(&mut self, poll: &Poll) {
+        // A live version outside the releases the agent's adapter was measured
+        // against (ruling 8) is a flag to re-measure, never a failure — and one
+        // event per move, not one per poll.
         //
-        // Only a version that WAS READ and agrees with the pin closes an
+        // Only a version that WAS READ and is among them closes an
         // announcement. A poll whose version read failed knows nothing about the
         // spread, and clearing on it re-announces the same move on the next
         // healthy poll.
-        let pair = (agent_version.clone(), self.policy.claude_code_pin.clone());
+        let pair = (poll.agent_version.clone(), poll.expected.clone());
         match (&pair.0, &pair.1) {
             (Some(live), Some(pinned)) if live != pinned => {
                 if self.announced_move.as_ref() != Some(&pair) {
                     log_event(
                         &mut self.events_log,
                         events::SUBSTRATE_MOVED,
-                        CONTROLLER,
+                        &self.controller,
                         serde_json::json!({
-                            "agent": "claude_code",
+                            "agent": self.seams.adapter,
                             "observed": pair.0,
                             "expected": pair.1,
                         }),
@@ -1126,10 +1301,10 @@ impl<'a> Observer<'a> {
     /// row another writer pushed, edited or dropped under the lock — a flight's
     /// spawn, `fleet seat` spawn, feed or retire — is not in that copy, and a
     /// rename of it would take the row with it — and the seat that row names is
-    /// then polled against the fleet's own daemon rather than its own
-    /// configuration directory, which reads absent while it works. The fresh
-    /// read is merged against the copy this tick started from: this loop's moves
-    /// are this loop's, every other row is the file's.
+    /// then polled against the fleet's own listing rather than its own
+    /// configuration directory, which names no row for it while it works. The
+    /// fresh read is merged against the copy this tick started from: this
+    /// loop's moves are this loop's, every other row is the file's.
     ///
     /// RUN ON EVERY POLL AND WRITTEN ONLY ON A MOVE. The merged table is what
     /// the next poll reads its configuration directories off, so a poll that
@@ -1194,7 +1369,7 @@ impl<'a> Observer<'a> {
     fn nap(&self) -> bool {
         nap(
             self.seams.clock,
-            Duration::from_secs(self.policy.poll_seconds),
+            Duration::from_secs(self.inputs.policy.poll_seconds),
         )
     }
 
@@ -1204,12 +1379,74 @@ impl<'a> Observer<'a> {
             log_event(
                 &mut self.events_log,
                 events::CONTROLLER_STOPPED,
-                CONTROLLER,
+                &self.controller,
                 serde_json::json!({ "controller_version": env!("CARGO_PKG_VERSION") }),
             );
         }
         0
     }
+}
+
+/// The one `session.ended` a dead pane owes, written on the first poll that
+/// reads it dead and latched on the seat's newest row, keyed on the pane's pid,
+/// so no later poll writes it again (ruling 3). Answers whether the table
+/// moved.
+///
+/// DATED BY WHAT THIS PROCESS SAW. A pane read dead on any poll after the first
+/// died inside the interval since the last one, so the end is this poll's own
+/// time, `observed`. On the FIRST poll the pane died before anyone was looking
+/// — a controller restarted over it, or a machine that rebooted — and the one
+/// end anyone has is the session's last write as the agent's `context` answered
+/// it (the claude-code pack's lessons C4), `last_write` in epoch milliseconds,
+/// under the source `transcript`; or none where the agent could not say.
+///
+/// A seat with no row is a pane no dispatch of this fleet recorded, and it
+/// has nothing to latch on: no line, rather than one per poll.
+fn ended(
+    table: &mut Table,
+    events_log: &mut EventLog,
+    key: &str,
+    observation: &SeatObservation,
+    last_write: Option<u64>,
+    startup: bool,
+    now_ms: u64,
+) -> bool {
+    let Some(row) = table.newest_for_mut(key) else {
+        return false;
+    };
+    if row
+        .ended
+        .as_ref()
+        .is_some_and(|ended| ended.pid == observation.pane_pid)
+    {
+        return false;
+    }
+    let (at, source) = if startup {
+        (last_write, events::ENDED_FROM_TRANSCRIPT)
+    } else {
+        (Some(now_ms), events::ENDED_OBSERVED)
+    };
+    row.ended = Some(Ended {
+        status: observation.exit_status,
+        at,
+        source: source.to_string(),
+        pid: observation.pane_pid,
+    });
+    let seat = row.seat.clone();
+    let payload = events::session_ended_payload(
+        row.session_id.as_deref(),
+        observation.pane_pid,
+        observation.exit_status,
+        at.map(|at| clock::stamp_secs(at / 1000)).as_deref(),
+        source,
+    );
+    log_event(
+        events_log,
+        events::SESSION_ENDED,
+        &ActorRef::seat(&seat),
+        payload,
+    );
+    true
 }
 
 /// Carry one verdict out, with `in_flight` published around the blocking call.
@@ -1220,7 +1457,9 @@ impl<'a> Observer<'a> {
 #[allow(clippy::too_many_arguments)]
 fn act(
     agent: &dyn Agent,
+    host: &dyn crate::host::Host,
     policy: &Policy,
+    capabilities: &Capabilities,
     seat: &Seat,
     observation: &SeatObservation,
     context_tokens: Option<u64>,
@@ -1239,70 +1478,68 @@ fn act(
         // and the event were written once, at the transition.
         Verdict::Halt => Outcome::Halted,
         Verdict::Revive | Verdict::SpawnWoken | Verdict::Rest | Verdict::SuggestRest => {
-            let recorded = Recorded::of(table, &seat.name);
-            let Some(target) = target_for(policy, seat, observation, context_tokens, recorded)
-            else {
+            let machine_name = seat.machine_name();
+            let recorded = Recorded::of(table, seat);
+            let Some(target) = target_for(
+                policy,
+                capabilities,
+                seat,
+                observation,
+                context_tokens,
+                recorded,
+                machine_dir,
+            ) else {
                 eprintln!(
-                    "fleet observe: {} is due {} and names no one worktree, so there is \
-                     nowhere to start it; nothing is done",
-                    seat.name,
+                    "fleet observe: {machine_name} is due {} and names no one worktree, so there \
+                     is nowhere to start it; nothing is done",
                     verdict.as_str()
                 );
                 return Outcome::None;
             };
             document.in_flight = Some(InFlight {
-                seat: seat.name.clone(),
+                seat: SeatView::from(&seat.as_ref()),
                 effect: verdict.as_str().to_string(),
             });
             write_projection(machine_dir, document);
             let outcome = match verdict {
                 Verdict::SpawnWoken => {
-                    effect::spawn_woken(agent, policy, &target, events_log, table, now_ms)
+                    effect::spawn_woken(agent, host, policy, &target, events_log, table, now_ms)
                 }
-                Verdict::Revive => effect::revive(agent, &target, events_log, table, now_ms),
+                Verdict::Revive => {
+                    effect::revive(agent, host, policy, &target, events_log, table, now_ms)
+                }
                 Verdict::Rest => {
-                    match effect::rest(agent, policy, &target, events_log, table, now_ms) {
+                    let said_key = format!(
+                        "{}:{}",
+                        machine_name,
+                        observation.session_id.as_deref().unwrap_or("-")
+                    );
+                    match effect::rest(agent, host, policy, &target, events_log, table, now_ms) {
                         effect::Rested::Collected => Outcome::Rested,
                         effect::Rested::StopFailed(cause) => {
-                            if rest_failed_said.insert(format!(
-                                "{}:{}",
-                                seat.name,
-                                observation.session_id.as_deref().unwrap_or("-")
-                            )) {
+                            if rest_failed_said.insert(said_key) {
                                 eprintln!(
                                     "fleet observe: {}'s rest is not collected and stays pending; \
-                                 nothing was started and nothing was removed — {cause}",
-                                    seat.name
+                                 its session was not stopped and nothing was started — {cause}",
+                                    machine_name
                                 );
                             }
                             Outcome::Failed
                         }
                         effect::Rested::StartFailed(cause) => {
-                            if rest_failed_said.insert(format!(
-                                "{}:{}",
-                                seat.name,
-                                observation.session_id.as_deref().unwrap_or("-")
-                            )) {
+                            if rest_failed_said.insert(said_key) {
                                 eprintln!(
                                     "fleet observe: {}'s predecessor was stopped and its successor \
-                                 did not start, so the rest is not collected and stays pending; \
-                                 nothing was removed — {cause}",
-                                    seat.name
+                                 did not start, so the rest is not collected and stays pending \
+                                 — {cause}",
+                                    machine_name
                                 );
                             }
                             Outcome::Failed
                         }
-                        effect::Rested::NoAddress => {
-                            eprintln!(
-                                "fleet observe: {} asked to rest and its row carries no short id, \
-                             which is the address a stop takes; nothing is done",
-                                seat.name
-                            );
-                            Outcome::Failed
-                        }
                     }
                 }
-                _ => effect::nudge(agent, policy, &target, events_log, table),
+                _ => effect::nudge(agent, host, policy, &target, events_log, table),
             };
             document.in_flight = None;
             outcome
@@ -1310,21 +1547,8 @@ fn act(
     }
 }
 
-/// The projects routines are read from.
-///
-/// This slice has one, the embedded project, and it is the fleet root itself —
-/// handed to the loader as a list of one so a registry of many is one more
-/// element and not a second reader.
-fn projects_of(fleet_root: &Path) -> Vec<(String, PathBuf)> {
-    let name = fleet_root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
-    vec![(name, fleet_root.to_path_buf())]
-}
-
-/// The seat rows a routine's ring reads: where each seat works, what a person
-/// calls it, and what the roster said this tick.
+/// The seat rows a routine's ring reads: where each seat works, the name its
+/// session answers to, and what the roster said this tick.
 ///
 /// The worktree is the CONFIGURED one — the first project's, in the alphabetical
 /// order the seat list is parsed into — because a routine names a seat and not a
@@ -1332,7 +1556,8 @@ fn projects_of(fleet_root: &Path) -> Vec<(String, PathBuf)> {
 fn seat_views(
     seats: &[Seat],
     observations: &[(usize, SeatObservation, Option<u64>)],
-    recorded_dirs: &BTreeMap<String, String>,
+    recorded_dirs: &BTreeMap<SeatId, String>,
+    table: &Table,
 ) -> Vec<routines::SeatView> {
     observations
         .iter()
@@ -1340,11 +1565,11 @@ fn seat_views(
             let seat = seats.get(*index)?;
             let (_, worktree) = seat.worktrees.first()?;
             Some(routines::SeatView {
-                seat_dir: seat.name.clone(),
-                display_name: effect::display_name(seat.chosen_name.as_deref(), &seat.name),
+                id: seat.id,
+                session_name: table.session_name(&seat.as_ref()),
                 worktree: dir_key(worktree).to_string(),
                 state: observation.state,
-                config_dir: recorded_dirs.get(&seat.name).cloned(),
+                config_dir: recorded_dirs.get(&seat.id).cloned(),
             })
         })
         .collect()
@@ -1354,10 +1579,12 @@ fn seat_views(
 /// one directory to act in.
 fn target_for<'a>(
     policy: &Policy,
+    capabilities: &Capabilities,
     seat: &'a Seat,
     observation: &'a SeatObservation,
     context_tokens: Option<u64>,
     recorded: Recorded,
+    machine_dir: &'a Path,
 ) -> Option<Target<'a>> {
     // The directory the seat was SEEN in when it was seen in one, and its single
     // configured worktree otherwise. A seat registered on several projects and
@@ -1370,19 +1597,21 @@ fn target_for<'a>(
             _ => return None,
         },
     };
-    let model = policy.model_for(seat.model.as_deref());
+    let model = policy.model_for(seat.model.as_deref(), capabilities);
     Some(Target {
-        seat_dir: &seat.name,
-        display_name: effect::display_name(seat.chosen_name.as_deref(), &seat.name),
+        seat: seat.id,
         project,
         worktree: dir_key(worktree),
-        posture: policy.posture_for(seat.transient).to_string(),
-        first_turn: policy.first_turn_for(&seat.name),
+        posture: policy.posture_for(seat.transient),
+        first_turn: policy.first_turn_for(&recorded.session_name, capabilities),
+        session_name: recorded.session_name,
         model,
         transient: seat.transient,
         config_dir: recorded.config_dir,
         item: recorded.item,
-        settings: None,
+        // The loop's own starts name no command: a named seat's worktree is a
+        // person's, and nothing renders rules into it.
+        permissions: agent::Permissions::default(),
         // The loop's own starts run no load belt: they wake seats the config
         // already carries rather than creating any, so a reading here would be
         // one this call never took.
@@ -1391,31 +1620,32 @@ fn target_for<'a>(
         // service and the seats it wakes are the seat list's, not a workflow's.
         run: None,
         session_id: observation.session_id.as_deref(),
-        short_id: observation.short_id.as_deref(),
         context_tokens,
+        machine_dir,
     })
 }
 
 /// What the seat's own session row remembers about the dispatch that opened it:
-/// the configuration directory every act about the session is made under, and
-/// the item the order index named (flights PRD R13).
+/// the configuration directory every act about the session is made under, the
+/// item the order index named, and the name the session was started under.
 ///
 /// Read off the table and CLONED rather than borrowed, because the same table is
 /// written inside the calls that take this.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct Recorded {
     config_dir: Option<String>,
     item: Option<String>,
+    /// `sessions::Table::session_name`: the row's, else the machine name.
+    session_name: String,
 }
 
 impl Recorded {
-    fn of(table: &Table, seat: &str) -> Recorded {
-        match table.newest_for(seat) {
-            Some(row) => Recorded {
-                config_dir: row.config_dir.clone(),
-                item: row.item.clone(),
-            },
-            None => Recorded::default(),
+    fn of(table: &Table, seat: &Seat) -> Recorded {
+        let row = table.newest_for(&seat.id.to_string());
+        Recorded {
+            config_dir: row.and_then(|row| row.config_dir.clone()),
+            item: row.and_then(|row| row.item.clone()),
+            session_name: table.session_name(&seat.as_ref()),
         }
     }
 }
@@ -1424,37 +1654,49 @@ impl Recorded {
 ///
 /// A seat event whose actor names no configured row is DROPPED with a line, and
 /// so is a `seat.resting` for a transient row: only named seats rest, and
-/// `fleet seat retire` is the verb for the other kind (R21). `seat.woke` and
+/// `fleet seat retire` is the verb for the other kind. `seat.woke` and
 /// `seat.handed_off` are recorded as lifecycle and nothing more — neither asks
 /// for anything.
+///
+/// The actor a line carries is REFUSED BY ITS KIND first: a run, a routine or
+/// the controller is not a seat whatever its id says, so a run whose id
+/// happens to be a seat's is never read as that seat. A seat's id is then
+/// matched against `known`, the ids of the seat list's rows; an id that is no
+/// seat id at all names no row either.
 fn fold(
     stream: &[events::Record],
-    known: &BTreeSet<&str>,
-    transient: &BTreeSet<&str>,
-) -> BTreeMap<String, Pending> {
-    let mut pending: BTreeMap<String, Pending> = BTreeMap::new();
+    known: &BTreeSet<SeatId>,
+    transient: &BTreeSet<SeatId>,
+) -> BTreeMap<SeatId, Pending> {
+    let mut pending: BTreeMap<SeatId, Pending> = BTreeMap::new();
     for record in stream {
         if !events::SEAT_TYPES.contains(&record.kind.as_str()) {
             continue;
         }
-        if !known.contains(record.actor.as_str()) {
+        let Some(said) = record.actor.seat_id() else {
             eprintln!(
-                "fleet observe: dropping a {} whose actor `{}` names no seat row",
+                "fleet observe: dropping a {} whose actor {} is not a seat",
                 record.kind, record.actor
             );
             continue;
-        }
-        if record.kind == events::SEAT_RESTING && transient.contains(record.actor.as_str()) {
+        };
+        let Some(id) = SeatId::parse(said).ok().filter(|id| known.contains(id)) else {
             eprintln!(
-                "fleet observe: dropping a {} for `{}`, which is a transient row; only named \
+                "fleet observe: dropping a {} whose actor `{said}` names no seat row",
+                record.kind
+            );
+            continue;
+        };
+        if record.kind == events::SEAT_RESTING && transient.contains(&id) {
+            eprintln!(
+                "fleet observe: dropping a {} for `{said}`, which is a transient row; only named \
                  seats rest",
-                record.kind, record.actor
+                record.kind
             );
             continue;
         }
-        let entry = pending.entry(record.actor.clone()).or_default();
+        let entry = pending.entry(id).or_default();
         if record.kind == events::SEAT_RESTING {
-            entry.rest = true;
             entry.rest_seq = Some(entry.rest_seq.unwrap_or(record.seq).min(record.seq));
         }
         if events::is_deliberate_end(&record.kind) {
@@ -1468,7 +1710,6 @@ fn fold(
         // and acting on the older event now would stop a session that just
         // started.
         if record.kind == events::SEAT_WOKE {
-            entry.rest = false;
             entry.deliberate_end = false;
             entry.rest_seq = None;
         }
@@ -1477,7 +1718,7 @@ fn fold(
 }
 
 /// The policy in force on this machine: the file's, with `config.json`'s own
-/// answers over it key by key (R28).
+/// answers over it key by key.
 ///
 /// A key the object carries that names no `[controller]` key is ignored and
 /// said once — a machine-local key nobody reads is worth a line and is not worth
@@ -1492,25 +1733,44 @@ fn overlaid(file: &Policy, raw: &MachineConfig, said: &mut BTreeSet<String>) -> 
     file.overlaid(&over)
 }
 
-/// The seat list with the model-gated rows taken out (lessons claude-code D3).
+/// The seat list with the model-gated rows taken out
+/// (the claude-code pack's lessons D3).
 ///
 /// A row whose start would ask for a posture its model was not measured to
 /// honour comes up in the default mode and says so ONLY ON SCREEN — nothing an
 /// instrument reads reports the downgrade, and the seat then stops at the first
 /// approval dialog with nobody there to answer. So the row is dropped here,
 /// before any start is attempted, and the drop is loud.
-fn gated(raw: &MachineConfig, policy: &Policy) -> MachineConfig {
+///
+/// A row whose posture the agent does not take at all is dropped the same
+/// way: its every start would be refused by the adapter, one poll at a time.
+fn admitted(raw: &MachineConfig, policy: &Policy, capabilities: &Capabilities) -> MachineConfig {
     let mut seats = Vec::with_capacity(raw.seats.len());
     let mut skipped = raw.skipped.clone();
     for seat in &raw.seats {
-        let model = policy.model_for(seat.model.as_deref());
-        if policy.posture_is_ungranted(seat.transient, &model) {
+        let posture = policy.posture_for(seat.transient);
+        if !capabilities.postures.contains(&posture) {
+            skipped.push(format!(
+                "{} would start under posture `{}`, which its agent does not take (it takes {})",
+                seat.machine_name(),
+                posture.word(),
+                capabilities
+                    .postures
+                    .iter()
+                    .map(|taken| taken.word())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            continue;
+        }
+        let model = policy.model_for(seat.model.as_deref(), capabilities);
+        if policy.posture_is_ungranted(seat.transient, &model, capabilities) {
             skipped.push(format!(
                 "{} would start under posture `{}` on model `{model}`, which matches none of \
                  the models measured to honour it ({})",
-                seat.name,
-                policy.posture_for(seat.transient),
-                policy.auto_capable_models.join(", ")
+                seat.machine_name(),
+                posture.word(),
+                policy.gate_for(seat.transient, capabilities).join(", ")
             ));
             continue;
         }
@@ -1543,10 +1803,10 @@ fn nap(clock: &dyn Clock, total: Duration) -> bool {
 }
 
 fn write_projection(machine_dir: &Path, document: &Projection) {
-    let path: PathBuf = machine_dir.join("projection.json");
+    let path: PathBuf = projection::path_in(machine_dir);
     match projection::render(document) {
         Ok(body) => {
-            if let Err(e) = platform::write_atomic(&path, body.as_bytes()) {
+            if let Err(e) = fleet_core::fs::write_atomic(&path, body.as_bytes()) {
                 eprintln!("fleet observe: could not publish {}: {e}", path.display());
             }
         }
@@ -1554,10 +1814,10 @@ fn write_projection(machine_dir: &Path, document: &Projection) {
     }
 }
 
-fn log_event(events_log: &mut EventLog, kind: &str, actor: &str, payload: serde_json::Value) {
-    if let Err(e) = events_log.append(kind, actor, payload) {
-        eprintln!("fleet observe: could not append {kind} to the event stream: {e}");
-    }
+fn log_event(events_log: &mut EventLog, kind: &str, actor: &ActorRef, payload: serde_json::Value) {
+    events_log.append_or_say(kind, actor, payload, |e| {
+        format!("fleet observe: could not append {kind} to the event stream: {e}")
+    });
 }
 
 /// A skipped row is reported every time the file is read: a seat that silently
@@ -1572,6 +1832,7 @@ fn report_skipped(config: &MachineConfig) {
 mod tests {
     use super::*;
     use crate::test_support::FakeClock;
+    use fleet_core::agent::Posture;
     use std::time::Instant;
 
     /// The whole point of the seam, measured: the poll interval driven against a
@@ -1595,5 +1856,52 @@ mod tests {
             wall < Duration::from_millis(10),
             "{interval:?} of fake time cost {wall:?} of wall clock"
         );
+    }
+
+    /// A row whose start would ask for a posture the agent does not take is
+    /// dropped at config read, naming the word and the postures it takes —
+    /// and the row of the kind whose posture it does take stands.
+    #[test]
+    fn a_row_asking_for_a_posture_the_agent_does_not_take_is_dropped_naming_the_word() {
+        let seat = |id: &str, transient: bool| Seat {
+            id: SeatId::parse(id).expect("a well-formed seat id"),
+            name: Some("orla".to_string()),
+            model: None,
+            transient,
+            worktrees: vec![("demo".to_string(), "/wt".to_string())],
+        };
+        let raw = MachineConfig {
+            fleet_toml: PathBuf::from("/fleet.toml"),
+            seats: vec![
+                seat("0199a3c4-7d8e-7f90-a1b2-c3d4e5f60718", false),
+                seat("0199a3c4-8f01-7a23-b456-c789d0e1f234", true),
+            ],
+            skipped: Vec::new(),
+            controller: None,
+        };
+        let policy = policy::parse("").expect("an empty policy parses");
+        let capabilities = Capabilities {
+            postures: vec![Posture::Ask, Posture::Auto],
+            default_model: "a-model".to_string(),
+            first_turn: "/wake {seat}".to_string(),
+            context: true,
+            measured: vec!["9.9.9".to_string()],
+            posture_models: BTreeMap::new(),
+        };
+
+        let config = admitted(&raw, &policy, &capabilities);
+        assert_eq!(config.seats.len(), 1, "{:?}", config.skipped);
+        assert!(!config.seats[0].transient, "the named row stands");
+        assert_eq!(config.skipped.len(), 1, "{:?}", config.skipped);
+        let said = &config.skipped[0];
+        assert!(said.contains("`unattended`"), "{said}");
+        assert!(said.contains("ask, auto"), "and what it takes: {said}");
+
+        // The control: an agent that takes all three drops nothing.
+        let every = Capabilities {
+            postures: Posture::ALL.to_vec(),
+            ..capabilities
+        };
+        assert_eq!(admitted(&raw, &policy, &every).seats.len(), 2);
     }
 }

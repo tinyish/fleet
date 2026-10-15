@@ -4,18 +4,18 @@
 //! A pack is a folder, so every rule about one is asserted against a real
 //! folder rather than against a model of it.
 
-mod board;
-
-pub use board::bd_init_server_args;
+pub mod adapter;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fleet_core::store::Store;
+use fleet_core::store::exec::Exec;
+use fleet_core::store::{ItemId, NewItem, Status, Store};
 // The applying fake store and the board over it are the CRATE's now, under its
 // `test-support` feature, so a dependent's suite can drive core's verbs on them
 // too. Every arm that wants them takes them from there.
-use fleet_core::test_support::{copy_tree, Board};
+use fleet_core::test_support::stub::with_state;
+use fleet_core::test_support::{copy_tree, stub_path, the_test, Board, FakeStore};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -177,9 +177,46 @@ fn open_store() -> &'static PathBuf {
         let store = templates();
         let _ = std::fs::create_dir_all(&store);
         let _ = std::fs::write(store.join("used"), b"");
+        clear_hollow_templates(&store);
         sweep_cold_templates(&std::env::temp_dir(), &store);
         store
     })
+}
+
+/// Removes every template in `store` that is not whole. A build writes `sha`
+/// into its staging directory before the one rename that makes it visible, so
+/// no process ever leaves a home without it; what stands there without it is
+/// what macOS's daily temp cleaner leaves of a template nobody touched for
+/// three days — the folders, none of the files (fleet-py9n). Left standing, it
+/// makes every rename onto its key fail and every arm that wants it panic.
+///
+/// A hollow home is claimed by renaming it aside, which only one process can
+/// do, and checked again once claimed: a home that turned whole in between was
+/// built by a racing process and goes straight back.
+fn clear_hollow_templates(store: &Path) {
+    let Ok(entries) = std::fs::read_dir(store) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let home = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.')
+            || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            || built_template(&home).is_some()
+        {
+            continue;
+        }
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let aside = store.join(format!(".hollow-{name}-{}-{n}", std::process::id()));
+        if std::fs::rename(&home, &aside).is_err() {
+            continue;
+        }
+        if built_template(&aside).is_some() {
+            let _ = std::fs::rename(&aside, &home);
+        } else {
+            remove_store(&aside);
+        }
+    }
 }
 
 /// Removes every `fleet-repo-templates-<key>` directory beside `keep` whose
@@ -282,9 +319,22 @@ fn mode(path: &Path, bits: u32) {
         .unwrap_or_else(|e| panic!("the template's mode is set on {}: {e}", path.display()));
 }
 
+/// Where the template for `files` stands, without opening the store: an arm can
+/// plant a damaged template there before this process ever looks.
+pub fn template_home(files: &[(&str, &str)]) -> PathBuf {
+    templates().join(template_key(files))
+}
+
+/// A whole template: its recorded commit, and a repository that still holds
+/// one. The second half matters because the temp cleaner may take the
+/// repository's files and leave `sha`.
 fn built_template(home: &Path) -> Option<(PathBuf, String)> {
     let sha = std::fs::read_to_string(home.join("sha")).ok()?;
-    Some((home.join("repo"), sha))
+    let repo = home.join("repo");
+    repo.join(".git")
+        .join("HEAD")
+        .is_file()
+        .then_some((repo, sha))
 }
 
 /// The repository for one file set, built once and left standing for whoever
@@ -460,14 +510,15 @@ impl AsRef<Path> for Defaults {
     }
 }
 
-/// The doctrine pack, read from the shipped folder the same way.
-pub fn bundled_tiny() -> PathBuf {
-    workspace().join("packs/tiny")
+/// The fixture shaped as the doctrine pack: it imports `ts` and shadows four
+/// of the defaults' paths ([`fleet_core::test_support::fixture_pack`]).
+pub fn fixture_tiny() -> PathBuf {
+    fleet_core::test_support::fixture_pack("tiny")
 }
 
-/// The TypeScript layer, the one shipped pack that pins a runtime.
-pub fn bundled_ts() -> PathBuf {
-    workspace().join("packs/ts")
+/// The fixture shaped as the runtime pack, the one that pins a runtime.
+pub fn fixture_ts() -> PathBuf {
+    fleet_core::test_support::fixture_pack("ts")
 }
 
 pub fn workspace() -> PathBuf {
@@ -477,24 +528,19 @@ pub fn workspace() -> PathBuf {
         .to_path_buf()
 }
 
-/// A real work graph in a temporary directory.
+/// A store of its own in a temporary directory, kept by the stub adapter and
+/// reached through [`Exec`], one process per call: the path a project whose
+/// `[store] adapter` names an executable takes.
 ///
-/// The store is `bd` on this box against its own database, so every rule about
-/// what a read answers is asserted against the store the verbs actually talk
-/// to. It is a REAL init and not a hand-built directory: `bd init` writes a
-/// database, a git repository and its own files, and a lookalike would agree
-/// with it until the day one of them changed.
-///
-/// UNDER A RUN the init is the run's, made once by
-/// `fleet/tools/dolt-test-server` and copied in here — the same files, and the
-/// rows on the run's one database. The rigs that cannot share those rows are
-/// the `SOLO` table in `common/board.rs`. With no run, or with a board the
-/// wrapper did not make, this runs the init itself, so one binary under a bare
-/// `cargo test` still comes up.
+/// The store is the stub's scratch, asked for through the contract's own
+/// `scratch` verb as `fleet store check` asks for one, so every arm on it runs
+/// with no store installed on the box. What no contract verb reaches — a label, a blocker,
+/// another writer's keys — the rig writes onto the stub's state under its lock.
 pub struct Scratch {
     pub root: PathBuf,
     pub packs_dir: PathBuf,
     pub defaults_dir: PathBuf,
+    pub store: Exec,
 }
 
 impl Scratch {
@@ -504,26 +550,19 @@ impl Scratch {
             std::env::temp_dir().join(format!("fleet-store-{label}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the scratch root is created");
-        match board::run_board(label) {
-            Some(made) => copy_tree(&made, &root),
-            None => {
-                let out = std::process::Command::new("bd")
-                    .args(["init", "--prefix", "fx", "--quiet"])
-                    .args(bd_init_server_args(label))
-                    .current_dir(&root)
-                    .output()
-                    .expect("bd is on the process PATH");
-                assert!(
-                    out.status.success(),
-                    "bd init: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-        }
+        let stub = stub_path();
+        let made = Exec::at(&stub, &root)
+            .scratch(&root)
+            .unwrap_or_else(|e| panic!("the stub makes a store in {}: {e}", root.display()));
+        assert_eq!(
+            made, root,
+            "the stub's store is the directory it was handed"
+        );
         let packs_dir = root.join("packs");
         std::fs::create_dir_all(&packs_dir).expect("the packs dir is created");
         let defaults_dir = materialize(&root);
         Scratch {
+            store: Exec::at(&stub, &root),
             root,
             packs_dir,
             defaults_dir,
@@ -543,52 +582,63 @@ impl Scratch {
         self
     }
 
-    pub fn bd(&self, args: &[&str]) -> std::process::Output {
-        std::process::Command::new("bd")
-            .arg("-C")
-            .arg(&self.root)
-            .args(args)
-            .output()
-            .expect("bd runs")
-    }
-
     /// One item, by title, answered as its id.
     pub fn item(&self, title: &str) -> String {
-        let out = self.bd(&[
-            "create",
-            "--title",
-            title,
-            "--description",
-            "a scratch item",
-            "--type",
-            "task",
-            "--json",
-        ]);
-        assert!(
-            out.status.success(),
-            "bd create: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let text = String::from_utf8_lossy(&out.stdout);
-        let value: serde_json::Value =
-            serde_json::from_str(text.trim()).expect("bd create answers JSON");
-        value
-            .get("id")
-            .and_then(|id| id.as_str())
-            .expect("the created item has an id")
+        self.store
+            .create(
+                &NewItem {
+                    title: title.to_string(),
+                    description: String::from("a scratch item"),
+                    item_type: String::from("task"),
+                    ..NewItem::default()
+                },
+                &the_test(),
+            )
+            .unwrap_or_else(|e| panic!("the item `{title}` is filed: {e}"))
             .to_string()
     }
 
     /// The whole document, as text: what an arm compares before and after. A
     /// failed read panics, so two failures never compare equal.
     pub fn json(&self, item: &str) -> String {
-        let out = self.bd(&["show", item, "--json"]);
-        assert!(
-            out.status.success(),
-            "bd show {item}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        self.store
+            .show(item)
+            .unwrap_or_else(|e| panic!("show {item}: {e}"))
+            .proof
+            .as_str()
+            .to_string()
+    }
+
+    /// `act` on the stub's own state, under its lock: a rig putting the store
+    /// in a state no contract verb reaches, or reading what the store keeps
+    /// that no contract verb answers.
+    pub fn rig<T>(&self, act: impl FnOnce(&FakeStore) -> T) -> T {
+        with_state(&self.root, act)
+            .unwrap_or_else(|e| panic!("the stub's state at {}: {e}", self.root.display()))
+    }
+
+    /// ANOTHER WRITER'S KEYS put on the item — [`FakeStore::plant_metadata`].
+    pub fn set_metadata(&self, item: &str, payload: &str) {
+        self.rig(|store| store.plant_metadata(item, payload));
+    }
+
+    pub fn label(&self, item: &str, label: &str) {
+        self.rig(|store| store.amend(item, |held| held.labels.push(label.to_string())));
+    }
+
+    /// One open dependency between two items, which is what takes the first out
+    /// of the ready set.
+    pub fn blocked_by(&self, item: &str, blocker: &str) {
+        self.rig(|store| store.amend(item, |held| held.blockers.push(ItemId::from(blocker))));
+    }
+
+    pub fn status(&self, item: &str, status: &str) {
+        self.rig(|store| store.amend(item, |held| held.status = Status::from(status)));
+    }
+
+    /// The type, as the store spells it: a field no contract verb writes.
+    pub fn item_type(&self, item: &str, kind: &str) {
+        self.rig(|store| store.amend(item, |held| held.item_type = kind.to_string()));
     }
 }
 
@@ -598,13 +648,9 @@ impl Drop for Scratch {
     }
 }
 
-/// The one store a whole test binary shares.
-///
-/// `bd` serialises against itself on this box — eight arms driving eight
-/// SEPARATE stores in parallel measured slower than eight driving one, a
-/// reading taken 2026-09-08 and not retaken since — so a store per arm buys
-/// isolation at a price and no speed. Each arm takes its own item out of this
-/// one instead.
+/// The one store a test binary's ring arms share, each taking its own item out
+/// of it: a rig holds the store for the life of the process, and a static is
+/// what lives that long.
 ///
 /// It outlives the process: a shared handle has no owner to drop it, so the
 /// directory is left under the system temp directory. The name carries the
@@ -708,7 +754,12 @@ impl StubEvents {
 }
 
 impl fleet_core::item::Events for StubEvents {
-    fn append(&self, kind: &str, actor: &str, payload: serde_json::Value) -> Result<(), String> {
+    fn append(
+        &self,
+        kind: &str,
+        actor: &fleet_core::seat::actor::Actor,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
         if let Some(why) = &self.refuse {
             return Err(why.clone());
         }
@@ -719,6 +770,25 @@ impl fleet_core::item::Events for StubEvents {
         ));
         Ok(())
     }
+}
+
+/// Another writer's order index, of the kind a board fleet is added to may
+/// already carry: a bare `orders` in a shape fleet never wrote, whose `seat` is
+/// a seat name a misreading would route work to.
+pub const FOREIGN_ORDERS: &str =
+    r#"{"orders":{"seat":"another-tools-seat","by":7,"kind":["theirs",{"nested":true}]}}"#;
+
+/// Another writer's label, the bare word fleet's run label once was.
+pub const FOREIGN_LABEL: &str = "run";
+
+/// The item's bare `orders` key and its labels, as the store answers them: what
+/// an arm holds byte-identical across a verb that must neither read nor move
+/// them.
+pub fn foreign_of(store: &dyn Store, item: &str) -> (String, Vec<String>) {
+    let read = store.show(item).expect("the item reads");
+    let document: serde_json::Value =
+        serde_json::from_str(read.proof.as_str()).expect("the document is JSON");
+    (document["metadata"]["orders"].to_string(), read.labels)
 }
 
 /// The payload's keys, sorted, against the table core declares for that kind.
@@ -745,17 +815,146 @@ pub fn keys_agree(kind: &str, payload: &serde_json::Value, absent: &[&str]) {
     assert_eq!(written, wanted, "{kind}'s payload keys");
 }
 
-/// The work graph a rig runs against: held in memory, or `bd` on a scratch
-/// board.
+/// The entry signals the verb appended, in order, as `(actor, payload)`: every
+/// one of them `item.entry`, carrying the table's keys and nothing else.
+pub fn signals(events: &StubEvents) -> Vec<(String, serde_json::Value)> {
+    let signals: Vec<(String, serde_json::Value)> = events
+        .all()
+        .into_iter()
+        .filter(|(kind, _, _)| kind == fleet_core::item::ITEM_ENTRY)
+        .map(|(_, actor, payload)| (actor, payload))
+        .collect();
+    for (_, payload) in &signals {
+        keys_agree(fleet_core::item::ITEM_ENTRY, payload, &[]);
+    }
+    signals
+}
+
+/// The one signal an entry's writer appends: `item.entry` by `by`, naming the
+/// item, the entry the timeline holds and its kind.
+pub fn signal(item: &str, entry: &str, kind: &str) -> serde_json::Value {
+    serde_json::json!({ "item": item, "entry": entry, "kind": kind })
+}
+
+// ---- git ----------------------------------------------------------------------
+
+/// One `git status --porcelain -z` entry a stub git answers: the two status
+/// columns as `xy`, then the path, raw. No rename origin.
+pub fn st(xy: &str, path: &str) -> fleet_core::item::StatusLine {
+    let mut columns = xy.chars();
+    fleet_core::item::StatusLine {
+        index: columns.next().expect("two status columns"),
+        worktree: columns.next().expect("two status columns"),
+        path: path.to_string(),
+        from: None,
+    }
+}
+
+// ---- seats --------------------------------------------------------------------
+
+/// The id an arm's seat is keyed by, derived from its name alone: FNV-1a over
+/// the name, in the node's twelve digits.
 ///
-/// ONE TYPE FOR BOTH, so the one arm per suite that drives `bd` — the
-/// integration ring — runs through the same rig as every arm around it, and
-/// the two cannot drift apart unseen.
+/// A seat-holds-an-item read is a query across a whole store, and one store is
+/// shared across a binary's arms, so two arms' seats may never share an id —
+/// and each arm already takes a name of its own.
+pub fn seat_id(name: &str) -> fleet_core::seat::identity::SeatId {
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    fleet_core::seat::identity::SeatId::parse(&format!(
+        "01a0d1f1-0aec-765f-9abe-{:012x}",
+        hash & 0xffff_ffff_ffff
+    ))
+    .expect("an arm's seat id parses")
+}
+
+/// That id as the record writes it: the assignee and `fleet.orders.seat`.
+pub fn full(name: &str) -> String {
+    seat_id(name).to_string()
+}
+
+/// The agent seat an arm names.
+pub fn agent(name: &str) -> fleet_core::seat::identity::SeatRef {
+    fleet_core::seat::identity::SeatRef {
+        id: seat_id(name),
+        name: Some(name.to_string()),
+        kind: fleet_core::seat::identity::Kind::Agent,
+    }
+}
+
+/// The typed actor an arm's seat acts as: `seat:<its full id>`, which is what
+/// every write and every event the seat makes carries.
+pub fn seat_actor(name: &str) -> fleet_core::seat::actor::Actor {
+    fleet_core::seat::actor::Actor::seat(seat_id(name))
+}
+
+/// The order a dispatch gives: by the actor, to the seat — a seat's full id,
+/// or none for a transient dispatch not yet answered — at the stamp, each as
+/// its text.
+pub fn a_dispatch(by: &str, seat: Option<&str>, at: &str) -> fleet_core::store::Order {
+    fleet_core::store::Order {
+        kind: fleet_core::store::OrderKind::Dispatch,
+        by: fleet_core::seat::actor::Actor::typed(by)
+            .expect("a typed actor")
+            .unwrap_or_else(|e| panic!("{by} is an actor: {e}")),
+        seat: seat.map(|seat| {
+            fleet_core::seat::identity::SeatId::parse(seat)
+                .unwrap_or_else(|e| panic!("{seat} is a seat id: {e}"))
+        }),
+        at: fleet_core::store::Stamp::parse(at).unwrap_or_else(|| panic!("{at} is a stamp")),
+    }
+}
+
+/// A fleet of agent seats by name, each listed and running here.
+pub fn fleet_of(names: &[&str]) -> fleet_core::seat::identity::Directory {
+    let running: Vec<_> = names.iter().map(|name| agent(name)).collect();
+    fleet_core::seat::identity::Directory {
+        listed: running.clone(),
+        running,
+    }
+}
+
+// ---- entries ------------------------------------------------------------------
+
+/// A delivery that keeps every rule its kind has, at `commit`: the one sample
+/// the store suites append, and a short `commit` is the one that does not.
+pub fn a_delivery(commit: &str) -> fleet_core::entry::Body {
+    use fleet_core::entry::{Body, Delivered, NotProven, Ran, SuiteRun};
+    Body::Delivered(Delivered {
+        commit: commit.to_string(),
+        branch: String::from("work/a-seat"),
+        base: String::from("0123456789abcdef0123456789abcdef01234567"),
+        files: vec![String::from("core/src/store.rs")],
+        checks: Vec::new(),
+        suite: SuiteRun::Ran(Ran {
+            command: String::from("cargo nextest run -p fleet-core"),
+            rc: 0,
+        }),
+        spec_corrections: Vec::new(),
+        not_proven: vec![NotProven {
+            surface: String::from("a store under load"),
+            command: String::from("fleet item show fx-1"),
+        }],
+        decisions: Vec::new(),
+        covers: Vec::new(),
+    })
+}
+
+/// A whole sha, for [`a_delivery`] to name.
+pub const A_COMMIT: &str = "1111111111111111111111111111111111111111";
+
+/// The work graph a rig runs against: held in memory, or the stub adapter's
+/// store reached through [`Exec`].
+///
+/// ONE TYPE FOR BOTH, so the one arm per suite that drives the store out of
+/// process — the integration ring — runs through the same rig as every arm
+/// around it, and the two cannot drift apart unseen.
 pub enum Graph {
     /// Boxed because a board carries a whole store, and an enum is as big as
     /// its widest variant wherever it is held.
     Memory(Box<Board>),
-    Real(&'static Scratch, fleet_core::store::Bd),
+    Exec(&'static Scratch),
 }
 
 impl Graph {
@@ -763,23 +962,23 @@ impl Graph {
         Graph::Memory(Box::new(Board::new(label)))
     }
 
-    /// The one `bd` board this binary drives, taken by its ring arm.
-    pub fn real(label: &'static str) -> Graph {
-        let scratch = shared_store(label);
-        Graph::Real(scratch, fleet_core::store::Bd::at(&scratch.root))
+    /// The one store this binary drives through [`Exec`], taken by its ring
+    /// arm.
+    pub fn exec(label: &'static str) -> Graph {
+        Graph::Exec(shared_store(label))
     }
 
     pub fn store(&self) -> &dyn Store {
         match self {
             Graph::Memory(board) => &board.store,
-            Graph::Real(_, bd) => bd,
+            Graph::Exec(scratch) => &scratch.store,
         }
     }
 
     pub fn item(&self, title: &str) -> String {
         match self {
             Graph::Memory(board) => board.item(title),
-            Graph::Real(scratch, _) => scratch.item(title),
+            Graph::Exec(scratch) => scratch.item(title),
         }
     }
 
@@ -787,14 +986,14 @@ impl Graph {
     pub fn json(&self, item: &str) -> String {
         match self {
             Graph::Memory(board) => board.json(item),
-            Graph::Real(scratch, _) => scratch.json(item),
+            Graph::Exec(scratch) => scratch.json(item),
         }
     }
 
     pub fn install(&self, name: &str, from: &Path) -> PathBuf {
         match self {
             Graph::Memory(board) => board.install(name, from),
-            Graph::Real(scratch, _) => scratch.install(name, from),
+            Graph::Exec(scratch) => scratch.install(name, from),
         }
     }
 
@@ -803,24 +1002,54 @@ impl Graph {
             Graph::Memory(board) => {
                 board.fleet_toml(body);
             }
-            Graph::Real(scratch, _) => {
+            Graph::Exec(scratch) => {
                 scratch.fleet_toml(body);
             }
         }
     }
 
-    pub fn assign(&self, item: &str, seat: &str) {
+    /// The item handed to a seat, by its full id, as a rig's own setup.
+    pub fn hand_to(&self, item: &str, seat: &str) {
+        let seat = fleet_core::seat::identity::SeatId::parse(seat)
+            .unwrap_or_else(|e| panic!("a rig hands {item} to a seat: {e}"));
         self.store()
-            .assign(item, seat, "the-test")
-            .unwrap_or_else(|e| panic!("assign {item}: {e}"));
+            .update(
+                &fleet_core::store::ItemId::from(item),
+                &fleet_core::store::Update::assignee(seat),
+                &fleet_core::test_support::the_test(),
+            )
+            .unwrap_or_else(|e| panic!("hand {item} to {seat}: {e}"));
     }
 
-    /// The label the open-flight read finds a record by. The trait carries no
-    /// label verb, so the real half writes it through the binary.
+    /// The item's order, written as a dispatch writes one, as a rig's own
+    /// setup.
+    pub fn order(&self, item: &str, order: &fleet_core::store::Order) {
+        self.store()
+            .order_set(
+                &fleet_core::store::ItemId::from(item),
+                order,
+                &fleet_core::test_support::the_test(),
+            )
+            .unwrap_or_else(|e| panic!("the order on {item}: {e}"));
+    }
+
+    /// A metadata object merged onto the item as ANOTHER WRITER leaves one —
+    /// a key fleet does not own, or one of fleet's own at a shape no fleet
+    /// writer here makes. The contract writes only its own types, so both
+    /// halves plant it on the store's state.
+    pub fn set_metadata(&self, item: &str, payload: &str) {
+        match self {
+            Graph::Memory(board) => board.set_metadata(item, payload),
+            Graph::Exec(scratch) => scratch.set_metadata(item, payload),
+        }
+    }
+
+    /// The label the open-flight read finds a record by. The contract carries
+    /// no label verb, so both halves write it on the store's state.
     pub fn label(&self, item: &str, label: &str) {
         match self {
             Graph::Memory(board) => board.label(item, label),
-            Graph::Real(_, _) => self.wrote(&["label", "add", item, label]),
+            Graph::Exec(scratch) => scratch.label(item, label),
         }
     }
 
@@ -829,35 +1058,24 @@ impl Graph {
     pub fn blocked_by(&self, item: &str, blocker: &str) {
         match self {
             Graph::Memory(board) => board.blocked_by(item, blocker),
-            Graph::Real(_, _) => self.wrote(&["dep", "add", item, blocker]),
+            Graph::Exec(scratch) => scratch.blocked_by(item, blocker),
         }
     }
 
     pub fn status(&self, item: &str, status: &str) {
         match self {
             Graph::Memory(board) => board.status(item, status),
-            Graph::Real(_, _) => {
-                self.wrote(&["update", item, "--status", status, "--actor", "the-test"])
-            }
+            Graph::Exec(scratch) => scratch.status(item, status),
         }
     }
 
-    /// A call to the binary itself, which a ring arm's own readings take: the
-    /// store's gate listing carries fields no trait method answers.
-    pub fn bd(&self, args: &[&str]) -> std::process::Output {
+    /// The type, as the store spells it. The contract carries no verb for it,
+    /// so both halves write it on the store's state.
+    pub fn item_type(&self, item: &str, kind: &str) {
         match self {
-            Graph::Real(scratch, _) => scratch.bd(args),
-            Graph::Memory(_) => panic!("only a ring's graph drives the binary"),
+            Graph::Memory(board) => board.amend(item, |held| held.item_type = kind.to_string()),
+            Graph::Exec(scratch) => scratch.item_type(item, kind),
         }
-    }
-
-    fn wrote(&self, args: &[&str]) {
-        let out = self.bd(args);
-        assert!(
-            out.status.success(),
-            "bd {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
     }
 }
 
@@ -865,19 +1083,19 @@ impl Rooted for Graph {
     fn root(&self) -> &Path {
         match self {
             Graph::Memory(board) => &board.root,
-            Graph::Real(scratch, _) => &scratch.root,
+            Graph::Exec(scratch) => &scratch.root,
         }
     }
     fn packs_dir(&self) -> &Path {
         match self {
             Graph::Memory(board) => &board.packs_dir,
-            Graph::Real(scratch, _) => &scratch.packs_dir,
+            Graph::Exec(scratch) => &scratch.packs_dir,
         }
     }
     fn defaults_dir(&self) -> &Path {
         match self {
             Graph::Memory(board) => &board.defaults_dir,
-            Graph::Real(scratch, _) => &scratch.defaults_dir,
+            Graph::Exec(scratch) => &scratch.defaults_dir,
         }
     }
 }

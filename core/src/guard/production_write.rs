@@ -1,6 +1,5 @@
 //! The production-write class: three checks over one command's text, one per
-//! list the project declares (packs PRD § The guards, the production-write
-//! row).
+//! list the project declares.
 //!
 //! THE LISTS ARE THE WHOLE TARGET SET. A bucket host, a cloud project and an
 //! application name are refused because the project wrote them down, never
@@ -36,7 +35,7 @@
 //! matches what the project wrote down and derives nothing from a spelling, so
 //! it reaches no target a parsed judgment could not have named.
 
-use super::lex::{basename, command_words, is_assignment, lex, statements, unquote};
+use super::lex::{basename, command_words, lex, raw_invocations, statements, unquote};
 use super::release_ref::matches_glob;
 use super::{leading_escape, Denial, Policy, ESCAPE_PROD_WRITE};
 
@@ -49,7 +48,7 @@ pub const CHECKS: [&str; 6] = [
     "workflow-ref",
 ];
 
-/// The tools this class reads. Both paths gate on this list — the parsed walk
+/// The tools this class reads. Both paths refuse on this list — the parsed walk
 /// below and the raw-text fallback at the foot of the file — so a tool that
 /// leaves here leaves both at once.
 const GUARDED_TOOLS: [&str; 9] = [
@@ -284,7 +283,7 @@ fn listed_bucket(arguments: &[String], policy: &Policy) -> Option<String> {
             continue;
         };
         let host = path.split('/').next().unwrap_or(path);
-        if policy.prod_buckets.iter().any(|b| b == host) {
+        if policy.targets.prod_buckets.iter().any(|b| b == host) {
             return Some(argument.clone());
         }
     }
@@ -326,7 +325,7 @@ fn cloud_tool(rest: &[String], policy: &Policy) -> Option<Denial> {
     if group == "config" && positionals.get(1).map(String::as_str) == Some("set") {
         let key = positionals.get(2)?;
         let value = positionals.get(3)?;
-        if key == "project" && policy.prod_projects.iter().any(|p| p == value) {
+        if key == "project" && policy.targets.prod_projects.iter().any(|p| p == value) {
             return Some(project_refusal("config set project", value));
         }
         return None;
@@ -391,17 +390,23 @@ fn project_denial(
 ) -> Option<Denial> {
     match flag_value(words, flags) {
         Some(value) => policy
+            .targets
             .prod_projects
             .contains(&value)
             .then(|| project_refusal(named, &format!("--project {value}"))),
         None => {
             let active = policy.active_project.as_deref()?;
-            policy.prod_projects.iter().any(|p| p == active).then(|| {
-                project_refusal(
-                    named,
-                    &format!("no --project, and the configured project is {active}"),
-                )
-            })
+            policy
+                .targets
+                .prod_projects
+                .iter()
+                .any(|p| p == active)
+                .then(|| {
+                    project_refusal(
+                        named,
+                        &format!("no --project, and the configured project is {active}"),
+                    )
+                })
         }
     }
 }
@@ -448,12 +453,13 @@ fn app_tool(rest: &[String], policy: &Policy) -> Option<Denial> {
 
     match flag_value(rest, &APP_FLAGS) {
         Some(name) => policy
+            .targets
             .prod_apps
             .contains(&name)
             .then(|| app_refusal(&named, &format!("--app {name}"))),
         None => {
             let here = policy.cwd_app.as_deref()?;
-            policy.prod_apps.iter().any(|a| a == here).then(|| {
+            policy.targets.prod_apps.iter().any(|a| a == here).then(|| {
                 app_refusal(
                     &named,
                     &format!("no --app, and the directory's own file names {here}"),
@@ -531,7 +537,7 @@ const MAKE_DRY: &str = "dry=1";
 fn make_tool(rest: &[String], policy: &Policy) -> Option<Denial> {
     let goal = rest
         .iter()
-        .find(|word| policy.prod_make_goals.iter().any(|g| g == *word))?;
+        .find(|word| policy.targets.prod_make_goals.iter().any(|g| g == *word))?;
     let dry = rest
         .iter()
         .filter(|word| is_dry_assignment(word))
@@ -592,13 +598,23 @@ fn dagger_tool(rest: &[String], policy: &Policy) -> Option<Denial> {
     let in_script = scripts
         .iter()
         .flat_map(|script| script.split([' ', '\t', '\n', '|', ';', '&', '(', ')']))
-        .find(|word| policy.prod_dagger_functions.iter().any(|f| f == word))
+        .find(|word| {
+            policy
+                .targets
+                .prod_dagger_functions
+                .iter()
+                .any(|f| f == word)
+        })
         .map(str::to_string);
     let named = match &in_script {
         Some(word) => word,
-        None => rest[start..]
-            .iter()
-            .find(|word| policy.prod_dagger_functions.iter().any(|f| f == *word))?,
+        None => rest[start..].iter().find(|word| {
+            policy
+                .targets
+                .prod_dagger_functions
+                .iter()
+                .any(|f| f == *word)
+        })?,
     };
     Some(Denial {
         class: "production-write",
@@ -703,7 +719,7 @@ fn gh_tool(rest: &[String], policy: &Policy) -> Option<Denial> {
     // pair — and that is the direction the reference allows in too.
     let workflow = basename(&positionals.get(2)?.replace('\\', "/")).to_string();
     let reference = flag_value(rest, &GH_REF_FLAGS)?;
-    let entry = policy.prod_workflow_refs.iter().find(|entry| {
+    let entry = policy.targets.prod_workflow_refs.iter().find(|entry| {
         entry
             .split_once(':')
             .is_some_and(|(name, glob)| name == workflow && matches_glob(glob, &reference))
@@ -733,36 +749,26 @@ fn gh_tool(rest: &[String], policy: &Policy) -> Option<Denial> {
 /// parsed verb here, so a READ of a listed target refuses too; that is the
 /// over-refusal this direction buys, and the escape is what bounds it.
 fn raw_listed_target(command: &str, policy: &Policy) -> Option<Denial> {
-    for line in command.lines() {
-        for chunk in line.split(['(', ')', ';', '&', '|']) {
-            let words: Vec<&str> = chunk.split_whitespace().collect();
-            let mut index = 0;
-            while index < words.len() && is_assignment(words[index]) {
-                index += 1;
-            }
-            let Some(head) = words.get(index) else {
-                continue;
-            };
-            let tool = basename(unquote(head));
-            if !GUARDED_TOOLS.contains(&tool) {
-                continue;
-            }
-            // The quoting is what could not be read, so each argument is
-            // compared with its quotes off: the target of an unterminated word
-            // arrives carrying the quote that never closed.
-            for argument in &words[index + 1..] {
-                let argument = unquote(argument);
-                for (check, list) in [
-                    (CHECKS[0], &policy.prod_buckets),
-                    (CHECKS[1], &policy.prod_projects),
-                    (CHECKS[2], &policy.prod_apps),
-                ] {
-                    let hit = list
-                        .iter()
-                        .find(|entry| !entry.is_empty() && argument.contains(entry.as_str()));
-                    if let Some(entry) = hit {
-                        return Some(raw_refusal(check, tool, entry));
-                    }
+    for (head, words) in raw_invocations(command) {
+        let tool = basename(unquote(head));
+        if !GUARDED_TOOLS.contains(&tool) {
+            continue;
+        }
+        // The quoting is what could not be read, so each argument is
+        // compared with its quotes off: the target of an unterminated word
+        // arrives carrying the quote that never closed.
+        for argument in &words {
+            let argument = unquote(argument);
+            for (check, list) in [
+                (CHECKS[0], &policy.targets.prod_buckets),
+                (CHECKS[1], &policy.targets.prod_projects),
+                (CHECKS[2], &policy.targets.prod_apps),
+            ] {
+                let hit = list
+                    .iter()
+                    .find(|entry| !entry.is_empty() && argument.contains(entry.as_str()));
+                if let Some(entry) = hit {
+                    return Some(raw_refusal(check, tool, entry));
                 }
             }
         }

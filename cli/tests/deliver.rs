@@ -1,15 +1,14 @@
 //! `fleet deliver` through the shipped binary, against a scratch repository and
-//! a stub that stands in for the provider (packs PRD R6, R7, R10).
+//! `fleet-agent-stub` standing in for the agent.
 //!
 //! This is where the live git path is proven: the project is a real repository,
-//! the commit the verb makes is read back out of it with git, and the delivery
-//! note the store holds names that commit.
+//! the commit the verb makes is read back out of it with git, and the delivered
+//! entry the store holds names that commit.
 //!
-//! One repository per arm, because an arm's subject is the state of a working
-//! tree. `bd init` writes the repository and its first commit; the fixture adds
-//! the trunk ref a delivery records its base from, and points `core.hooksPath`
-//! at nothing, so what the commit runs is this verb and not the store's own
-//! hooks.
+//! One repository and one store per arm, because an arm's subject is the state
+//! of a working tree. The fixture adds the trunk ref a delivery records its
+//! base from, and points `core.hooksPath` at nothing, so what the commit runs
+//! is this verb and no hook of the box's.
 
 mod common;
 
@@ -18,31 +17,32 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::hermetic::Hermetic;
+use fleet_controller::test_support::agent_stub;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 const REVIEWER: &str = "a-reviewer";
-const POLICY: &str = "[gates]\nsuite = \"make check\"\n\n\
+/// The reviewer seat's id, which keys its row; [`REVIEWER`] is its name.
+const REVIEWER_ID: &str = "01a0d1f1-0aec-765f-9abe-d4f993b9739a";
+/// One guard opted out, so a brief rendered off this file carries a line only
+/// this file could have put there.
+const POLICY: &str = "[guards]\nrecord = { enabled = false }\n\n\
                       [core]\nreviewer = \"a-reviewer\"\n\n\
-                      [controller]\nnudge_model = \"a-cheap-model\"\n\
-                      nudge_timeout_seconds = 20\n";
+                      [controller]\nnudge_timeout_seconds = 1\n";
 
-/// The note the seat wrote. The three lines deliver fills are left as the seat
-/// left them, and every other line is the seat's own word.
-const NOTE: &str = "\
-DELIVERED <sha> — <seat>
-commit:  <pending>
-branch:  <pending>
-base:    <pending>
-files:   the-work.txt
-gate:    AC2 green, each rc read from its own command
-suite:   the workspace suite, rc 0
-spec corrections: none
-not proven: what this arm did not run
-decisions: 1
-  D1 the note is the seat's; not taken: composing it here; because the words are the seat's
-covers: R6
-";
+/// The delivery the seat hands in: the JSON its brief's schema shows. The
+/// commit, the branch, the base and the time are the verb's, so it names none.
+const DELIVERY: &str = r#"{
+  "files": ["the-work.txt"],
+  "checks": [{"check": "AC2", "result": "green, each rc read from its own command"}],
+  "suite": {"command": "the workspace suite", "rc": 0},
+  "spec_corrections": [],
+  "not_proven": [{"surface": "what this arm did not run", "command": "cargo nextest run"}],
+  "decisions": [
+    {"call": "the delivery is the seat's", "not_taken": "composing it here", "because": "the words are the seat's"}
+  ],
+  "covers": ["R6"]
+}"#;
 
 fn defaults_into(machine: &Path) -> PathBuf {
     let root = machine.join(fleet_core::defaults::DIR);
@@ -63,21 +63,21 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// One arm: its own repository, work graph, machine directory and stub.
+/// One arm: its own repository, work graph, machine directory and agent
+/// stub, whose state is kept under the project, the fleet's root.
 struct Rig {
     root: PathBuf,
     project: PathBuf,
     machine: PathBuf,
     worktree: PathBuf,
-    stub: PathBuf,
-    roster: PathBuf,
-    nudge_argv: PathBuf,
-    note: PathBuf,
-    /// One seat name per arm. The store is the run's shared board, and `which
-    /// item does this seat hold` is a query across the whole of it, so two arms
-    /// on one seat name would each be refused for the other's ordered item.
-    /// The REVIEWER needs no such treatment: every arm names the item it
-    /// reviews, so no read of theirs goes through the assignee.
+    /// The link `FLEET_TMUX_BIN` names, and the fake server's state beside it.
+    tmux: PathBuf,
+    state: PathBuf,
+    /// The delivery file, beside the project and never in it: a file in the
+    /// tree would be one the delivery left unstaged.
+    delivery: PathBuf,
+    /// One seat name per arm, which the policy lists and the item is ordered
+    /// to.
     seat: String,
 }
 
@@ -98,10 +98,9 @@ impl Rig {
         defaults_into(&machine);
 
         let rig = Rig {
-            stub: root.join("agent.sh"),
-            roster: root.join("roster.json"),
-            nudge_argv: root.join("nudge-argv"),
-            note: root.join("note.md"),
+            tmux: common::stub_tmux(&root.join("tmux")),
+            state: root.join("tmux").join("tmux-stub.json"),
+            delivery: root.join("delivery.json"),
             seat: format!("a-builder-{label}"),
             root,
             project,
@@ -109,12 +108,12 @@ impl Rig {
             worktree,
         };
         rig.init_store();
-        std::fs::write(&rig.note, NOTE).expect("the note is written");
+        std::fs::write(&rig.delivery, DELIVERY).expect("the delivery is written");
         std::fs::write(
             rig.machine.join("config.json"),
             format!(
                 r#"{{"fleet_toml": {fleet_toml}, "children": [
-                     {{"name": "{REVIEWER}", "chosen_name": "Kite",
+                     {{"id": "{REVIEWER_ID}", "name": "{REVIEWER}",
                       "worktrees": {{"a-project": {worktree}}}}}
                    ]}}"#,
                 fleet_toml = json_string(&rig.project.join("fleet.toml").display().to_string()),
@@ -122,31 +121,50 @@ impl Rig {
             ),
         )
         .expect("the machine config is written");
-        rig.write_stub();
         rig.roster("[]");
         rig
     }
 
+    /// The policy, listing the delivering seat and the reviewer: `deliver`
+    /// finds the item a seat holds by resolving its actor among the seats the
+    /// fleet lists, and hands it to the one listed seat `[core] reviewer`
+    /// names, by that seat's id. Then the store the policy names, and the
+    /// repository, which never versions the store.
     fn init_store(&self) {
-        std::fs::write(self.project.join("fleet.toml"), POLICY).expect("the policy is written");
-        common::take_a_board(&self.project, "deliver");
+        std::fs::write(
+            self.project.join("fleet.toml"),
+            format!(
+                "{POLICY}{}\n[seats.{REVIEWER_ID}]\nkind = \"agent\"\nname = \"{REVIEWER}\"\n",
+                common::seat_table_of(&self.seat)
+            ),
+        )
+        .expect("the policy is written");
+        common::stub_agent(&self.project);
+        common::take_a_store(&self.project);
+        self.git(&["init", "--quiet", "--initial-branch", "main"]);
+        common::store_outside_git(&self.project);
+        agent_stub_outside_git(&self.project);
+    }
+
+    /// The delivering seat's full id, which its items are assigned to.
+    fn seat_id(&self) -> String {
+        common::seat_id_of(&self.seat)
     }
 
     /// The repository as a delivery finds it: the policy committed on the
     /// trunk, a trunk ref to record a base from, and a work branch with one
     /// file staged.
     ///
-    /// The store's own files are committed HERE, after the item has been made,
-    /// because `bd` appends to a log this repository versions on every call:
-    /// the tree a seat starts a delivery from is clean, and this fixture is one
-    /// that has actually been used.
+    /// Made HERE, after the item has been made, so this fixture is one that
+    /// has actually been used and the tree a seat starts a delivery from is
+    /// still clean.
     fn init_repo(&self) {
         self.git(&[
             "config",
             "core.hooksPath",
             &self.root.join("hooks").display().to_string(),
         ]);
-        self.git(&["add", "--", "fleet.toml", ".beads"]);
+        self.git(&["add", "--", "fleet.toml"]);
         self.git(&["commit", "--quiet", "--no-gpg-sign", "-m", "the policy"]);
         self.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
         self.git(&["checkout", "--quiet", "-b", "a-seat/feat/the-work"]);
@@ -156,9 +174,13 @@ impl Rig {
     }
 
     /// The repository as a TRANSIENT SEAT finds it (the transient-seat resolution spec): the
-    /// policy file written but never committed, the board and the trunk ref on
-    /// the trunk, and the work staged in a linked worktree cut beside the
-    /// primary — so nothing above that checkout carries a `fleet.toml`.
+    /// policy file written but never committed, the trunk ref on the trunk,
+    /// and the work staged in a linked worktree cut beside the primary — so
+    /// nothing above that checkout carries a `fleet.toml`.
+    ///
+    /// THE CHECKOUT SHARES THE PRIMARY'S STORE. With the policy committed, a
+    /// verb run there resolves the checkout as its project, and the store is
+    /// one per project whichever checkout reaches it.
     ///
     /// Returns the seat's checkout, as the binary will be handed it.
     fn init_repo_in_a_linked_worktree(&self, commit_the_policy: bool) -> PathBuf {
@@ -170,10 +192,18 @@ impl Rig {
         if commit_the_policy {
             self.git(&["add", "--", "fleet.toml"]);
         }
-        self.git(&["add", "--", ".beads"]);
-        self.git(&["commit", "--quiet", "--no-gpg-sign", "-m", "the board"]);
+        // `--allow-empty`: where the policy is left out there is nothing to
+        // add, and the arms want the trunk's commit either way.
+        self.git(&[
+            "commit",
+            "--quiet",
+            "--no-gpg-sign",
+            "--allow-empty",
+            "-m",
+            "the trunk",
+        ]);
         self.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        let seat = self.root.join("a-project-worktrees/transient-1");
+        let seat = self.root.join("a-project-worktrees/agent-1b7e4c09");
         self.git(&[
             "worktree",
             "add",
@@ -183,6 +213,7 @@ impl Rig {
             &seat.display().to_string(),
             "HEAD",
         ]);
+        common::share_store(&self.project, &seat);
         std::fs::write(seat.join("the-work.txt"), "the work\n").expect("the work is written");
         self.git_in(&seat, &["add", "--", "the-work.txt"]);
         seat
@@ -213,15 +244,6 @@ impl Rig {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    fn bd(&self, args: &[&str]) -> Output {
-        Command::new("bd")
-            .arg("-C")
-            .arg(&self.project)
-            .args(args)
-            .output()
-            .expect("bd runs")
-    }
-
     /// One item, ordered and held by the delivering seat, with the repository
     /// in the shape a delivery finds it.
     fn an_ordered_item(&self) -> String {
@@ -230,99 +252,70 @@ impl Rig {
         item
     }
 
-    /// The order note `brief` refuses to render without. `deliver` reads the
-    /// metadata key instead, so only an arm that also briefs needs this.
-    fn an_order_note_on(&self, item: &str) {
-        assert!(self
-            .bd(&[
-                "note",
-                item,
-                "dispatched by an-architect — orders given",
-                "--actor",
-                "an-architect",
-            ])
-            .status
-            .success());
-    }
-
-    /// The record half alone, for an arm that builds its own working tree.
+    /// The record half alone, for an arm that builds its own working tree:
+    /// the item held by the seat and carrying the order index `brief`
+    /// refuses to render without.
     fn an_item_ordered_to_the_seat(&self) -> String {
-        let out = self.bd(&[
-            "create",
-            "--title",
-            "an item to deliver",
-            "--description",
-            "a scratch item",
-            "--type",
-            "task",
-            "--json",
-        ]);
-        assert!(
-            out.status.success(),
-            "bd create: {}",
-            String::from_utf8_lossy(&out.stderr)
+        let item = common::filed(&self.project, "an item to deliver", &[]);
+        common::hand_to(&self.project, &item, &self.seat_id());
+        common::ordered(
+            &self.project,
+            &item,
+            fleet_core::store::OrderKind::Dispatch,
+            "run:an-architect",
+            Some(&self.seat_id()),
         );
-        let value: serde_json::Value =
-            serde_json::from_str(stdout(&out).trim()).expect("bd create answers JSON");
-        let item = value["id"].as_str().expect("an id").to_string();
-        assert!(self
-            .bd(&[
-                "update",
-                &item,
-                "--assignee",
-                &self.seat,
-                "--metadata",
-                &format!(
-                    r#"{{"orders": {{"by": "an-architect", "kind": "dispatch", "seat": "{seat}", "at": "2026-09-09T00:00:00Z"}}}}"#,
-                    seat = self.seat
-                ),
-                "--actor",
-                "an-architect",
-            ])
-            .status
-            .success());
         item
     }
 
+    /// The item as the store answers it.
     fn item_json(&self, item: &str) -> serde_json::Value {
-        let out = self.bd(&["-q", "show", item, "--json"]);
-        let value: serde_json::Value =
-            serde_json::from_str(stdout(&out).trim()).expect("bd show answers JSON");
-        value[0].clone()
+        common::shown(&self.project, item)
     }
 
-    /// The stub: `agents` is the roster read, `-p` is the one print-mode turn.
-    fn write_stub(&self) {
-        std::fs::write(
-            &self.stub,
-            format!(
-                "#!/bin/sh\n\
-                 case \"$1\" in\n\
-                 \x20 agents) /bin/cat '{roster}' ;;\n\
-                 \x20 -p) printf '%s\\n' \"$@\" > '{argv}' ;;\n\
-                 \x20 *) exit 64 ;;\n\
-                 esac\n",
-                roster = self.roster.display(),
-                argv = self.nudge_argv.display(),
-            ),
-        )
-        .expect("the stub is written");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&self.stub, std::fs::Permissions::from_mode(0o755))
-            .expect("the stub is executable");
+    /// The item's last delivered entry as `fleet item show --json` lists it:
+    /// the reader's own document, off the shipped binary. That verb renders
+    /// from the store alone, so it takes no `--packs-dir`.
+    fn delivered(&self, item: &str) -> serde_json::Value {
+        self.last_entry(item, "delivered")
     }
 
+    /// The item's last entry of this kind, read the same way.
+    fn last_entry(&self, item: &str, kind: &str) -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_fleet"))
+            .args(["item", "show", item, "--json"])
+            .current_dir(&self.project)
+            .hermetic(&self.root.join("home"), &self.machine)
+            .output()
+            .expect("the built binary runs");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let document: serde_json::Value =
+            serde_json::from_str(stdout(&out).trim()).expect("item show answers one document");
+        document["data"]["timeline"]
+            .as_array()
+            .expect("the document carries a timeline")
+            .iter()
+            .rev()
+            .find(|entry| entry["kind"] == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("the timeline carries a {kind} entry: {document}"))
+    }
+
+    /// The listing the agent stub reads.
     fn roster(&self, body: &str) -> &Rig {
-        std::fs::write(&self.roster, body).expect("the roster is written");
+        agent_stub::script(&self.project, |answers| {
+            answers.listing = Ok(body.to_string())
+        });
         self
     }
 
-    /// A roster carrying one LIVE row in the reviewer's worktree.
+    /// The reviewer's live pane, and a listed row carrying its pid that reads
+    /// idle, and busy once the pane has taken a submit: the stub follows the
+    /// tmux stub's panes.
     fn live(&self) -> &Rig {
-        self.roster(&format!(
-            r#"[{{"sessionId": "abcdef", "id": "s0", "cwd": {cwd}, "pid": 4242}}]"#,
-            cwd = json_string(&self.worktree.display().to_string())
-        ))
+        let pid = common::live_pane(&self.state, REVIEWER_ID, &self.worktree);
+        agent_stub::follow_host(&self.project, Some(&self.state));
+        self.roster(&format!("[{}]", common::listed_row("abcdef", pid, "idle")))
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -337,7 +330,8 @@ impl Rig {
             .arg("--packs-dir")
             .arg(self.machine.join("packs"))
             .current_dir(cwd)
-            .hermetic(&self.root.join("home"), &self.machine, Some(&self.stub))
+            .hermetic(&self.root.join("home"), &self.machine)
+            .env(common::hermetic::TMUX_BIN, &self.tmux)
             // The identity the delivery's own commit is made under. Named here
             // because `HOME` is the rig's: without it `git commit` reads the
             // operator's global configuration, and these arms passed on this
@@ -346,13 +340,15 @@ impl Rig {
             .env("GIT_AUTHOR_EMAIL", "fleet@example.invalid")
             .env("GIT_COMMITTER_NAME", "fleet tests")
             .env("GIT_COMMITTER_EMAIL", "fleet@example.invalid")
-            .env("BEADS_ACTOR", &self.seat)
+            .env("FLEET_ACTOR", &self.seat)
             .output()
             .expect("the built binary runs")
     }
 
-    fn nudge_argv(&self) -> String {
-        std::fs::read_to_string(&self.nudge_argv).unwrap_or_default()
+    /// Every text the ring pasted into the reviewer's session, joined: empty
+    /// where nothing was typed.
+    fn typed(&self) -> String {
+        common::pasted_into(&self.state, REVIEWER_ID).join("\n")
     }
 
     /// Every event the machine directory's stream holds, newest last.
@@ -364,6 +360,18 @@ impl Rig {
             .map(|line| serde_json::from_str(line).expect("an event is one JSON object"))
             .collect()
     }
+}
+
+/// The agent stub's state kept out of the status of the repository at `repo`,
+/// as [`common::store_outside_git`] keeps the store's: it is the rig's, and no
+/// file a delivery could leave unstaged.
+fn agent_stub_outside_git(repo: &Path) {
+    let exclude = repo.join(".git/info/exclude");
+    let mut lines = std::fs::read_to_string(&exclude).unwrap_or_default();
+    lines.push_str("\n.agent-stub\n");
+    std::fs::create_dir_all(exclude.parent().expect("info/ sits in the git dir"))
+        .expect("the git dir's info/ is made");
+    std::fs::write(&exclude, lines).expect("the exclude file is written");
 }
 
 impl Drop for Rig {
@@ -378,7 +386,7 @@ fn a_live_reviewer_is_rung_with_the_item_and_the_commit_the_delivery_made() {
     rig.live();
     let item = rig.an_ordered_item();
 
-    let out = rig.run(&["deliver", "--note", &rig.note.display().to_string()]);
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
     // The commit the verb made, read out of the repository rather than out of
@@ -394,62 +402,73 @@ fn a_live_reviewer_is_rung_with_the_item_and_the_commit_the_delivery_made() {
         rig.git(&["log", "-1", "--format=%s"]).starts_with(&item),
         "the commit subject names the item by its full id"
     );
-    // The delivered file is in the commit and nothing of it is left over. The
-    // whole tree is NOT asserted clean: this verb's own store calls append to a
-    // log this repository versions, which is the tree the next verb reads.
+    // The delivered file is in the commit and nothing is left over: the store
+    // is kept outside the repository, so the verb's own store calls leave the
+    // tree the next verb reads as clean as the delivery did.
     assert_eq!(
-        rig.git(&["status", "--porcelain", "--", "the-work.txt"]),
+        rig.git(&["status", "--porcelain"]),
         "",
-        "nothing of the delivered file is left unstaged"
+        "nothing of the delivery is left unstaged"
     );
 
     let record = rig.item_json(&item);
-    assert_eq!(record["assignee"], serde_json::json!(REVIEWER));
-    let notes = record["notes"].as_str().unwrap_or_default();
-    assert!(
-        notes.contains(&format!("commit:  {head}")),
-        "the note names the commit that was made: {notes}"
+    assert_eq!(record["assignee"], serde_json::json!(REVIEWER_ID));
+    let delivered = rig.delivered(&item);
+    assert_eq!(
+        delivered["commit"].as_str(),
+        Some(head.as_str()),
+        "the entry names the commit that was made: {delivered}"
     );
-    assert!(
-        notes.contains("branch:  a-seat/feat/the-work"),
-        "and the branch it sits on: {notes}"
+    assert_eq!(
+        delivered["branch"].as_str(),
+        Some("a-seat/feat/the-work"),
+        "and the branch it sits on: {delivered}"
     );
-    assert!(
-        notes.contains("base:    origin/main at"),
-        "and the base it read: {notes}"
+    let base = rig.git(&["rev-parse", "refs/remotes/origin/main"]);
+    assert_eq!(
+        delivered["base"].as_str(),
+        Some(base.as_str()),
+        "and the base it read, whole: {delivered}"
+    );
+    assert_eq!(
+        delivered["by"],
+        serde_json::json!(format!("seat:{}", rig.seat_id())),
+        "written by the seat delivering"
+    );
+    assert_eq!(
+        delivered["files"],
+        serde_json::json!(["the-work.txt"]),
+        "and the rest is the seat's JSON: {delivered}"
     );
 
-    // The event, off the stream the binary wrote, carrying the same three values
-    // the note's machine lines do.
+    // The event, off the stream the binary wrote: the delivered entry's
+    // signal, naming the entry that carries the commit.
     let last = rig
         .events()
         .last()
         .cloned()
         .expect("the stream carries the delivery");
-    assert_eq!(last["type"].as_str(), Some("item.delivered"), "{last}");
-    assert_eq!(last["actor"].as_str(), Some(rig.seat.as_str()));
-    assert_eq!(last["payload"]["item"].as_str(), Some(item.as_str()));
-    assert_eq!(last["payload"]["commit"].as_str(), Some(head.as_str()));
     assert_eq!(
-        last["payload"]["branch"].as_str(),
-        Some("a-seat/feat/the-work")
+        last["type"].as_str(),
+        Some(fleet_core::item::ITEM_ENTRY),
+        "{last}"
     );
-    assert!(
-        notes.contains(&format!(
-            "base:    origin/main at {}",
-            last["payload"]["base"].as_str().expect("a base")
-        )),
-        "the event's base is the note's own: {last}\n{notes}"
+    // The seat named itself by name; the cli hands the verb its id, typed.
+    assert_eq!(
+        last["actor"],
+        serde_json::json!({ "kind": "seat", "id": rig.seat_id().to_string() })
+    );
+    assert_eq!(
+        last["payload"],
+        serde_json::json!({ "item": item, "entry": delivered["id"], "kind": "delivered" }),
+        "{last}\n{delivered}"
     );
 
-    let argv = rig.nudge_argv();
+    let typed = rig.typed();
     assert!(
-        argv.contains(&item) && argv.contains(&head),
-        "the reviewer is rung with the item and the commit:\n{argv}"
-    );
-    assert!(
-        argv.contains("Kite"),
-        "the reviewer is addressed by name:\n{argv}"
+        typed.contains(&item) && typed.contains(&head),
+        "the reviewer's own session, the one its id names, is typed the item and the \
+         commit:\n{typed}"
     );
 }
 
@@ -458,7 +477,7 @@ fn an_empty_roster_exits_zero_and_the_delivery_stands() {
     let rig = Rig::new("absent");
     let item = rig.an_ordered_item();
 
-    let out = rig.run(&["deliver", "--note", &rig.note.display().to_string()]);
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
         stdout(&out).contains("DELIVERED, NOT RUNG"),
@@ -471,34 +490,34 @@ fn an_empty_roster_exits_zero_and_the_delivery_stands() {
         stdout(&out)
     );
     assert!(
-        rig.nudge_argv().is_empty(),
+        rig.typed().is_empty(),
         "an absent reviewer is not rung at all"
     );
 
     let record = rig.item_json(&item);
     assert_eq!(
         record["assignee"],
-        serde_json::json!(REVIEWER),
+        serde_json::json!(REVIEWER_ID),
         "the reassignment recorded the handoff whatever the doorbell did"
     );
-    assert!(record["notes"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("DELIVERED "));
+    assert!(
+        rig.delivered(&item)["commit"].is_string(),
+        "and the delivery is on the record"
+    );
 }
 
 /// The refusals through the binary: each rc read from its own command, and the
-/// tree the same after each as before (R10).
+/// tree the same after each as before.
 #[test]
 fn the_trunk_and_an_unclean_tree_are_refused_by_the_shipped_binary() {
     let rig = Rig::new("refused");
     let item = rig.an_ordered_item();
-    let note = rig.note.display().to_string();
+    let delivery = rig.delivery.display().to_string();
     let work = rig.git(&["rev-parse", "refs/heads/a-seat/feat/the-work"]);
 
     std::fs::write(rig.project.join("forgotten.txt"), "not in the delivery\n")
         .expect("the loose file is written");
-    let out = rig.run(&["deliver", "--note", &note]);
+    let out = rig.run(&["deliver", "--delivery", &delivery]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
         stderr(&out).contains("forgotten.txt"),
@@ -514,7 +533,7 @@ fn the_trunk_and_an_unclean_tree_are_refused_by_the_shipped_binary() {
 
     rig.git(&["stash", "--keep-index", "--quiet"]);
     rig.git(&["checkout", "--quiet", "main"]);
-    let out = rig.run(&["deliver", "--note", &note, "--item", &item]);
+    let out = rig.run(&["deliver", "--delivery", &delivery, "--item", &item]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).contains("main"), "{}", stderr(&out));
 
@@ -525,8 +544,52 @@ fn the_trunk_and_an_unclean_tree_are_refused_by_the_shipped_binary() {
     );
     assert_eq!(
         rig.item_json(&item)["assignee"],
-        serde_json::json!(rig.seat),
+        serde_json::json!(rig.seat_id()),
         "and the item is still the seat's"
+    );
+}
+
+/// A staged path holding a SPACE, edited again after it was staged (`AM`), is
+/// the delivery: the status read and the staged read both name it raw, so the
+/// one finds it in the other.
+#[test]
+fn a_staged_path_with_a_space_and_more_work_on_it_is_the_delivery() {
+    let rig = Rig::new("spaced");
+    let item = rig.an_ordered_item();
+    let notes = rig.project.join("the notes.md");
+    std::fs::write(&notes, "the notes\n").expect("the notes are written");
+    rig.git(&["add", "--", "the notes.md"]);
+    std::fs::write(&notes, "the notes\nand one more line\n").expect("the notes are edited");
+
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let committed = rig.git(&["show", "--name-only", "-z", "--format=", "HEAD"]);
+    let committed: Vec<&str> = committed.split('\0').filter(|p| !p.is_empty()).collect();
+    assert!(
+        committed.contains(&"the notes.md") && committed.contains(&"the-work.txt"),
+        "the commit holds both staged files: {committed:?}"
+    );
+    assert!(
+        rig.delivered(&item)["commit"].is_string(),
+        "and the delivery is on the record"
+    );
+}
+
+/// A loose path git would quote — a space and a non-ASCII character — is named
+/// in the refusal as its own bytes, which is the name a seat types to stage it.
+#[test]
+fn a_loose_path_with_a_space_and_a_non_ascii_char_is_named_raw() {
+    let rig = Rig::new("exotic");
+    rig.an_ordered_item();
+    std::fs::write(rig.project.join("café menu.md"), "not in the delivery\n")
+        .expect("the loose file is written");
+
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("`café menu.md` is changed in the working tree and not staged"),
+        "the loose path, raw: {}",
+        stderr(&out)
     );
 }
 
@@ -538,7 +601,7 @@ fn review_show_reads_the_delivery_the_binary_wrote() {
     rig.live();
     let item = rig.an_ordered_item();
 
-    let out = rig.run(&["deliver", "--note", &rig.note.display().to_string()]);
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let head = rig.git(&["rev-parse", "HEAD"]);
 
@@ -550,33 +613,45 @@ fn review_show_reads_the_delivery_the_binary_wrote() {
         "the size of the one-line file this delivery added: {said}"
     );
     assert!(
-        said.contains(&format!("commit:  {head}")),
-        "the delivery note it read: {said}"
+        said.contains(&format!("delivered {head} on a-seat/feat/the-work, base ")),
+        "the delivered entry it read: {said}"
     );
-    assert!(said.contains("D1 the note is the seat's"), "{said}");
+    assert!(said.contains("D1 the delivery is the seat's"), "{said}");
 }
 
-/// `review --land` through the same binary: the accept on the record, and the
-/// one event on the stream carrying the walk's own counts.
+/// `review --land` through the same binary: the accept on the record, as the
+/// reviewed entry `fleet item show` reads and `--json` names by its id, and the
+/// one signal on the stream naming it.
 #[test]
 fn review_land_writes_the_accept_on_the_record_and_the_event_on_the_stream() {
     let rig = Rig::new("review-land");
     let item = rig.an_ordered_item();
 
-    let out = rig.run(&["deliver", "--note", &rig.note.display().to_string()]);
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let head = rig.git(&["rev-parse", "HEAD"]);
 
-    let out = rig.run(&["review", &item, "--land", "--by", REVIEWER]);
+    let out = rig.run(&["review", &item, "--land", "--by", REVIEWER, "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let document: serde_json::Value =
+        serde_json::from_str(stdout(&out).trim()).expect("review --json answers one document");
 
-    let notes = rig.item_json(&item)["notes"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        notes.contains(&format!("ACCEPTED {head} — {REVIEWER}")),
-        "the verdict is on the record: {notes}"
+    let accept = rig.last_entry(&item, "reviewed");
+    assert_eq!(accept["verdict"], serde_json::json!("accepted"), "{accept}");
+    assert_eq!(accept["commit"], serde_json::json!(head), "{accept}");
+    assert_eq!(
+        accept["size"]["base"],
+        rig.delivered(&item)["base"],
+        "measured from the delivery's base: {accept}"
+    );
+    assert_eq!(
+        accept["by"],
+        serde_json::json!(format!("seat:{REVIEWER_ID}")),
+        "appended by the reviewer: {accept}"
+    );
+    assert_eq!(
+        document["data"]["entry"], accept["id"],
+        "--json names the entry it wrote: {document}"
     );
 
     let last = rig
@@ -584,21 +659,156 @@ fn review_land_writes_the_accept_on_the_record_and_the_event_on_the_stream() {
         .last()
         .cloned()
         .expect("the stream carries the verdict");
-    assert_eq!(last["type"].as_str(), Some("item.reviewed"), "{last}");
-    assert_eq!(last["actor"].as_str(), Some(REVIEWER));
-    assert_eq!(last["payload"]["item"].as_str(), Some(item.as_str()));
-    assert_eq!(last["payload"]["commit"].as_str(), Some(head.as_str()));
-    assert_eq!(last["payload"]["verdict"].as_str(), Some("accepted"));
     assert_eq!(
-        last["payload"]["overruled"],
-        serde_json::json!(0),
-        "an accept overrules nothing: {last}"
+        last["type"].as_str(),
+        Some(fleet_core::item::ITEM_ENTRY),
+        "{last}"
     );
-    let accepted = last["payload"]["accepted"].as_u64().expect("a count");
+    assert_eq!(
+        last["actor"],
+        serde_json::json!({ "kind": "seat", "id": REVIEWER_ID })
+    );
+    assert_eq!(
+        last["payload"],
+        serde_json::json!({ "item": item, "entry": accept["id"], "kind": "reviewed" }),
+        "the signal names the accept, which carries the walk: {last}"
+    );
+    assert_eq!(
+        document["data"]["verdict"],
+        serde_json::json!("accepted"),
+        "{document}"
+    );
+    let walk = accept["walk"].as_array().expect("the walk is a list");
     assert!(
-        notes.contains(&format!("{accepted} accepted, 0 overruled")),
-        "the event's counts are the walk's own: {last}\n{notes}"
+        !walk.is_empty()
+            && walk.iter().enumerate().all(|(k, ruling)| {
+                *ruling == serde_json::json!({ "decision": k + 1, "ruling": "accept" })
+            }),
+        "every call the delivery listed, accepted by its number: {accept}"
     );
+}
+
+/// `review --return` through the same binary, fed a findings file of the
+/// shape `assets/findings.schema.json` declares: the one tiny's takeoff writes
+/// when a person answers B at its hold. That takeoff writes exactly this file
+/// is takeoff's own suite's to hold, in the fleet-packs repository.
+///
+/// The control is the file takeoff wrote before its findings were JSON: a
+/// marker line and a sentence, numbering nothing, which the verb refuses with
+/// exit 2 and without handing the item over.
+#[test]
+fn review_return_takes_the_findings_file_takeoff_writes_on_b() {
+    let rig = Rig::new("review-return");
+    let item = rig.an_ordered_item();
+
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let head = rig.git(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        rig.item_json(&item)["assignee"],
+        serde_json::json!(REVIEWER_ID),
+        "the premise: the delivery handed the item to the reviewer"
+    );
+
+    let prose = rig.root.join("findings.md");
+    std::fs::write(
+        &prose,
+        format!(
+            "RETURNED {item} at {head}\nThe person answered B at the run's hold: B. return to \
+             the builder.\n"
+        ),
+    )
+    .expect("the old file is written");
+    let out = rig.run(&[
+        "review",
+        &item,
+        "--return",
+        &prose.display().to_string(),
+        "--by",
+        REVIEWER,
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("assets/findings.schema.json"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(
+        rig.item_json(&item)["assignee"],
+        serde_json::json!(REVIEWER_ID),
+        "a file that does not read hands nothing over"
+    );
+
+    let takeoff = rig.root.join("findings.json");
+    std::fs::write(
+        &takeoff,
+        "{\n  \"findings\": [\n    {\n      \"text\": \"The person answered B at the run's hold: \
+         B. return to the builder.\"\n    }\n  ]\n}\n",
+    )
+    .expect("the findings file is written");
+    let out = rig.run(&[
+        "review",
+        &item,
+        "--return",
+        &takeoff.display().to_string(),
+        "--by",
+        REVIEWER,
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // The state is the entry kind a return writes, and the verdict rides
+    // beside it.
+    let document: serde_json::Value =
+        serde_json::from_str(stdout(&out).trim()).expect("review --json answers one document");
+    assert_eq!(
+        (&document["data"]["state"], &document["data"]["verdict"]),
+        (
+            &serde_json::json!("reviewed"),
+            &serde_json::json!("returned")
+        ),
+        "{document}"
+    );
+
+    assert_eq!(
+        rig.item_json(&item)["assignee"],
+        serde_json::json!(rig.seat_id()),
+        "the item goes back to the seat the order named"
+    );
+    let returned = rig.last_entry(&item, "reviewed");
+    assert_eq!(
+        returned["verdict"],
+        serde_json::json!("returned"),
+        "{returned}"
+    );
+    assert_eq!(returned["commit"], serde_json::json!(head), "{returned}");
+    assert_eq!(
+        returned["by"],
+        serde_json::json!(format!("seat:{REVIEWER_ID}")),
+        "{returned}"
+    );
+    assert_eq!(
+        returned["findings"],
+        serde_json::json!([
+            { "text": "The person answered B at the run's hold: B. return to the builder." }
+        ]),
+        "the one finding the file carries, as it carries it: {returned}"
+    );
+    let last = rig
+        .events()
+        .last()
+        .cloned()
+        .expect("the stream carries the return");
+    assert_eq!(
+        last["type"].as_str(),
+        Some(fleet_core::item::ITEM_ENTRY),
+        "{last}"
+    );
+    assert_eq!(
+        last["payload"],
+        serde_json::json!({ "item": item, "entry": returned["id"], "kind": "reviewed" }),
+        "{last}"
+    );
+    assert_eq!(document["data"]["entry"], returned["id"], "{document}");
 }
 
 /// The size line's counts over the rows `git diff --numstat` printed.
@@ -626,7 +836,7 @@ fn review_measures_every_commit_since_the_base_the_delivery_recorded() {
         .expect("the second file is written");
     rig.git(&["add", "--", "the-rest.txt"]);
 
-    let out = rig.run(&["deliver", "--note", &rig.note.display().to_string()]);
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let rows = rig.git(&["diff", "--numstat", "origin/main...HEAD"]);
     assert!(
@@ -666,7 +876,7 @@ fn review_does_not_count_a_moved_trunk_against_the_delivery() {
     rig.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     rig.git(&["checkout", "--quiet", "a-seat/feat/the-work"]);
 
-    let out = rig.run(&["deliver", "--note", &rig.note.display().to_string()]);
+    let out = rig.run(&["deliver", "--delivery", &rig.delivery.display().to_string()]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let rows = rig.git(&["diff", "--numstat", "origin/main...HEAD"]);
     assert!(!rows.contains("trunk-only.txt"), "{rows}");
@@ -699,20 +909,24 @@ fn review_does_not_count_a_moved_trunk_against_the_delivery() {
 fn a_seat_worktree_beside_an_uncommitted_policy_delivers_through_the_machine_config() {
     let rig = Rig::new("fallback");
     let item = rig.an_item_ordered_to_the_seat();
-    rig.an_order_note_on(&item);
     let seat = rig.init_repo_in_a_linked_worktree(false);
 
-    let out = rig.run_from(&seat, &["brief", &item]);
+    let out = rig.run_from(&seat, &["brief", &item, "--touched", "make check"]);
     assert_eq!(out.status.code(), Some(0), "brief: {}", stderr(&out));
     assert!(
+        stdout(&out).contains("- record: off"),
+        "the guards are read off the file the machine config names: {}",
+        stdout(&out)
+    );
+    assert!(
         stdout(&out).contains("make check"),
-        "the suite is read off the file the machine config names: {}",
+        "and the builder's checks are the ones the call handed in: {}",
         stdout(&out)
     );
 
     let out = rig.run_from(
         &seat,
-        &["deliver", "--note", &rig.note.display().to_string()],
+        &["deliver", "--delivery", &rig.delivery.display().to_string()],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
@@ -723,18 +937,18 @@ fn a_seat_worktree_beside_an_uncommitted_policy_delivers_through_the_machine_con
         "the commit is made in the SEAT's checkout and carries the staged set"
     );
     let record = rig.item_json(&item);
-    assert_eq!(record["assignee"], serde_json::json!(REVIEWER));
-    let notes = record["notes"].as_str().unwrap_or_default();
-    assert!(
-        notes.contains(&format!("commit:  {head}")),
-        "the note names the commit that was made: {notes}"
+    assert_eq!(record["assignee"], serde_json::json!(REVIEWER_ID));
+    assert_eq!(
+        rig.delivered(&item)["commit"].as_str(),
+        Some(head.as_str()),
+        "the delivered entry names the commit that was made"
     );
 }
 
 /// AC2's control arm, on the same fixture: with no machine config there is no
 /// second answer, and every item verb is the walk's own refusal.
 #[test]
-fn with_no_machine_config_the_item_verbs_still_refuse_at_three() {
+fn with_no_machine_config_the_item_verbs_still_refuse_at_one() {
     let rig = Rig::new("no-config");
     let item = rig.an_item_ordered_to_the_seat();
     let seat = rig.init_repo_in_a_linked_worktree(false);
@@ -743,10 +957,10 @@ fn with_no_machine_config_the_item_verbs_still_refuse_at_three() {
     // The path the refusal names is the one the BINARY read, which on this
     // platform is the resolved `/private` spelling of the rig's own.
     let named = std::fs::canonicalize(&seat).expect("the seat's checkout is there");
-    let note = rig.note.display().to_string();
+    let delivery = rig.delivery.display().to_string();
     let calls: [&[&str]; 4] = [
         &["brief", "THE-ITEM"],
-        &["deliver", "--note", "THE-NOTE"],
+        &["deliver", "--delivery", "THE-DELIVERY"],
         &["review", "THE-ITEM", "--by", "a-reviewer"],
         &[
             "land",
@@ -761,13 +975,13 @@ fn with_no_machine_config_the_item_verbs_still_refuse_at_three() {
             .iter()
             .map(|word| match *word {
                 "THE-ITEM" => item.clone(),
-                "THE-NOTE" => note.clone(),
+                "THE-DELIVERY" => delivery.clone(),
                 other => other.to_string(),
             })
             .collect();
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = rig.run_from(&seat, &borrowed);
-        assert_eq!(out.status.code(), Some(3), "{args:?}: {}", stderr(&out));
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
         assert!(
             stderr(&out).contains(&format!(
                 "no `fleet.toml` and no `.fleet/project.toml` above {}",
@@ -793,7 +1007,7 @@ fn a_seat_worktree_carrying_the_policy_delivers_from_its_own_checkout() {
 
     let out = rig.run_from(
         &seat,
-        &["deliver", "--note", &rig.note.display().to_string()],
+        &["deliver", "--delivery", &rig.delivery.display().to_string()],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
@@ -808,12 +1022,9 @@ fn a_seat_worktree_carrying_the_policy_delivers_from_its_own_checkout() {
         "a-seat/feat/the-work",
         "and on the seat's own branch"
     );
-    let notes = rig.item_json(&item)["notes"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        notes.contains(&format!("commit:  {head}")),
-        "the note names the commit that was made: {notes}"
+    assert_eq!(
+        rig.delivered(&item)["commit"].as_str(),
+        Some(head.as_str()),
+        "the delivered entry names the commit that was made"
     );
 }

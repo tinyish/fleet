@@ -20,6 +20,14 @@
 //! exits, so what a run holds between its runs is its record, its directory
 //! and its events — never a process somebody has to find again.
 //!
+//! THE CARRIER'S SETTINGS RIDE THE INPUTS FILE, under `config`: the values
+//! `[packs.<name>]` sets for the pack that carries the workflow, over the
+//! defaults its manifest declares ([`crate::settings`]). They are pinned there
+//! rather than in a fourth file so the hash already covers them, the document
+//! the workflow is handed on stdin already carries them, and a run directory
+//! written before they existed hashes as it always did. A re-run reads them off
+//! that file and never off `fleet.toml`.
+//!
 //! WRITE ORDER is the record, then the directory, then the pins, then the
 //! event, as `plan`'s and `fly`'s are, and the back half keeps the polarity:
 //! the logs, then the record's close, then the event. A crash between them
@@ -27,55 +35,88 @@
 //! which a fold reads as the record says; the reverse would announce an end no
 //! record holds.
 
-use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
+use crate::entry::{self, Body};
 use crate::item::brief::Packs;
+use crate::item::doctor::{self, Invocation, Verdict, DOCTOR_TOML, RUNTIME_VERSION, SLOT};
 use crate::item::pins;
 use crate::item::{
-    control_token, read_table, Events, Project, Stop, RUN_CLOSED, RUN_COULD_NOT_TELL, RUN_FAILED,
-    RUN_STARTED, RUN_WAITING,
+    read_table, recorded, refuse_planted, signal, Events, Project, Stop, Unrecorded, RUN_CANCELLED,
+    RUN_CLOSED, RUN_COULD_NOT_TELL, RUN_FAILED, RUN_STARTED, RUN_WAITING,
 };
-use crate::pack::{self, Runtime};
+use crate::pack;
 use crate::policy;
 use crate::resolve::Layer;
-use crate::store::{Item, NewItem, Store, StoreError};
+use crate::runtime::{child_path_for, read_the_runtime, Pinned};
+use crate::seat::actor::Actor;
+use crate::settings;
+use crate::store::{
+    Filter, HoldId, Item, ItemId, NewItem, RunRecord, Stamp, Status, Store, StoreError, Update,
+};
 
 /// Where the run directories go, under the machine directory.
 pub const RUNS: &str = "runs";
 
 /// The three names inside one, and the order the hash reads them in. `BUNDLE`
 /// is the one the pack's own bundle command writes; the other two are pinned
-/// here before that child runs.
+/// here before that child runs, and `INPUTS` carries the carrier's resolved
+/// settings under [`CONFIG`] beside the inputs themselves.
 pub const INPUTS: &str = "inputs.toml";
 pub const POLICY: &str = "policy.toml";
 pub const BUNDLE: &str = "bundle";
 
+/// The key the inputs file pins the carrier's settings under, and the key the
+/// document on the workflow's stdin carries them under.
+pub const CONFIG: &str = "config";
+
 /// The slot a workflow name resolves through, overlay first.
 pub const WORKFLOWS: &str = "workflows";
 
-/// The doctor entry that measures the pinned runtime, and the file inside it
-/// that names which script to run. The binary's defaults ship the shape against
-/// no table of their own; a pack that pins a runtime shadows it with the
-/// instance.
-pub const RUNTIME_CHECK: &str = "doctor/runtime-version";
-pub const DOCTOR_TOML: &str = "doctor.toml";
-
-/// The environment variable the check reads to learn which pack's manifest it
-/// is measuring.
-pub const PACK_DIR: &str = "FLEET_PACK_DIR";
-
 /// The label a run's record item carries, and the only mark that tells one from
-/// every other item in the store.
-pub const LABEL: &str = "run";
+/// every other item in the store. Namespaced, because a board fleet is added
+/// to may already label its own items `run`, and a bare `run` means nothing to
+/// fleet.
+pub const LABEL: &str = "fleet:run";
+
+impl Item {
+    /// Whether this item is a run's record: it carries [`LABEL`].
+    pub fn is_run(&self) -> bool {
+        self.labels.iter().any(|label| label == LABEL)
+    }
+}
+
+/// The record of the run that called this landing.
+///
+/// A workflow calls every verb as `run:<id>`, and the `fleet:run` label on the
+/// item the store answers for that id is the only mark that tells a run's
+/// record from every other item — the same discriminator `hold` reads to tell
+/// a run's park from a seat's. An id the store holds no item for, or one whose
+/// item carries no label, is refused: the actor said it was a run, and it is
+/// not one. A store that could not answer is a could-not-tell.
+///
+/// `review` asks it too: a run reviews as the `[core] reviewer` on the same
+/// record a run's landing closes as that seat on.
+pub(crate) fn run_record(store: &dyn Store, by: &Actor) -> Result<Item, Stop> {
+    let named_no_run = || Stop::refused(format!("{by} names no run record"));
+    match store.show(&by.id) {
+        Ok(record) if record.is_run() => Ok(record),
+        Ok(_) | Err(StoreError::Refused(_)) => Err(named_no_run()),
+        // A read never answers `Moved` or `Usage`, which only a write does.
+        Err(StoreError::Unreadable(why) | StoreError::Moved(why) | StoreError::Usage(why)) => {
+            Err(Stop::could_not_tell(format!(
+                "the store could not say whether `{}` is a run's record: {why} — a run's landing \
+                 acts as the reviewer, and this is where its record is read",
+                by.id
+            )))
+        }
+    }
+}
 
 /// The store's own word for the record item's type.
 pub const RECORD_TYPE: &str = "task";
-
-/// The metadata key the run's own object lives under.
-pub const OBJECT: &str = "run";
 
 /// The title the record carries between the create and the retitle.
 pub const UNTITLED: &str = "a run being filed";
@@ -109,18 +150,15 @@ pub const STDERR_LOG: &str = "stderr.log";
 /// workflow calls back into resolves its project from this name and not from
 /// where it was started.
 ///
-/// Beside them, five PASS-THROUGHS that are not names of the run: the five in
+/// Beside them, four PASS-THROUGHS that are not names of the run: the four in
 /// [`ENV_PASSED_THROUGH`], each copied from this process's own environment when
 /// set there. `PATH` is not one of them — it is CONSTRUCTED, and
 /// [`Wiring::child_path`] says out of what. The dispatch a workflow calls back
-/// into resolves the agent binary on a child `PATH` the controller constructs
-/// from `HOME` — under no `HOME` that path ends in a RELATIVE `.local/bin` and
-/// finds nothing — or from `FLEET_CLAUDE_BIN`, which the controller reads
-/// verbatim and refuses unless absolute, so it is forwarded as written and
-/// never resolved here. `USER`, `TMPDIR` and `LANG` are here for the seat that
-/// dispatch starts: the adapter's own pass-through list
-/// (`fleet_controller::adapter::claude_code::PASSED_THROUGH`) copies them off
-/// whatever process it runs in, and under a workflow that process is this
+/// into builds the agent's `PATH` from `HOME` — under no `HOME` that path ends
+/// in a RELATIVE `.local/bin` and finds nothing. `USER`, `TMPDIR` and `LANG`
+/// are here for the seat that dispatch starts: the controller's own
+/// pass-through list (`fleet_controller::platform::PASSED_THROUGH`) copies them
+/// off whatever process it runs in, and under a workflow that process is this
 /// child — a seat started with no `USER` finds no keychain entry and comes up
 /// logged out. Like `HOME`, they name the person's session and nothing of the
 /// run. Nothing else crosses the clearing.
@@ -131,7 +169,11 @@ pub const ENV_RUN_DIR: &str = "FLEET_RUN_DIR";
 pub const ENV_BIN: &str = "FLEET_BIN";
 pub const ENV_PROJECT: &str = "FLEET_PROJECT";
 pub const ENV_DIR: &str = "FLEET_DIR";
-pub const ENV_PASSED_THROUGH: [&str; 5] = ["HOME", "FLEET_CLAUDE_BIN", "USER", "TMPDIR", "LANG"];
+pub const ENV_PASSED_THROUGH: [&str; 4] = ["HOME", "USER", "TMPDIR", "LANG"];
+
+/// The variable a verb reads its actor from where `--by` did not carry one.
+/// The controller sets it to `seat:<id>` on every session it starts.
+pub const ENV_ACTOR: &str = "FLEET_ACTOR";
 
 /// Where the stream is and how far it has got.
 ///
@@ -152,7 +194,7 @@ pub struct Order<'a> {
     pub workflow: &'a str,
     /// `--input key=value`, in the order the caller gave them.
     pub inputs: &'a [(String, String)],
-    pub by: &'a str,
+    pub by: &'a Actor,
     /// The clock, taken by the caller: core reads none.
     pub at: &'a str,
     /// Where the run directory goes: a process fact, resolved by the caller
@@ -167,7 +209,7 @@ pub struct Wiring<'a> {
     pub store: &'a dyn Store,
     pub project: &'a Project,
     pub packs: &'a Packs,
-    /// The policy file in force, copied byte for byte: the cli resolves which
+    /// The policy file in force, copied byte for byte: the caller resolves which
     /// file that is.
     pub policy_file: &'a Path,
     pub events: &'a dyn Events,
@@ -176,7 +218,7 @@ pub struct Wiring<'a> {
     /// The `PATH` the pack's own children run under, constructed by the caller
     /// from `platform::child_path` and never read off this process. Empty means
     /// the caller has none and the children carry this process's `PATH`
-    /// instead. What the pinned runtime adds to it: [`child_path_for`].
+    /// instead. What the pinned runtime adds to it: [`child_path_for`](crate::runtime::child_path_for).
     pub child_path: &'a str,
 }
 
@@ -214,7 +256,8 @@ impl Ended {
     /// The word the verb's own second line ends on.
     pub fn word(self) -> &'static str {
         match self {
-            Ended::Closed => "closed",
+            // The record's own status, which a closed run's record reads.
+            Ended::Closed => Status::Closed.as_str(),
             Ended::Failed => "failed",
             Ended::Waiting => "waiting",
             Ended::CouldNotTell => "could not tell",
@@ -224,11 +267,11 @@ impl Ended {
     /// Whether the record item is closed with the event.
     ///
     /// THE OPEN SET IS THE STORE'S and not a field beside it: `[core.run]
-    /// max_open` is measured with `bd list --status open`, so a run leaves that
-    /// set by being closed and by nothing else. A waiting run and one nothing
-    /// could classify are both still open — the first because the controller
-    /// re-runs it, the second because retiring a run nobody could read would
-    /// spend the cap's answer on a guess.
+    /// max_open` is measured by the store's open-with-label listing, so a run
+    /// leaves that set by being closed and by nothing else. A waiting run and
+    /// one nothing could classify are both still open — the first because the
+    /// controller re-runs it, the second because retiring a run nobody could
+    /// read would spend the cap's answer on a guess.
     pub fn retires_the_record(self) -> bool {
         matches!(self, Ended::Closed | Ended::Failed)
     }
@@ -246,7 +289,7 @@ pub struct Ran {
 /// The PACK and not just the path, because the `[runtime]` table that says how
 /// to bundle the file is read from the layer the file came off, or from the
 /// packs that layer imports — never from whatever else is installed beneath
-/// it. Which of those it is: [`read_the_runtime`].
+/// it. Which of those it is: [`read_the_runtime`](crate::runtime::read_the_runtime).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub name: String,
@@ -257,11 +300,20 @@ pub struct Resolved {
 
 pub fn run(out: &mut dyn Write, order: &Order, wiring: &Wiring) -> Result<Ran, Stop> {
     // (a) THE READS. Nothing below writes until every one of them answered.
+    // A test command in the policy file first: the workflow a person is
+    // opening is where it is set now, and a run opened beside it would land
+    // untested while they believe otherwise.
+    wiring.project.refuse_moved()?;
     let open = open_runs(wiring)?;
     refuse_at_the_cap(&open, wiring)?;
     let resolved = resolve_workflow(order.workflow, wiring)?;
-    let pinned = read_the_runtime(&resolved, wiring)?;
-    let path = child_path_for(&pinned, wiring.child_path);
+    let pinned = read_the_runtime(
+        &resolved.pack,
+        &resolved.relative,
+        &wiring.packs.layers,
+        order.machine_dir,
+    )?;
+    let path = child_path_for(&pinned.runtime.name, wiring.child_path);
     the_doctor_is_green(&resolved, &pinned, &path, wiring)?;
     let policy_bytes = std::fs::read(wiring.policy_file).map_err(|e| {
         Stop::could_not_tell(format!(
@@ -269,7 +321,8 @@ pub fn run(out: &mut dyn Write, order: &Order, wiring: &Wiring) -> Result<Ran, S
             wiring.policy_file.display()
         ))
     })?;
-    let inputs = render_inputs(order, &resolved)?;
+    let config = read_the_settings(&policy_bytes, &resolved, wiring)?;
+    let inputs = render_inputs(order, &resolved, config)?;
 
     // (b) THE RECORD, which is what names the directory: the store names what
     // it files, so the id this run is titled by does not exist until the create
@@ -277,24 +330,21 @@ pub fn run(out: &mut dyn Write, order: &Order, wiring: &Wiring) -> Result<Ran, S
     let id = file_the_record(order, &resolved, wiring)?;
 
     // (c) THE PINS, then the bundle the pack writes, then the hash over both.
+    // A refusal from here to `run.started` is a run that never started, and
+    // the record filed for it is closed on the way out.
     let directory = order.machine_dir.join(RUNS).join(&id);
-    std::fs::create_dir_all(&directory).map_err(|e| {
-        Stop::could_not_tell(format!(
-            "the run directory {} could not be made: {e}",
-            directory.display()
-        ))
-    })?;
-    pins::write_files(
-        &directory,
-        &[
-            (INPUTS.to_string(), inputs.into_bytes()),
-            (POLICY.to_string(), policy_bytes),
-        ],
-    )?;
-    bundle(&directory, &resolved, &pinned, order, &path)?;
-    let hash = pins::hash_of(&directory, &hashed_files())?;
+    let pinning = Pinning {
+        id: &id,
+        directory: &directory,
+        inputs,
+        policy_bytes,
+        resolved: &resolved,
+        pinned: &pinned,
+        path: &path,
+    };
+    let hash = pin_and_bundle(pinning, order, wiring)
+        .map_err(|stop| never_started(&id, stop, order.by, wiring))?;
 
-    write_the_pins(&id, &hash, &resolved, order, wiring)?;
     wiring
         .events
         .append(
@@ -336,7 +386,7 @@ pub fn run(out: &mut dyn Write, order: &Order, wiring: &Wiring) -> Result<Ran, S
 /// environment for.
 pub struct Again<'a> {
     pub run: &'a str,
-    pub by: &'a str,
+    pub by: &'a Actor,
     /// The clock, taken by the caller: core reads none.
     pub at: &'a str,
     pub machine_dir: &'a Path,
@@ -360,30 +410,27 @@ pub struct Again<'a> {
 /// counting that kind on the stream counts executions and not opens.
 pub fn rerun(out: &mut dyn Write, again: &Again, wiring: &Wiring) -> Result<Ended, Stop> {
     let record = read(wiring.store, again.run)?;
-    let object = record.run.ok_or_else(|| {
+    // A CLOSED RECORD IS AN ENDED RUN, however it came to be closed — a cancel,
+    // or a person's own close — and whatever the stream last said about it.
+    if record.status == Status::Closed {
+        return Err(Stop::refused(format!(
+            "{} is closed — a closed run is not executed again",
+            again.run
+        )));
+    }
+    // A record this fleet does not read never reached here: the read above
+    // refused it, which is a could-not-tell.
+    let pinned = record.run.as_ref().ok_or_else(|| {
         Stop::refused(format!(
-            "{} carries no `run` object — a re-run is over a run this fleet opened, and the \
+            "{} carries no run record — a re-run is over a run this fleet opened, and the \
              record does not say it opened one",
             again.run
         ))
     })?;
-    let pinned = |key: &str| -> Result<String, Stop> {
-        object
-            .get(key)
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                Stop::refused(format!(
-                    "{}'s `run` object names no {key} — the pins a re-run reads are the ones the \
-                     open wrote",
-                    again.run
-                ))
-            })
-    };
-    let hash = pinned("hash")?;
-    let workflow = pinned("workflow")?;
-    let relative = pinned("entry")?;
-    let pack_name = pinned("pack")?;
+    let hash = pinned.hash.clone();
+    let workflow = pinned.workflow.clone();
+    let relative = pinned.entry.clone();
+    let pack_name = pinned.pack.clone();
 
     let directory = again.machine_dir.join(RUNS).join(again.run);
     if !directory.join(BUNDLE).is_file() {
@@ -421,8 +468,13 @@ pub fn rerun(out: &mut dyn Write, again: &Again, wiring: &Wiring) -> Result<Ende
         relative,
         pack,
     };
-    let pinned = read_the_runtime(&resolved, wiring)?;
-    let path = child_path_for(&pinned, wiring.child_path);
+    let pinned = read_the_runtime(
+        &resolved.pack,
+        &resolved.relative,
+        &wiring.packs.layers,
+        again.machine_dir,
+    )?;
+    let path = child_path_for(&pinned.runtime.name, wiring.child_path);
 
     // The two `Order` fields a re-run does not carry. The workflow is the pinned
     // name so the shape reads true; the inputs are empty because the child is
@@ -473,6 +525,169 @@ pub fn hashed_files() -> Vec<String> {
     vec![INPUTS.to_string(), POLICY.to_string(), BUNDLE.to_string()]
 }
 
+// ---- the cancel ----------------------------------------------------------------
+
+/// One run to be cancelled, as its arguments.
+pub struct Cancel<'a> {
+    pub run: &'a str,
+    /// Who is cancelling it.
+    pub by: &'a Actor,
+}
+
+/// The run cancelled, and the holds the cancel cleared on its record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cancelled {
+    pub run: String,
+    pub holds: Vec<String>,
+}
+
+/// A run ended by hand: every hold standing on its record cleared — a
+/// `cleared` entry of how `cancel` on the record, then the store's hold — the
+/// record closed as cancelled, then [`RUN_CANCELLED`] and one `cleared` signal
+/// per cleared entry on the stream.
+///
+/// THE WAY OUT FOR A RUN NOTHING ELSE ENDS. A run whose process died before it
+/// wrote a row of the exit table, one held at `[core.run] max_crashes`, one
+/// waiting on a wake that will never come: each holds its record open, and the
+/// open records are what `[core.run] max_open` counts.
+///
+/// THE HOLDS ARE THE STORE'S ANSWER, not the timeline's: the record's own open
+/// dependencies that the store lists as open holds. A hold nothing on the
+/// record names blocks the close exactly as one a held entry names does, and
+/// is cancelled the same way.
+///
+/// IT STOPS NO PROCESS AND RETIRES NO SEAT. A run holds no process between its
+/// executions, and one under way when the cancel lands runs to its end; the
+/// controller's run pass reads [`RUN_CANCELLED`] as an ending — it executes the
+/// run no more, whatever that execution writes after it — and retires the seats
+/// the run spawned with the cleanup every ending gets.
+///
+/// THE STORE'S WRITES, THEN THE STREAM'S, and [`RUN_CANCELLED`] ahead of the
+/// holds' lines: a pass that read a cleared hold before the cancel that
+/// cleared it would be reading a run still standing.
+pub fn cancel(
+    out: &mut dyn Write,
+    cancel: &Cancel,
+    store: &dyn Store,
+    events: &dyn Events,
+) -> Result<Cancelled, Stop> {
+    let run = cancel.run;
+    let record = store.show(run).map_err(|e| match e {
+        StoreError::Refused(why) => Stop::refused(format!(
+            "{run} is not an item this project's store holds — {why}"
+        )),
+        // A read never answers `Moved` or `Usage`, which only a write does.
+        StoreError::Unreadable(why) | StoreError::Moved(why) | StoreError::Usage(why) => {
+            Stop::could_not_tell(format!("{run} could not be read: {why}"))
+        }
+    })?;
+    // Resolved once: the close, the events and the line name the record's own
+    // id from here on, whatever part of it was typed.
+    let run = record.id.as_str();
+    if !record.is_run() {
+        return Err(Stop::refused(format!(
+            "{run} is not a run's record — it carries no `{LABEL}` label, and `fleet cancel` ends \
+             runs and nothing else"
+        )));
+    }
+    if record.status == Status::Closed {
+        return Err(Stop::refused(format!(
+            "{run} is closed already — the run has ended and there is nothing to cancel"
+        )));
+    }
+
+    let open = store
+        .holds_open()
+        .map_err(|e| Stop::could_not_tell(format!("the store's holds could not be read: {e}")))?;
+    let holds: Vec<String> = record
+        .blockers
+        .iter()
+        .filter(|blocker| open.iter().any(|hold| hold.as_str() == blocker.as_str()))
+        .map(|blocker| blocker.to_string())
+        .collect();
+    // ONE CLEARED ENTRY PER HOLD, before the store's hold is cleared: the
+    // record says the hold was cancelled, never that somebody chose no letter.
+    let mut entries: Vec<String> = Vec::with_capacity(holds.len());
+    for hold in &holds {
+        let cancelled = Body::Cleared(entry::Cleared {
+            hold: hold.clone(),
+            how: entry::Clearance::Cancel,
+            letter: None,
+            text: None,
+        });
+        let entry = recorded(store, run, &cancelled, cancel.by).map_err(|unrecorded| {
+            let why = match unrecorded {
+                Unrecorded::NotWritten(e) => {
+                    format!("the cleared entry for {hold} did not land on {run}: {e}")
+                }
+                Unrecorded::Unconfirmed(why) => why,
+            };
+            Stop::could_not_tell(format!("{why}\n  {run} is NOT cancelled"))
+        })?;
+        store
+            .hold_clear(&HoldId::from(hold.as_str()), cancel.by)
+            .map_err(|e| {
+                Stop::could_not_tell(format!(
+                    "{hold} on {run} was not cleared: {e}\n  {run} is NOT cancelled"
+                ))
+            })?;
+        entries.push(entry);
+    }
+
+    store
+        .close(&record.id, "the run cancelled", cancel.by)
+        .map_err(|e| {
+            Stop::could_not_tell(format!(
+                "{run}'s record did not close: {e}\n  {} cleared and {run} is NOT cancelled",
+                named_holds(&holds)
+            ))
+        })?;
+    let read_back = read(store, run)?;
+    if read_back.status != Status::Closed {
+        return Err(disagrees(
+            run,
+            "status",
+            Status::Closed.as_str(),
+            read_back.status.as_str(),
+        ));
+    }
+
+    let written = |e: String| {
+        Stop::could_not_tell(format!(
+            "{run} is cancelled and its lines did not all reach the stream: {e}\n  the record \
+             is CLOSED and {} cleared",
+            named_holds(&holds)
+        ))
+    };
+    events
+        .append(RUN_CANCELLED, cancel.by, serde_json::json!({ "run": run }))
+        .map_err(written)?;
+    for entry in &entries {
+        signal(events, cancel.by, run, entry, "cleared").map_err(written)?;
+    }
+
+    let line = if holds.is_empty() {
+        format!("{run} — cancelled")
+    } else {
+        format!("{run} — cancelled, {} cleared", named_holds(&holds))
+    };
+    writeln!(out, "{line}")
+        .map_err(|e| Stop::could_not_tell(format!("the cancel line could not be written: {e}")))?;
+    Ok(Cancelled {
+        run: run.to_string(),
+        holds,
+    })
+}
+
+/// The holds a cancel cleared, named as the line about them names them.
+fn named_holds(holds: &[String]) -> String {
+    match holds {
+        [] => String::from("no hold"),
+        [one] => format!("hold {one}"),
+        many => format!("holds {}", many.join(", ")),
+    }
+}
+
 // ---- (a) the reads -----------------------------------------------------------
 
 /// Every open record carrying the run label, by id, sorted.
@@ -481,10 +696,13 @@ pub fn hashed_files() -> Vec<String> {
 /// started and not had closed for it is here — which is the set the cap is
 /// measured against and the set a refusal names.
 pub fn open_runs(wiring: &Wiring) -> Result<Vec<String>, Stop> {
-    let mut open = wiring
+    let mut open: Vec<String> = wiring
         .store
-        .open_labelled(LABEL)
-        .map_err(|e| Stop::could_not_tell(format!("the work graph could not be read: {e}")))?;
+        .list(&Filter::Label(LABEL.into()))
+        .map_err(|e| Stop::could_not_tell(format!("the work graph could not be read: {e}")))?
+        .into_iter()
+        .map(|row| row.id.to_string())
+        .collect();
     open.sort();
     Ok(open)
 }
@@ -611,184 +829,6 @@ fn resolve_workflow(name: &str, wiring: &Wiring) -> Result<Resolved, Stop> {
     })
 }
 
-/// The `[runtime]` table a run bundles and executes under, and the layer that
-/// declares it — the carrier's own where it has one, else the one pack the
-/// carrier imports that has one.
-///
-/// The DECLARING LAYER and not just the table, because the doctor check
-/// measures a pack's manifest and the check's verdict is about that pack: a
-/// carrier that imports its runtime has nothing pinned in its own manifest, so
-/// a check run against it would read "nothing pinned" and answer green about
-/// a runtime it never measured.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Pinned {
-    runtime: Runtime,
-    pack: Layer,
-}
-
-fn manifest_of(layer: &Layer) -> Result<pack::Manifest, Stop> {
-    let manifest = layer.root.join(pack::MANIFEST);
-    let text = std::fs::read_to_string(&manifest).map_err(|e| {
-        Stop::could_not_tell(format!("{} could not be read: {e}", manifest.display()))
-    })?;
-    pack::parse_manifest(&text).map_err(|defects| {
-        Stop::refused(format!(
-            "the pack `{}` does not parse: {}",
-            layer.name,
-            defects
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
-        ))
-    })
-}
-
-/// The runtime the carrier's workflow runs under: the carrier's own `[runtime]`
-/// table first, else the nearest layer beneath it, in the resolved order, among
-/// the packs the carrier imports — transitively, though the resolver holds
-/// imports to one level — that declares one.
-///
-/// THE CARRIER'S OWN PIN WINS OUTRIGHT and the imports are not read: a pack
-/// that pinned a runtime said what its workflows run under, and an import's
-/// pin beneath it is that import's business. Beneath a carrier with none, two
-/// declaring imports are a refusal naming both, never the higher one: core is
-/// not the one to choose between two languages a pack asked for at once.
-fn read_the_runtime(resolved: &Resolved, wiring: &Wiring) -> Result<Pinned, Stop> {
-    let own = manifest_of(&resolved.pack)?;
-    if let Some(runtime) = own.runtime {
-        return Ok(Pinned {
-            runtime,
-            pack: resolved.pack.clone(),
-        });
-    }
-
-    let layers = &wiring.packs.layers;
-    let beneath = layers
-        .iter()
-        .position(|layer| layer.name == resolved.pack.name)
-        .map(|at| at + 1)
-        .unwrap_or(layers.len());
-    let mut imported: BTreeSet<String> = own.imports.into_iter().map(|i| i.name).collect();
-    let mut frontier: Vec<String> = imported.iter().cloned().collect();
-    while let Some(name) = frontier.pop() {
-        let Some(layer) = layers.iter().find(|layer| layer.name == name) else {
-            continue;
-        };
-        for import in manifest_of(layer)?.imports {
-            if imported.insert(import.name.clone()) {
-                frontier.push(import.name);
-            }
-        }
-    }
-
-    let mut declaring: Vec<Pinned> = Vec::new();
-    for layer in layers.iter().skip(beneath) {
-        if !imported.contains(&layer.name) {
-            continue;
-        }
-        if let Some(runtime) = manifest_of(layer)?.runtime {
-            declaring.push(Pinned {
-                runtime,
-                pack: layer.clone(),
-            });
-        }
-    }
-    match declaring.len() {
-        0 => Err(Stop::refused(format!(
-            "`{}` carries `{}` and declares no [runtime] table, and no pack it imports declares \
-             one — core knows one thing about a workflow's language and that table is it, so \
-             there is no command to bundle this file with",
-            resolved.pack.name, resolved.relative
-        ))),
-        1 => Ok(declaring.remove(0)),
-        _ => Err(Stop::refused(format!(
-            "`{}` carries `{}` and declares no [runtime] table, and {} packs it imports each \
-             declare one — {} — so the file has two runtimes and core is not the one to choose",
-            resolved.pack.name,
-            resolved.relative,
-            declaring.len(),
-            declaring
-                .iter()
-                .map(|pinned| format!("`{}`", pinned.pack.name))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
-}
-
-/// The `PATH` the doctor check, the bundle line and the run line all run
-/// under: the caller's constructed child path, with the directory the pinned
-/// runtime resolves from in front of it when that path does not already hold
-/// the binary.
-///
-/// CONSTRUCTED, NEVER COPIED. A controller re-running a run is a service, and
-/// a service's own `PATH` is the manager's — it holds neither a package
-/// manager's prefix nor the user's local bin — so a run line handed that
-/// `PATH` cannot exec the runtime its pack pins. The base comes from the
-/// caller because the platform's directories are the caller's knowledge; an
-/// empty base is a caller with no controller behind it, and the children then
-/// carry this process's own `PATH` as they always have.
-///
-/// THE PREPEND MIRRORS THE PINNED RUNTIME'S DOCTOR CHECK, which looks for the
-/// binary on `PATH` and then in the installer's bin — `<NAME>_INSTALL/bin`
-/// where that variable names a root, else `$HOME/.<name>/bin`, which no
-/// session `PATH` carries on its own. The check and the two lines it clears
-/// have to resolve the same file, so the directory the check would accept is
-/// put where the lines will look. Only when the base misses it: a runtime the
-/// base already resolves keeps the platform's order, where the system
-/// directories lead.
-fn child_path_for(pinned: &Pinned, base: &str) -> String {
-    if base.is_empty() {
-        return std::env::var("PATH").unwrap_or_default();
-    }
-    let name = pinned.runtime.name.as_str();
-    if holding(base, name).is_some() {
-        return base.to_string();
-    }
-    let found = holding(&std::env::var("PATH").unwrap_or_default(), name)
-        .or_else(|| installer_bin(name).filter(|bin| is_program(&bin.join(name))));
-    match found {
-        Some(dir) => format!("{}:{base}", dir.display()),
-        None => base.to_string(),
-    }
-}
-
-/// The installer's bin for a runtime of this name, as its own doctor check
-/// spells it.
-fn installer_bin(name: &str) -> Option<PathBuf> {
-    let variable: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .chain("_INSTALL".chars())
-        .collect();
-    let root = match std::env::var(&variable) {
-        Ok(named) if !named.trim().is_empty() => PathBuf::from(named),
-        _ => PathBuf::from(std::env::var("HOME").ok()?).join(format!(".{name}")),
-    };
-    Some(root.join("bin"))
-}
-
-/// The first directory of `path` that holds `name` as a program.
-fn holding(path: &str, name: &str) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .find(|dir| is_program(&dir.join(name)))
-}
-
-fn is_program(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
 /// The pinned runtime's own doctor check, run as a child against the pack that
 /// declares the pin.
 ///
@@ -796,51 +836,56 @@ fn is_program(path: &Path) -> bool {
 /// back to the person, because what the check knows about a runtime is the
 /// check's and a parser here would be a second opinion about it.
 ///
-/// It runs on [`child_path_for`], the `PATH` the bundle and run lines will
+/// It runs on [`child_path_for`](crate::runtime::child_path_for), the `PATH` the bundle and run lines will
 /// run on: a check measuring some other search path is green about a binary
 /// those lines cannot exec, or red about one they can.
+///
+/// It runs through [`doctor::run`], so it is bounded by [`doctor::TIMEOUT`]:
+/// a check that gave no exit of its own — past the bound, never started, or
+/// killed by a signal — did not answer, which is could-not-tell and not red.
+/// Any exit but 0 is red, as it always was.
 fn the_doctor_is_green(
     resolved: &Resolved,
     pinned: &Pinned,
     path: &str,
     wiring: &Wiring,
 ) -> Result<(), Stop> {
-    let declared = format!("{RUNTIME_CHECK}/{DOCTOR_TOML}");
-    let toml_path = wiring.packs.slot(&declared).map_err(|_| {
+    let declared = format!("{SLOT}/{RUNTIME_VERSION}/{DOCTOR_TOML}");
+    let unmeasurable = || {
         Stop::could_not_tell(format!(
             "no installed pack carries `{declared}` — the pinned runtime cannot be measured, and \
              a run core cannot measure the runtime of is one it will not open"
         ))
-    })?;
-    let text = wiring.packs.read(&declared)?;
-    let parsed: toml::Table = text.parse().map_err(|e| {
-        Stop::could_not_tell(format!(
-            "{} does not parse as TOML: {e}",
-            toml_path.display()
-        ))
-    })?;
-    let script = parsed
-        .get("run")
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| {
-            Stop::could_not_tell(format!(
-                "{} names no `run` script for the check to run",
-                toml_path.display()
-            ))
-        })?;
-    let runner = wiring.packs.slot(&format!("{RUNTIME_CHECK}/{script}"))?;
+    };
+    let entry = doctor::entry(wiring.packs, RUNTIME_VERSION).ok_or_else(unmeasurable)?;
+    if let Err(why) = &entry.script {
+        return Err(if wiring.packs.resolution.files.contains_key(&declared) {
+            Stop::could_not_tell(why.clone())
+        } else {
+            unmeasurable()
+        });
+    }
 
-    let answered = Command::new("sh")
-        .arg(&runner)
-        .env(PACK_DIR, &pinned.pack.root)
-        .env("PATH", path)
-        .output()
-        .map_err(|e| Stop::could_not_tell(format!("{} did not run: {e}", runner.display())))?;
-    if answered.status.success() {
+    let checked = doctor::run(
+        &entry,
+        &Invocation {
+            pack_dir: &pinned.pack.root,
+            path,
+            cwd: None,
+            env: &[],
+            timeout: doctor::TIMEOUT,
+        },
+    );
+    if checked.verdict == Verdict::Pass {
         return Ok(());
     }
-    let said = String::from_utf8_lossy(&answered.stdout);
-    let said = said.trim();
+    if checked.exit.is_none() {
+        return Err(Stop::could_not_tell(format!(
+            "`{}`'s runtime check did not answer, so `{}` is not opened — {}",
+            pinned.pack.name, resolved.name, checked.line
+        )));
+    }
+    let said = checked.stdout.trim();
     Err(Stop::refused(format!(
         "`{}`'s runtime check is red, so `{}` is not opened — {}",
         pinned.pack.name,
@@ -853,12 +898,51 @@ fn the_doctor_is_green(
     )))
 }
 
-/// The inputs as the file the run is pinned against.
+/// The settings the carrier's workflow reads: `[packs]` judged whole against
+/// every installed pack, then the carrier's own resolved table.
+///
+/// READ OFF THE BYTES THAT ARE PINNED and not off the project's parsed table,
+/// so the policy snapshot in the run directory and the settings beside the
+/// inputs are one reading of one file. A file that does not parse is
+/// could-not-tell rather than no settings: reading it as empty would pin the
+/// defaults over values the person wrote.
+fn read_the_settings(
+    policy: &[u8],
+    resolved: &Resolved,
+    wiring: &Wiring,
+) -> Result<toml::Table, Stop> {
+    let table = std::str::from_utf8(policy)
+        .map_err(|e| e.to_string())
+        .and_then(|text| text.parse::<toml::Table>().map_err(|e| e.to_string()))
+        .map_err(|e| {
+            Stop::could_not_tell(format!(
+                "the policy in force at {} does not parse, so the settings its [{}] table sets \
+                 cannot be read: {e}",
+                wiring.policy_file.display(),
+                settings::TABLE
+            ))
+        })?;
+    let mut every = settings::resolve(&table, &wiring.packs.layers).map_err(|found| {
+        Stop::refused(format!(
+            "`{}` is not opened — {}",
+            resolved.name,
+            found
+                .iter()
+                .map(|refusal| refusal.to_string())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        ))
+    })?;
+    Ok(every.remove(&resolved.pack.name).unwrap_or_default())
+}
+
+/// The inputs as the file the run is pinned against, with the carrier's
+/// settings beside them.
 ///
 /// A key given twice is a refusal and not a last-one-wins: a run is a function
 /// of its pinned inputs, and a caller that named one key two ways has not said
 /// which run it wants.
-fn render_inputs(order: &Order, resolved: &Resolved) -> Result<String, Stop> {
+fn render_inputs(order: &Order, resolved: &Resolved, config: toml::Table) -> Result<String, Stop> {
     let mut table = toml::map::Map::new();
     for (key, value) in order.inputs {
         if table.contains_key(key) {
@@ -890,6 +974,7 @@ fn render_inputs(order: &Order, resolved: &Resolved) -> Result<String, Stop> {
         toml::Value::String(order.at.to_string()),
     );
     snapshot.insert(String::from("inputs"), toml::Value::Table(table));
+    snapshot.insert(String::from(CONFIG), toml::Value::Table(config));
     toml::to_string(&toml::Value::Table(snapshot))
         .map_err(|e| Stop::could_not_tell(format!("the inputs do not render as TOML: {e}")))
 }
@@ -905,10 +990,11 @@ fn file_the_record(order: &Order, resolved: &Resolved, wiring: &Wiring) -> Resul
         .store
         .create(
             &NewItem {
-                title: UNTITLED,
-                description: &description,
-                item_type: RECORD_TYPE,
-                labels: &[LABEL],
+                title: UNTITLED.to_string(),
+                description,
+                item_type: RECORD_TYPE.to_string(),
+                labels: vec![LABEL.to_string()],
+                priority: None,
             },
             order.by,
         )
@@ -917,19 +1003,20 @@ fn file_the_record(order: &Order, resolved: &Resolved, wiring: &Wiring) -> Resul
                 "the run's record was not filed: {e}\n  NOTHING was written"
             ))
         })?;
-    wiring.store.set_title(&id, &id, order.by).map_err(|e| {
-        Stop::could_not_tell(format!(
-            "{id} is filed and the title did not land: {e}\n  the record STANDS"
-        ))
-    })?;
-    Ok(id)
+    wiring
+        .store
+        .update(&id, &Update::title(id.to_string()), order.by)
+        .map_err(|e| {
+            Stop::could_not_tell(format!(
+                "{id} is filed and the title did not land: {e}\n  the record STANDS"
+            ))
+        })?;
+    Ok(id.to_string())
 }
 
-/// The hash and the run's own object onto the record, read back.
+/// The hash and the run's own record onto the record item, read back.
 ///
-/// The object is written WHOLE, as a flight's is: bd's metadata write merges at
-/// the top level and replaces one key's object, so a write of one key alone
-/// would drop the rest of this one.
+/// The run record is written whole, so no field of it is left behind.
 fn write_the_pins(
     id: &str,
     hash: &str,
@@ -937,56 +1024,130 @@ fn write_the_pins(
     order: &Order,
     wiring: &Wiring,
 ) -> Result<(), Stop> {
-    let payload = serde_json::json!({
-        OBJECT: {
-            "hash": hash,
-            "workflow": resolved.name,
-            "pack": resolved.pack.name,
-            "entry": resolved.relative,
-            "started_at": order.at,
-        }
-    })
-    .to_string();
+    let Some(started_at) = Stamp::parse(order.at) else {
+        return Err(Stop::could_not_tell(format!(
+            "the pins were not written on {id}: the run started at `{}`, which is not a stamp — \
+             the form is YYYY-MM-DDTHH:MM:SSZ\n  the run directory is WRITTEN and the record \
+             does not name it",
+            order.at
+        )));
+    };
+    let run = RunRecord {
+        hash: hash.to_string(),
+        workflow: resolved.name.clone(),
+        pack: resolved.pack.name.clone(),
+        entry: resolved.relative.clone(),
+        started_at,
+    };
     wiring
         .store
-        .set_metadata(id, &payload, order.by)
+        .run_set(&ItemId::from(id), &run, order.by)
         .map_err(|e| {
             Stop::could_not_tell(format!(
                 "the pins did not land on {id}: {e}\n  the run directory is WRITTEN and the \
-                 record does not name it\n  RERUN: bd update {id} --metadata '{payload}' --actor \
-                 {}",
-                order.by
+                 record does not name it\n  READ: fleet item show {id}"
             ))
         })?;
 
+    // THE RECORD IS READ AS ITS OWN TYPE. One the store answers at a shape this
+    // fleet does not read refuses the read above, which is a could-not-tell.
     let read_back = read(wiring.store, id)?;
-    let object = read_back.run.as_ref();
-    let field = |key: &str| {
-        object
-            .and_then(|object| object.get(key))
-            .and_then(|value| value.as_str())
-            .unwrap_or("(absent)")
-            .to_string()
+    let record = read_back.run.as_ref();
+    let field = |pinned: fn(&RunRecord) -> &str| {
+        record
+            .map(|record| pinned(record).to_string())
+            .unwrap_or_else(|| String::from("(absent)"))
     };
-    if field("hash") != hash {
-        return Err(disagrees(id, "hash", hash, &field("hash")));
+    let held_hash = field(|record| &record.hash);
+    if held_hash != hash {
+        return Err(disagrees(id, "hash", hash, &held_hash));
     }
-    if field("workflow") != resolved.name {
-        return Err(disagrees(
-            id,
-            "workflow",
-            &resolved.name,
-            &field("workflow"),
-        ));
+    let held_workflow = field(|record| &record.workflow);
+    if held_workflow != resolved.name {
+        return Err(disagrees(id, "workflow", &resolved.name, &held_workflow));
     }
-    let control = control_token();
-    if read_back.document.contains(control) {
-        return Err(Stop::could_not_tell(format!(
-            "the read-back on {id} carries {control}, which nothing wrote — the read is not \
-             reading this item"
-        )));
+    refuse_planted(&read_back, id)
+}
+
+/// What the pins, the bundle and the hash are made of, for the one run whose
+/// record is already filed.
+struct Pinning<'a> {
+    id: &'a str,
+    directory: &'a Path,
+    inputs: String,
+    policy_bytes: Vec<u8>,
+    resolved: &'a Resolved,
+    pinned: &'a Pinned,
+    path: &'a str,
+}
+
+/// The directory, the two pins, the bundle the pack writes, the hash over all
+/// three, and the hash on the record — answered as the hash.
+fn pin_and_bundle(pinning: Pinning, order: &Order, wiring: &Wiring) -> Result<String, Stop> {
+    let directory = pinning.directory;
+    std::fs::create_dir_all(directory).map_err(|e| {
+        Stop::could_not_tell(format!(
+            "the run directory {} could not be made: {e}",
+            directory.display()
+        ))
+    })?;
+    pins::write_files(
+        directory,
+        &[
+            (INPUTS.to_string(), pinning.inputs.into_bytes()),
+            (POLICY.to_string(), pinning.policy_bytes),
+        ],
+    )?;
+    bundle(
+        directory,
+        pinning.resolved,
+        pinning.pinned,
+        order,
+        pinning.path,
+    )?;
+    let hash = pins::hash_of(directory, &hashed_files())?;
+    write_the_pins(pinning.id, &hash, pinning.resolved, order, wiring)?;
+    Ok(hash)
+}
+
+/// A run whose record was filed and which never started, closed as failed with
+/// the refusal as its reason — and the refusal handed back naming the record
+/// either way.
+///
+/// THE RECORD IS WHAT THE CAP COUNTS. A refusal between the record and
+/// `run.started` — a bundle command that exits non-zero is the one a person
+/// meets — would otherwise leave an open record no stream line names: `status`
+/// does not list it, the controller neither re-runs nor cleans it, and it holds
+/// one of `[core.run] max_open`'s slots for good.
+///
+/// THE CLOSE, THEN THE EVENT, as the back half's polarity has it: `run.failed`
+/// over a record still open would announce an end the store does not hold. The
+/// refusal keeps its own exit, because what went wrong is still what it says.
+fn never_started(id: &str, stop: Stop, by: &Actor, wiring: &Wiring) -> Stop {
+    let fate = match wiring
+        .store
+        .close(&ItemId::from(id), "the run failed before it started", by)
+    {
+        Err(e) => format!(
+            "the record {id} filed for this run STANDS open, and its close did not land: {e} — \
+             `fleet cancel {id}` closes it"
+        ),
+        Ok(()) => match wiring.events.append(
+            RUN_FAILED,
+            by,
+            serde_json::json!({ "run": id, "reason": stop.message }),
+        ) {
+            Ok(()) => format!("the record {id} filed for this run is closed as failed"),
+            Err(e) => format!(
+                "the record {id} filed for this run is closed as failed, and {RUN_FAILED} did \
+                 not reach the stream: {e}"
+            ),
+        },
+    };
+    Stop {
+        code: stop.code,
+        message: format!("{}\n  {fate}", stop.message),
     }
-    Ok(())
 }
 
 // ---- the two children ---------------------------------------------------------
@@ -1035,7 +1196,7 @@ impl Placeholders {
 /// split one into words that is right for every language's tooling — so it is
 /// handed to `sh` whole, and the child's exit is all core reads of it.
 ///
-/// It runs on [`child_path_for`], as the run line does: both lines exec the
+/// It runs on [`child_path_for`](crate::runtime::child_path_for), as the run line does: both lines exec the
 /// binary the pack pins.
 fn bundle(
     directory: &Path,
@@ -1154,7 +1315,11 @@ fn execute(
     if ended.retires_the_record() {
         wiring
             .store
-            .close(&started.run, &format!("the run {}", ended.word()), order.by)
+            .close(
+                &ItemId::from(started.run.as_str()),
+                &format!("the run {}", ended.word()),
+                order.by,
+            )
             .map_err(|e| {
                 Stop::could_not_tell(format!(
                     "{} {} and the record did not close: {e}\n  the run directory is WRITTEN, \
@@ -1261,4 +1426,16 @@ fn disagrees(id: &str, key: &str, wrote: &str, read_back: &str) -> Stop {
         "{id}'s {key} reads back `{read_back}` and this run wrote `{wrote}` — the record does not \
          hold what it was told"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_fleet_naming_no_cap_executes_a_crashing_run_twice() {
+        assert_eq!(
+            super::MAX_CRASHES,
+            2,
+            "docs/runs.md: two when [core.run] max_crashes is not set"
+        );
+    }
 }

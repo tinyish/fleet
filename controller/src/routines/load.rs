@@ -1,15 +1,16 @@
-//! The three roots a routine can come from (PRD R22): the fleet install, every
-//! installed pack, and every project.
+//! The three roots a routine can come from: the fleet install, every installed
+//! pack, and every project.
 //!
 //! A pure function over a list of roots, re-run on every tick that evaluates —
 //! a directory listing and a parse each — so a file dropped into a routines
 //! directory is live on the next evaluation with no restart.
 //!
-//! The project list arrives as an argument rather than being read here. In this
-//! slice it is a list of one, the embedded project, and a registry is one more
-//! element and not a second reader.
+//! The project list arrives at [`roots`] as an argument rather than being read
+//! by it. In this slice it is a list of one, the embedded project, and a
+//! registry is one more element and not a second reader.
 
 use super::file::{self, Defect, Loaded, Routine, Source};
+use fleet_core::seat::identity::Directory;
 use std::path::{Path, PathBuf};
 
 /// One place routines are read from.
@@ -25,9 +26,6 @@ pub struct Root {
 
 /// The directory a routine file sits in, under a root that carries one.
 pub const ORDERS_DIR: &str = "orders";
-
-/// Where every installed pack lives under the machine directory.
-pub const PACKS_DIR: &str = "packs";
 
 #[derive(Debug, Default)]
 pub struct Registry {
@@ -55,7 +53,7 @@ pub fn roots(fleet_root: &Path, machine_dir: &Path, projects: &[(String, PathBuf
         dir: fleet_root.join(ORDERS_DIR),
         project_root: fleet_root.to_path_buf(),
     }];
-    let packs = machine_dir.join(PACKS_DIR);
+    let packs = fleet_core::defaults::pack_dirs(machine_dir, None).0;
     if let Ok(entries) = std::fs::read_dir(&packs) {
         let mut installed: Vec<PathBuf> = entries
             .filter_map(|entry| entry.ok())
@@ -104,7 +102,7 @@ pub fn roots(fleet_root: &Path, machine_dir: &Path, projects: &[(String, PathBuf
 /// Shadowing a routine by layering a pack over another is the resolver's
 /// question and not this reader's, and picking one of two silently is how a
 /// duty runs from a file nobody is looking at.
-pub fn load(roots: &[Root], seats: &[String]) -> Registry {
+pub fn load(roots: &[Root], seats: &Directory) -> Registry {
     let mut registry = Registry::default();
     let mut seen: Vec<(String, PathBuf)> = Vec::new();
     let mut clashed: Vec<String> = Vec::new();
@@ -180,23 +178,75 @@ pub fn load(roots: &[Root], seats: &[String]) -> Registry {
     registry
 }
 
-/// The directory holding `fleet.toml`, resolved the way every other verb
-/// resolves it: walk up from `start` for the file, else read the machine
-/// directory's seat list for the path it names. `None` is a machine with no
-/// fleet root at all, which is exit 3 rather than a guess.
-pub fn fleet_root(start: Option<&Path>, machine_dir: &Path) -> Option<PathBuf> {
+/// The registry this machine reads: every routine under the roots of
+/// `root`, its packs and its projects, with the seats a routine may name off
+/// the seat list and the fleet's `policy` table.
+pub fn registry_for(
+    root: &Path,
+    machine_dir: &Path,
+    seats: &[crate::config::Seat],
+    policy: &toml::Table,
+) -> Registry {
+    load(
+        &roots(root, machine_dir, &projects_of(root)),
+        &crate::config::directory(seats, policy, machine_dir),
+    )
+}
+
+/// The projects routines are read from.
+///
+/// This slice has one, the embedded project, and it is the fleet root itself —
+/// handed to the loader as a list of one so a registry of many is one more
+/// element and not a second reader.
+fn projects_of(fleet_root: &Path) -> Vec<(String, PathBuf)> {
+    let name = fleet_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    vec![(name, fleet_root.to_path_buf())]
+}
+
+/// The directory holding the fleet's `fleet.toml`, resolved the way every
+/// other verb resolves it: walk up from `start`
+/// ([`crate::project::walk_up_config`]), where an embedded `fleet.toml` is its
+/// own directory's fleet; a declared project's fleet, and the answer where the
+/// walk finds nothing, is the directory of the `fleet.toml` the machine
+/// directory's seat list names. A declared project is admitted only where the
+/// machine registers it ([`crate::project::admit_declared`]).
+/// `Err` is a machine with no fleet root at all, or a declared project the
+/// gate refuses ([`NoFleet`]).
+pub fn fleet_root(start: Option<&Path>, machine_dir: &Path) -> Result<PathBuf, NoFleet> {
     let from = start
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
-    if let Some(from) = &from {
-        let mut here = Some(from.as_path());
-        while let Some(dir) = here {
-            if dir.join("fleet.toml").is_file() {
-                return Some(dir.to_path_buf());
-            }
-            here = dir.parent();
+    match from.as_deref().and_then(crate::project::walk_up_config) {
+        Some(crate::project::Found::Embedded(file)) => {
+            return file.parent().map(Path::to_path_buf).ok_or(NoFleet::Nothing);
         }
+        Some(found @ crate::project::Found::Declared(_)) => {
+            if let Some(root) = found.root() {
+                crate::project::admit_declared(root, machine_dir)
+                    .map_err(|stop| NoFleet::Refused(stop.code, stop.message))?;
+            }
+        }
+        None => {}
     }
-    let config = crate::config::read(&machine_dir.join("config.json")).ok()?;
-    config.fleet_toml.parent().map(Path::to_path_buf)
+    let config =
+        crate::config::read(&crate::config::path_in(machine_dir)).map_err(|_| NoFleet::Nothing)?;
+    config
+        .fleet_toml
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or(NoFleet::Nothing)
+}
+
+/// Why [`fleet_root`] found no fleet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoFleet {
+    /// The walk up found nothing, and the machine names no fleet.
+    Nothing,
+    /// The walk found a declared project the machine does not run
+    /// (shared.locations.R26, R35): the gate's exit and line, which is 3 only
+    /// where the register would not read.
+    Refused(u8, String),
 }

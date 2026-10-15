@@ -12,44 +12,27 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::guard;
-use crate::item::{render, Project, Stop};
-use crate::policy;
+use crate::input::{self, DeliveryInput, QuestionInput};
+use crate::item::{render, show, Project, Stop};
 use crate::resolve::{self, Layer, Resolution};
-use crate::store::{Store, StoreError};
+use crate::store::{Order, OrderState, Store};
 
 /// The four files this verb reads, all of them shadowable.
 pub const BRIEF: &str = "assets/brief.md";
-pub const DISPATCH_NOTE: &str = "assets/dispatch-note.md";
-pub const DELIVERY_NOTE: &str = "assets/delivery-note.md";
 pub const RULES: &str = "assets/rules.md";
-
-/// The fifth, read by nothing this verb does: the first turn a SPAWNED REVIEWER
-/// gets (flights PRD R14). It is a template in the pack rather than prose in the
-/// flight's code, and it is in the shadow registry, because the contract a
-/// reviewer works under is a pack's opinion the same way a builder's is.
-pub const REVIEW_BRIEF: &str = "assets/review-brief.md";
 
 /// What `{seat}` reads as before a seat exists to name.
 pub const TRANSIENT: &str = "(transient)";
 
-/// The substring every recorded order form ends on, and how the order note is
-/// found among the item's notes.
-pub const ORDER_MARK: &str = "orders given";
-
-/// The value `{suite}` takes where the project declares none. `land` runs no
-/// suite on such a project and the brief says so rather than leaving the line
-/// blank.
-pub const NO_SUITE: &str = "none";
-
-/// The value `{touched}` takes where the project declares no builder's gate.
+/// The value `{touched}` takes where the dispatch was handed no builder's checks.
 ///
 /// A SENTENCE and not a command, because there is no command to name and the
 /// one thing that must not fill the hole is the project's whole suite: that is
 /// the reviewer's, `land` runs it, and a seat running it too pays for it twice.
 pub const DERIVE_TOUCHED: &str = concat!(
-    "this project declares no `[gates] touched` command — read its own build targets\n",
-    "and run only the suites whose sources your diff reaches. The suite below is the\n",
-    "reviewer's, and running it here buys the landing nothing.",
+    "no touched command was handed to this dispatch — read the project's own build\n",
+    "targets and run only the suites whose sources your diff reaches. The whole suite\n",
+    "is the reviewer's, and running it here buys the landing nothing.",
 );
 
 /// The installed packs, ordered and resolved once.
@@ -92,26 +75,6 @@ impl Packs {
             ))
         })
     }
-
-    /// Every resolved file under one directory, as `(path relative to that
-    /// directory, content)`, in path order.
-    ///
-    /// An EMPTY ANSWER is a directory no installed pack carries, which is a
-    /// legitimate state and not a refusal: the caller asking is one that has
-    /// somewhere to put whatever is there and nothing to put when there is
-    /// nothing.
-    pub fn read_under(&self, prefix: &str) -> Result<Vec<(String, String)>, Stop> {
-        let prefix = prefix.trim_end_matches('/');
-        let under = format!("{prefix}/");
-        let mut found = Vec::new();
-        for relative in self.resolution.files.keys() {
-            let Some(tail) = relative.strip_prefix(&under) else {
-                continue;
-            };
-            found.push((tail.to_string(), self.read(relative)?));
-        }
-        Ok(found)
-    }
 }
 
 fn refusals(found: Vec<resolve::Refusal>) -> Stop {
@@ -126,36 +89,59 @@ fn refusals(found: Vec<resolve::Refusal>) -> Stop {
 /// each half comes from a different instrument.
 pub struct Subject<'a> {
     pub id: &'a str,
-    /// The item as a person reads it, verbatim.
+    /// The item as a person reads it: [`show::render`] of the item and its
+    /// timeline, verbatim, so the seat reads what `fleet item show` prints and
+    /// never the text the store keeps an entry as.
     pub text: &'a str,
-    /// The order note the item carries.
+    /// The order, as [`order_text`] renders it off the item's order index.
     pub order: &'a str,
-    /// The seat the order named, or [`TRANSIENT`].
+    /// The machine name of the seat the order named, or [`TRANSIENT`]: the
+    /// brief is read by a seat and a person, and the id the record carries is
+    /// neither's name for it.
     pub seat: &'a str,
+    /// The builder's checks as the caller handed them, or `None` for
+    /// [`DERIVE_TOUCHED`]. It is the CALLER's because it is the workflow's: a
+    /// project's policy names no test command.
+    pub touched: Option<&'a str>,
 }
 
-/// The order note among an item's notes: the last line carrying a recorded
-/// form.
-///
-/// An item with none has not been ordered, and a brief for it would tell a seat
-/// it may begin when nothing said so.
-pub fn order_line(notes: Option<&str>) -> Option<String> {
-    notes?
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.contains(ORDER_MARK))
-        .next_back()
-        .map(str::to_string)
+/// The order as the brief prints it: who gave it and when, off the order
+/// index. `fleet brief` and a dispatch's own brief both render it here, so the
+/// two are one text.
+pub fn order_text(order: &Order) -> String {
+    format!(
+        "{} ordered by {} at {}",
+        order.kind.as_str(),
+        order.by,
+        order.at
+    )
 }
 
 /// The brief, assembled whole.
 pub fn text(packs: &Packs, project: &Project, subject: &Subject) -> Result<String, Stop> {
+    project.refuse_moved()?;
     let template = packs.read(BRIEF)?;
     let rules = packs.read(RULES)?;
-    let delivery_note = packs.read(DELIVERY_NOTE)?;
-    let suite = suite_of(project)?;
-    let touched = touched_of(project)?;
-    let guards = guards_of(project);
+    let delivery_schema = packs.read(input::DELIVERY_SCHEMA)?;
+    // The schema a seat is shown is the one `fleet deliver` reads it against,
+    // or the brief would teach a delivery the verb refuses.
+    input::agrees::<DeliveryInput>(&delivery_schema).map_err(|why| {
+        Stop::could_not_tell(format!(
+            "{} as the layers resolve it does not describe what fleet deliver reads: {why}",
+            input::DELIVERY_SCHEMA
+        ))
+    })?;
+    // And the question's, for the same reason: `fleet hold` reads the file
+    // against the type, and a layer's rewording must still say what it takes.
+    let question_schema = packs.read(input::QUESTION_SCHEMA)?;
+    input::agrees::<QuestionInput>(&question_schema).map_err(|why| {
+        Stop::could_not_tell(format!(
+            "{} as the layers resolve it does not describe what fleet hold reads: {why}",
+            input::QUESTION_SCHEMA
+        ))
+    })?;
+    let touched = command_or(subject.touched, DERIVE_TOUCHED);
+    let guards = guards_of(packs, project)?;
 
     render(
         &template,
@@ -165,59 +151,16 @@ pub fn text(packs: &Packs, project: &Project, subject: &Subject) -> Result<Strin
             ("order", subject.order),
             ("seat", subject.seat),
             ("project", &project.name),
-            ("suite", &suite),
-            ("touched", &touched),
+            ("touched", touched),
             ("guards", &guards),
             ("rules", &rules),
-            ("delivery_note", &delivery_note),
+            ("delivery_schema", delivery_schema.trim_end()),
+            ("question_schema", question_schema.trim_end()),
         ],
     )
     .map_err(|name| {
         Stop::could_not_tell(format!(
             "`{BRIEF}` writes `{{{name}}}`, which is not a placeholder this verb resolves"
-        ))
-    })
-}
-
-/// What a reviewer's brief says about one delivery.
-///
-/// IT NAMES NO SEAT (decision D1). The reviewer's blindness in this slice is
-/// what the mechanism gives — a fresh seat, no session shared with the builder,
-/// rung by nobody — and the delivery region below carries the builder's own
-/// first line, which is a fact of the record the reviewer reads either way. What
-/// is NOT copied here is the order note: a second rendering of it would be a
-/// second copy of a fact the item already holds.
-pub struct Delivery<'a> {
-    pub id: &'a str,
-    /// The item as a person reads it, verbatim.
-    pub text: &'a str,
-    /// The last delivery region of the item's notes.
-    pub delivery: &'a str,
-    /// The size line `review` prints, measured by the caller.
-    pub size: &'a str,
-}
-
-/// The reviewer's brief, assembled whole, from the pack's own template.
-pub fn review_text(packs: &Packs, project: &Project, subject: &Delivery) -> Result<String, Stop> {
-    let template = packs.read(REVIEW_BRIEF)?;
-    let rules = packs.read(RULES)?;
-    let suite = suite_of(project)?;
-
-    render(
-        &template,
-        &[
-            ("item_id", subject.id),
-            ("item", subject.text),
-            ("delivery", subject.delivery),
-            ("size", subject.size),
-            ("project", &project.name),
-            ("suite", &suite),
-            ("rules", &rules),
-        ],
-    )
-    .map_err(|name| {
-        Stop::could_not_tell(format!(
-            "`{REVIEW_BRIEF}` writes `{{{name}}}`, which is not a placeholder this verb resolves"
         ))
     })
 }
@@ -244,9 +187,16 @@ pub fn print(
 
 /// The brief for one item, read out of the store and printed.
 ///
-/// The order note is the gate: an item carrying none has not been given to
-/// anybody, and a brief for it would tell a seat it may begin when nothing said
-/// so.
+/// The order INDEX is what decides — the reading dispatch, deliver, review
+/// and retire all take: an item carrying none has not been given to anybody,
+/// and a brief for it would tell a seat it may begin when nothing said so. The
+/// timeline is never searched for it, because a withdrawal unsets the index
+/// and leaves the ordered entry standing.
+///
+/// The order the brief prints is rendered from the index by [`order_text`],
+/// which a dispatch renders its own brief's order with, so the brief `fleet
+/// brief` prints and the one a dispatch handed its seat are one text.
+#[allow(clippy::too_many_arguments)]
 pub fn for_item(
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -255,15 +205,29 @@ pub fn for_item(
     store: &dyn Store,
     item: &str,
     seat: &str,
+    touched: Option<&str>,
 ) -> Result<usize, Stop> {
-    let record = store.show(item).map_err(stop_of)?;
-    let Some(order) = order_line(record.notes.as_deref()) else {
-        return Err(Stop::refused(format!(
-            "{item} carries no order note — a brief for an unordered item would tell a seat it \
-             may begin when nothing said so"
-        )));
+    // Resolved once: the rendering, the refusals and the brief's own id read
+    // the id the store answered, never the part of it that was typed.
+    let record = store.show(item)?;
+    let item = record.id.as_str();
+    let index = match &record.order {
+        OrderState::Ordered(index) => index,
+        OrderState::Unreadable => {
+            return Err(Stop::refused(format!(
+                "{item}'s order index is not one this fleet can read — a brief read off an \
+                 order nobody can read would tell a seat it may begin when nothing said so"
+            )))
+        }
+        OrderState::None => {
+            return Err(Stop::refused(format!(
+                "{item} carries no order index — a brief for an unordered item would tell a \
+                 seat it may begin when nothing said so"
+            )))
+        }
     };
-    let text = store.show_text(item).map_err(stop_of)?;
+    let order = order_text(index);
+    let text = show::render(&record, &store.timeline(&record.id)?);
     print(
         out,
         err,
@@ -274,46 +238,27 @@ pub fn for_item(
             text: &text,
             order: &order,
             seat,
+            touched,
         },
     )
 }
 
-fn stop_of(e: StoreError) -> Stop {
-    match e {
-        StoreError::Missing(why) => Stop::refused(why),
-        StoreError::Unreadable(why) => Stop::could_not_tell(why),
-    }
+/// A command a caller handed in, or the named absence in its place. A blank
+/// command is no command: a brief that printed an empty block would tell a
+/// seat it had been given a check.
+fn command_or<'a>(given: Option<&'a str>, absent: &'a str) -> &'a str {
+    given
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .unwrap_or(absent)
 }
 
-/// `[gates] suite`, through the census reader.
-fn suite_of(project: &Project) -> Result<String, Stop> {
-    match policy::read("gates", "suite", &project.gates) {
-        Ok(Some(value)) => Ok(value
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| NO_SUITE.to_string())),
-        Ok(None) => Ok(NO_SUITE.to_string()),
-        Err(unlisted) => Err(Stop::could_not_tell(unlisted.to_string())),
-    }
-}
-
-/// `[gates] touched`, through the same reader: the gate a dispatched SEAT runs
-/// over its own diff, which is not the gate the landing runs over the tree.
-fn touched_of(project: &Project) -> Result<String, Stop> {
-    match policy::read("gates", "touched", &project.gates) {
-        Ok(Some(value)) => Ok(value
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| DERIVE_TOUCHED.to_string())),
-        Ok(None) => Ok(DERIVE_TOUCHED.to_string()),
-        Err(unlisted) => Err(Stop::could_not_tell(unlisted.to_string())),
-    }
-}
-
-/// One line per guard class, on or off, read through the same function the
-/// hook path reads.
-fn guards_of(project: &Project) -> String {
-    guard::CLASSES
+/// One line per guard class the layers declare, on or off, read through the
+/// same functions the hook path reads: a class no layer turns on is not in
+/// force, and a brief naming it would teach a seat a guard it never meets.
+fn guards_of(packs: &Packs, project: &Project) -> Result<String, Stop> {
+    let declared = guard::declared(&packs.layers).map_err(Stop::could_not_tell)?;
+    Ok(declared
         .iter()
         .map(|class| {
             let state = if guard::enabled(*class, &project.guards) {
@@ -324,5 +269,5 @@ fn guards_of(project: &Project) -> String {
             format!("- {}: {state}", class.name())
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }

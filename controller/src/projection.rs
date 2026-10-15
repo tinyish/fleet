@@ -1,5 +1,4 @@
-//! `projection.json` — what the controller OBSERVED at `generated_at`
-//! (PRD R26).
+//! `projection.json` — what the controller OBSERVED at `generated_at`.
 //!
 //! Every field is a report of a reading. There is no pid, no handle and no
 //! running belief anywhere in the document, because a truthy pid in a state file
@@ -11,9 +10,87 @@
 //! a writer that can emit a document its own reader refuses is a shape that
 //! parts in one release.
 
-use crate::adapter::dir_key;
+use crate::config;
 use crate::observe::SeatObservation;
+use crate::seat::COLLECTOR_STALE_POLLS;
+use fleet_core::seat::identity::{Kind, SeatId, SeatRef};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// The published document, under the machine directory.
+pub const FILE: &str = "projection.json";
+
+pub fn path_in(machine_dir: &Path) -> PathBuf {
+    machine_dir.join(FILE)
+}
+
+/// Why the published document is not one a collector is plainly consuming.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stale {
+    /// There is no document, or it could not be read.
+    Unread,
+    /// The document is not JSON.
+    Unparsable,
+    /// The document was generated `age` seconds ago, at `at`, outside
+    /// [`COLLECTOR_STALE_POLLS`] intervals of `poll` seconds.
+    Old { age: u64, at: String, poll: u64 },
+    /// The document carries no `generated_at`, one that does not parse, or one
+    /// in the future; `at` is what it carries, empty where nothing.
+    Undated { at: String, poll: u64 },
+}
+
+/// Whether a document `age` seconds old, published every `poll_seconds`, is
+/// one a collector is plainly consuming. An age nobody could read is not.
+pub fn is_fresh(age: Option<u64>, poll_seconds: u64) -> bool {
+    matches!(age, Some(age) if age <= poll_seconds * COLLECTOR_STALE_POLLS)
+}
+
+/// The published document under `machine_dir`, where a collector is plainly
+/// consuming it, and otherwise why not. The sentence is the caller's.
+pub fn read_fresh(machine_dir: &Path) -> Result<serde_json::Value, Stale> {
+    let Ok(body) = std::fs::read_to_string(path_in(machine_dir)) else {
+        return Err(Stale::Unread);
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return Err(Stale::Unparsable);
+    };
+    let poll_seconds = document["fleet"]["poll_seconds"]
+        .as_u64()
+        .unwrap_or(crate::policy::DEFAULT_POLL_SECONDS);
+    let generated_at = document["generated_at"].as_str().unwrap_or_default();
+    // A stamp that does not parse, and one in the future, are both `None` — and
+    // neither may be rounded into "fresh": a document nobody can date is not one
+    // anybody can call current.
+    let age = crate::clock::seconds_since_stamp(generated_at);
+    if is_fresh(age, poll_seconds) {
+        return Ok(document);
+    }
+    let at = generated_at.to_string();
+    Err(match age {
+        Some(age) => Stale::Old {
+            age,
+            at,
+            poll: poll_seconds,
+        },
+        None => Stale::Undated {
+            at,
+            poll: poll_seconds,
+        },
+    })
+}
+
+/// The published row for the seat keyed `key`, where the document carries one.
+pub fn published_row<'d>(
+    document: &'d serde_json::Value,
+    key: &str,
+) -> Option<&'d serde_json::Value> {
+    document["seats"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .find(|row| row["seat"]["id"] == key)
+}
 
 /// Bumped by any breaking change to the shape below. A reader that meets a
 /// version it does not know refuses the document whole rather than half-reading
@@ -25,9 +102,14 @@ pub struct Projection {
     pub version: u32,
     pub generated_at: String,
     pub controller_version: String,
-    /// What the agent binary reported THIS poll, and the release its behaviours
-    /// were measured against. A spread between them is a flag to re-measure,
-    /// never a failure (R8, R29).
+    /// The agent this fleet's seats run, in words that name no vendor
+    /// (reviewer call 2026-09-25, E13). Defaulted for a reader meeting a
+    /// document written before it was carried.
+    #[serde(default)]
+    pub agent: AgentView,
+    /// What the agent reported THIS poll, and the release its adapter was
+    /// measured against. A spread between them is a flag to re-measure, never
+    /// a failure. Mirrors of `agent.version` and `agent.expected`.
     pub agent_version: Option<String>,
     pub agent_version_expected: Option<String>,
     pub fleet: PolicyView,
@@ -42,7 +124,7 @@ pub struct Projection {
     pub in_flight: Option<InFlight>,
     /// Whether this loop is issuing effects at all, and why not when it is not.
     pub effects: EffectsView,
-    /// The file-access gate (R33, lessons claude-code D4): `ok` once every
+    /// The file-access gate (lessons claude-code D4): `ok` once every
     /// configured worktree has answered a listing, `pending` while any has not.
     /// The detail names the path and which of the two answers it was, and is
     /// present exactly while the state is pending.
@@ -59,10 +141,70 @@ pub struct Projection {
     pub orders: Vec<crate::routines::RoutineRow>,
 }
 
+/// The agent as the projection names it: which adapter answers for it, which
+/// agent that adapter drives and at which version THIS poll, the version it is
+/// expected at — among the releases the adapter declares it was measured
+/// against ([`expected_version`]) — and the postures it takes.
+///
+/// `name` and `version` are null where the adapter did not answer this poll;
+/// `version` alone is null where it answered and no binary of the agent is
+/// installed.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentView {
+    pub adapter: String,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub expected: Option<String>,
+    pub postures: Vec<fleet_core::agent::Posture>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct InFlight {
-    pub seat: String,
+    /// The seat, as its row's `seat` carries it.
+    pub seat: SeatView,
     pub effect: String,
+}
+
+/// A seat as every machine-readable document names it: `{id, name?, kind}`.
+///
+/// THE ID IS WHAT A READER KEYS ON, whole and hyphenated. The name is the
+/// seat's own, absent — never null — where it has none, and free to change;
+/// the kind is `agent` or `human`. The reader half is strings rather than the
+/// typed id, so a row this build cannot parse is still a row `fleet status`
+/// prints rather than a document it refuses whole.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SeatView {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    pub kind: String,
+}
+
+impl From<&SeatRef> for SeatView {
+    fn from(seat: &SeatRef) -> Self {
+        Self {
+            id: seat.id.to_string(),
+            name: seat.name.clone(),
+            kind: seat.kind.as_str().to_string(),
+        }
+    }
+}
+
+impl SeatView {
+    /// `<slug>-<short>`, the name a person reads a seat by — or the id as it
+    /// was published, where the id or the kind is not one this build reads,
+    /// because a line naming the text it was handed beats one naming nothing.
+    pub fn machine_name(&self) -> String {
+        match (SeatId::parse(&self.id), Kind::parse(&self.kind)) {
+            (Ok(id), Some(kind)) => SeatRef {
+                id,
+                name: self.name.clone(),
+                kind,
+            }
+            .machine_name(),
+            _ => self.id.clone(),
+        }
+    }
 }
 
 /// `on`, or `off` with the cause. A loop that cannot exec the agent still
@@ -101,6 +243,18 @@ pub struct EffectsDecision {
     pub acting: bool,
 }
 
+/// The release the live agent is expected at, off the releases its adapter
+/// declares it was measured against (ruling 8): the live one itself where it
+/// is among them, so a reader comparing the two finds no spread; else the
+/// first declared, which the live one is then a move away from. `None` for an
+/// adapter that declares no measurement, which expects nothing.
+pub fn expected_version(measured: &[String], live: Option<&str>) -> Option<String> {
+    match live {
+        Some(live) if measured.iter().any(|release| release == live) => Some(live.to_string()),
+        _ => measured.first().cloned(),
+    }
+}
+
 /// The two things that hold a poll's effects, read in one place.
 ///
 /// THE GRANT OUTRANKS THE BINARY in the cause: a pending grant is a question a
@@ -131,18 +285,12 @@ pub struct PolicyView {
     /// file on disk.
     pub mtime: Option<String>,
     pub poll_seconds: u64,
-    pub claude_code: Option<String>,
-    /// The plugin root every start this fleet makes loads, absolute, or null for
-    /// a fleet that names none. Null is a reading and not a gap, so it is
-    /// serialised either way.
-    pub plugin_dir: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct SeatRow {
-    pub seat_dir: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chosen_name: Option<String>,
+    /// The seat: a reader finds the row by its `id`.
+    pub seat: SeatView,
     pub roster_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roster_unknown_cause: Option<String>,
@@ -150,13 +298,15 @@ pub struct SeatRow {
     /// `prompt-blocked`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
-    /// Why this stopped row was ranked on its START rather than on its end:
-    /// present exactly when the recency window fell back, and absent on every
-    /// row it did not — including every row that is not stopped. A reader
-    /// deciding whether a `stopped` row is fresh needs to know which reading it
-    /// is, because the two answer different questions about a long session.
+    /// The status the seat's session exited with, on a `stopped` row whose
+    /// process left one. Absent on every other row, and on an end by a signal,
+    /// which carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub roster_recency_fallback: Option<String>,
+    pub exit_status: Option<i32>,
+    /// When a `stopped` row's session ended, as its `session.ended` line dated
+    /// it. Absent on every other row, and on an end nothing could date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
     /// Null is a measured absence — nothing was read — and never a zero.
     pub context_tokens: Option<u64>,
     pub project: Option<String>,
@@ -170,28 +320,29 @@ pub struct SeatRow {
     pub decision: String,
     pub outcome: String,
     /// Consecutive blind dispatches for this seat, and whether the guard is
-    /// holding it down (R14, R26). A number and a flag, both read from the
-    /// controller's own record: a person answers a halted row with
-    /// `fleet event clear-halt`, and the count is what says how close an
-    /// unhalted one is.
+    /// holding it down. A number and a flag, both read from the controller's
+    /// own record: a person answers a halted row with `fleet event clear-halt`,
+    /// and the count is what says how close an unhalted one is.
     pub blind: u32,
     pub halted: bool,
 }
 
 impl SeatRow {
     pub fn from_observation(
-        seat_dir: &str,
-        chosen_name: Option<&str>,
+        seat: &config::Seat,
         observation: &SeatObservation,
         context_tokens: Option<u64>,
     ) -> Self {
         Self {
-            seat_dir: seat_dir.to_string(),
-            chosen_name: chosen_name.map(str::to_string),
+            seat: SeatView::from(&seat.as_ref()),
             roster_state: observation.state.as_str().to_string(),
             roster_unknown_cause: observation.unknown_cause.clone(),
             waiting_for: observation.waiting_for.clone(),
-            roster_recency_fallback: observation.recency_fallback.clone(),
+            exit_status: observation.exit_status,
+            // Filled by the loop from the session table, which is where the end
+            // is recorded: the observation reads the pane, and a pane carries no
+            // clock.
+            ended_at: None,
             context_tokens,
             project: observation.project.clone(),
             worktree: observation
@@ -212,6 +363,19 @@ impl SeatRow {
     }
 }
 
+/// A directory path with any trailing separator removed — the one form both
+/// sides of a comparison are put in, so a configured path and a reported one
+/// that differ only there are the same directory. The root is left alone,
+/// because trimming it away leaves nothing to compare.
+pub fn dir_key(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        path
+    } else {
+        trimmed
+    }
+}
+
 /// The `decision` a row carries before one has been reached.
 pub const UNDECIDED: &str = "pending";
 
@@ -226,19 +390,31 @@ mod tests {
     use super::*;
     use crate::observe::RosterState;
 
+    const BUILDER_1: &str = "01a0d1f1-0aec-765f-9abe-5c21e8a04b17";
+    const BUILDER_2: &str = "01a0d1f1-0aec-765f-9abe-2b7c1d0e4f58";
+
+    fn configured(id: &str, name: Option<&str>) -> config::Seat {
+        config::Seat {
+            id: SeatId::parse(id).expect("a hand-written seat id parses"),
+            name: name.map(str::to_string),
+            model: None,
+            transient: false,
+            worktrees: Vec::new(),
+        }
+    }
+
     fn one_seat() -> Projection {
         Projection {
             version: VERSION,
             generated_at: "2026-09-06T00:00:00Z".to_string(),
             controller_version: "0.1.0".to_string(),
+            agent: AgentView::default(),
             agent_version: Some("2.1.261".to_string()),
             agent_version_expected: Some("2.1.261".to_string()),
             fleet: PolicyView {
                 path: "/fleet/fleet.toml".to_string(),
                 mtime: Some("2026-09-06T00:00:00Z".to_string()),
                 poll_seconds: 5,
-                claude_code: Some("2.1.261".to_string()),
-                plugin_dir: Some("/fleet".to_string()),
             },
             fleet_parse_error: None,
             in_flight: None,
@@ -246,19 +422,18 @@ mod tests {
             grant: crate::platform::GRANT_OK.to_string(),
             grant_detail: None,
             seats: vec![SeatRow::from_observation(
-                "builder-1",
-                Some("Rook"),
+                &configured(BUILDER_1, Some("Orla")),
                 &SeatObservation {
                     state: RosterState::Present,
                     unknown_cause: None,
                     waiting_for: None,
-                    recency_fallback: None,
+                    blocked_on: None,
+                    activity: Some(fleet_core::agent::Activity::Idle),
                     session_id: Some("a-session".to_string()),
-                    short_id: Some("aa".to_string()),
                     project: Some("demo".to_string()),
                     worktree: Some("/wt/builder-1".to_string()),
-                    pidless_row: false,
-                    state_names_an_end: false,
+                    pane_pid: Some(4242),
+                    exit_status: None,
                 },
                 Some(42),
             )],
@@ -286,38 +461,36 @@ mod tests {
     #[test]
     fn the_row_publishes_the_directory_s_own_spelling_and_never_a_guess() {
         let row = SeatRow::from_observation(
-            "builder-1",
-            None,
+            &configured(BUILDER_1, None),
             &SeatObservation {
                 state: RosterState::Absent,
                 unknown_cause: None,
                 waiting_for: None,
-                recency_fallback: None,
+                blocked_on: None,
+                activity: None,
                 session_id: None,
-                short_id: None,
                 project: Some("demo".to_string()),
                 worktree: Some("/wt/builder-1/".to_string()),
-                pidless_row: false,
-                state_names_an_end: false,
+                pane_pid: None,
+                exit_status: None,
             },
             None,
         );
         assert_eq!(row.worktree.as_deref(), Some("/wt/builder-1"));
 
         let nowhere = SeatRow::from_observation(
-            "builder-2",
-            None,
+            &configured(BUILDER_2, None),
             &SeatObservation {
                 state: RosterState::Absent,
                 unknown_cause: None,
                 waiting_for: None,
-                recency_fallback: None,
+                blocked_on: None,
+                activity: None,
                 session_id: None,
-                short_id: None,
                 project: None,
                 worktree: None,
-                pidless_row: false,
-                state_names_an_end: false,
+                pane_pid: None,
+                exit_status: None,
             },
             None,
         );
@@ -339,7 +512,8 @@ mod tests {
         for elided in [
             "roster_unknown_cause",
             "waiting_for",
-            "roster_recency_fallback",
+            "exit_status",
+            "ended_at",
             "grant_detail",
         ] {
             assert!(
@@ -348,15 +522,16 @@ mod tests {
             );
         }
         // The control for the loop above: a key the same row DOES carry is
-        // found by the same search, so the four absences are the attribute's
+        // found by the same search, so the five absences are the attribute's
         // doing and not a `contains` that matches nothing.
-        assert!(body.contains("chosen_name"), "{body}");
+        assert!(body.contains("\"name\""), "{body}");
 
         let read: Projection = serde_json::from_str(&body).expect("the writer's own document");
         assert_eq!(read.version, VERSION);
         assert_eq!(read.fleet.poll_seconds, 5);
         assert_eq!(read.seats.len(), 1);
-        assert_eq!(read.seats[0].seat_dir, "builder-1");
+        assert_eq!(read.seats[0].seat.id, BUILDER_1);
+        assert_eq!(read.seats[0].seat.name.as_deref(), Some("Orla"));
         assert_eq!(read.seats[0].context_tokens, Some(42));
         assert_eq!(read.fleet_parse_error, None);
 
@@ -375,5 +550,121 @@ mod tests {
         assert_eq!(parsed["seats"][0]["context_tokens"], 42);
         assert_eq!(parsed["seats"][0]["project"], "demo");
         assert_eq!(parsed["version"], VERSION);
+    }
+
+    /// The row's object and the one core serializes a seat as are the same
+    /// document, key for key and in the same order: the projection and the
+    /// stream name a seat one way, whichever half wrote it.
+    #[test]
+    fn a_seat_view_is_the_object_core_writes_for_the_same_seat() {
+        for name in [Some("Orla"), None] {
+            let seat = configured(BUILDER_1, name).as_ref();
+            assert_eq!(
+                serde_json::to_string(&SeatView::from(&seat)).unwrap(),
+                serde_json::to_string(&seat).unwrap(),
+                "{name:?}"
+            );
+        }
+    }
+
+    /// The name a person reads is the machine name, and a row whose id this
+    /// build cannot parse still prints as the text it carries.
+    #[test]
+    fn a_seat_view_is_read_by_its_machine_name_or_else_its_id() {
+        let orla = SeatView::from(&configured(BUILDER_1, Some("Orla")).as_ref());
+        assert_eq!(orla.machine_name(), "orla-e8a04b17");
+        let nameless = SeatView::from(&configured(BUILDER_2, None).as_ref());
+        assert_eq!(nameless.machine_name(), "agent-1d0e4f58");
+        let unread = SeatView {
+            id: "builder-1".to_string(),
+            name: None,
+            kind: "agent".to_string(),
+        };
+        assert_eq!(unread.machine_name(), "builder-1");
+    }
+
+    /// A fixture machine directory holding `body` as its projection, or none.
+    fn machine_with(name: &str, body: Option<&str>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fleet-projection-fresh-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the fixture directory is made");
+        if let Some(body) = body {
+            std::fs::write(path_in(&dir), body).expect("the fixture projection is written");
+        }
+        dir
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is past the epoch")
+            .as_secs()
+    }
+
+    fn dated(generated_at: &str) -> String {
+        serde_json::json!({ "generated_at": generated_at, "fleet": { "poll_seconds": 5 } })
+            .to_string()
+    }
+
+    /// The one freshness reader answers each way a document can fail to be
+    /// current as its own reading, and the sentences stay the callers'.
+    #[test]
+    fn the_freshness_reader_names_each_way_a_document_is_not_current() {
+        let none = machine_with("none", None);
+        assert_eq!(read_fresh(&none), Err(Stale::Unread));
+
+        let torn = machine_with("torn", Some("{"));
+        assert_eq!(read_fresh(&torn), Err(Stale::Unparsable));
+
+        let at = crate::clock::stamp_secs(now_secs() - 4 * 5);
+        let old = machine_with("old", Some(&dated(&at)));
+        match read_fresh(&old) {
+            Err(Stale::Old {
+                age,
+                at: read,
+                poll,
+            }) => {
+                assert!(age >= 20, "{age}");
+                assert_eq!((read, poll), (at, 5));
+            }
+            other => panic!("a document four polls old is old, not {other:?}"),
+        }
+
+        let undated = machine_with(
+            "undated",
+            Some(&serde_json::json!({ "fleet": { "poll_seconds": 5 } }).to_string()),
+        );
+        assert_eq!(
+            read_fresh(&undated),
+            Err(Stale::Undated {
+                at: String::new(),
+                poll: 5
+            })
+        );
+
+        let ahead = crate::clock::stamp_secs(now_secs() + 3600);
+        let future = machine_with("future", Some(&dated(&ahead)));
+        assert_eq!(
+            read_fresh(&future),
+            Err(Stale::Undated { at: ahead, poll: 5 })
+        );
+
+        let fresh = machine_with("fresh", Some(&dated(&crate::clock::now_stamp())));
+        assert!(read_fresh(&fresh).is_ok());
+
+        for dir in [none, torn, old, undated, future, fresh] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Fresh is inside three polls, inclusive, and an age nobody read is not.
+    #[test]
+    fn fresh_is_inside_three_polls_and_never_an_unread_age() {
+        assert!(!is_fresh(None, 5));
+        assert!(is_fresh(Some(15), 5));
+        assert!(!is_fresh(Some(16), 5));
     }
 }

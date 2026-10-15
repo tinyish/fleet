@@ -1,0 +1,467 @@
+# Guards
+
+A guard is a hook that refuses a class of mistake in a Bash command before
+the command runs. fleet has four guard classes: shell-trap, record,
+release-ref and production-write. You meet them in a seat's session, where
+the agent's pack wires its agent's pre-tool hook to `fleet guard`, which
+reads the hook's payload through the agent adapter's hook mapping and runs
+the declared classes against the command. A refusal says what is wrong, what
+to write instead, and how to run it anyway.
+The claude-code pack's plugin runs it before every Bash command Claude Code
+runs. You switch classes off, and name what the last two refuse on, in
+`fleet.toml`.
+
+## Terms
+
+- **Guard class**: one of the four, named as you type it after `fleet guard`.
+  Each class judges the whole command text on its own.
+- **Check**: one kind of mistake inside a class. A class runs its checks in a
+  fixed order and refuses on the first that hits, so one class gives at most
+  one refusal per command.
+- **Target**: the setting a check needs before it can refuse anything: your
+  item prefix, a ref glob, or a list of production names. A check whose
+  target is not set refuses nothing.
+- **Escape**: an assignment such as `FLEET_TRAP_OK=1` written at the front of
+  the command, which lets that one command through the checks it names.
+- **Hook mapping**: where an agent's pre-tool payload keeps the tool and the
+  command, and the shape of the refusal it reads. An agent adapter in a pack
+  declares its own, in the `[hook]` table of its `adapter.toml` (see
+  [Packs](packs.md#the-format)); fleet carries none of its own.
+- **Declared classes**: the classes `fleet guard` runs when you name none.
+  Shell-trap and record are always among them. Release-ref and
+  production-write are among them when an installed pack names them in its
+  `pack.toml`'s `guard_classes` (see [Packs](packs.md#the-format)).
+
+## How a guard judges a command
+
+A guard reads the payload an agent's pre-tool hook hands it on standard
+input, through the hook mapping of the agent adapter `--adapter` names:
+`--adapter <name>` is the one the installed packs carry under that name, and
+`--adapter <path>` the one in the adapter directory at that absolute path.
+`fleet guard <class> --adapter <name>` runs that class alone, and
+`fleet guard --adapter <name>` runs the declared classes (see
+[Running the declared classes](#running-the-declared-classes)). Without
+`--adapter` it judges nothing: it prints one line on standard error and
+exits 2 (see [When it refuses](#when-it-refuses)).
+
+The examples on this page judge through the mapping of the agent adapter the
+claude-code pack carries, whose name is written `<agent>`. In the payload
+Claude Code hands the claude-code pack's hook, the shell tool is `Bash` and
+the command is at `tool_input.command`, and a refusal is a `PreToolUse`
+decision of `deny`, with the reason as its text. When a class refuses, it
+prints that one JSON object on standard output. When it lets the command
+through, it prints nothing. You can hand it a payload yourself:
+
+```sh
+$ echo '{"tool_name":"Bash","tool_input":{"command":"for b in $BRANCHES; do echo $b; done"},"cwd":"."}' | fleet guard shell-trap --adapter <agent>
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"fleet guard shell-trap: UNSPLIT VARIABLE — $BRANCHES → pass the items as explicit arguments, or read them one line at a time: printf '%s\\n' \"${BRANCHES}\" | while read -r item; do ...; done — and where ONE argument really is intended, quote it: \"${BRANCHES}\"; FLEET_TRAP_OK=1 <the same command> runs it anyway. The reason: the shell passes an unquoted variable as ONE argument, so this iterates or matches once over the whole newline-joined string and reads exactly like absence."}}
+```
+
+It exits 0. The reason always has the same parts, in this order:
+
+```text
+fleet guard <class>: <WHAT IT FOUND> — <the part of the command> → <what to write instead>; <the escape>. The reason: <why it is a mistake>.
+```
+
+The judging path exits 0 on every route: a refusal, a command let through,
+and a payload with nothing to judge. A payload that is not JSON, names no
+tool or a tool other than the shell tool, or carries a command that is
+missing, not a string or blank prints nothing and exits 0.
+
+### Reading another agent's payload
+
+A refusal through any mapping is its `deny` template with the reason filled
+in. For an installed agent adapter `other` carrying the `[hook]` table shown
+in [Packs](packs.md#the-format), a trapped command in its payload is refused
+in its shape, and a payload in the claude-code pack's shape is nothing it
+judges:
+
+```sh
+$ echo '{"tool":"shell","input":{"cmd":"for b in $BRANCHES; do echo $b; done"}}' | fleet guard shell-trap --adapter other
+{"block":true,"message":"fleet guard shell-trap: UNSPLIT VARIABLE — $BRANCHES → pass the items as explicit arguments, or read them one line at a time: printf '%s\\n' \"${BRANCHES}\" | while read -r item; do ...; done — and where ONE argument really is intended, quote it: \"${BRANCHES}\"; FLEET_TRAP_OK=1 <the same command> runs it anyway. The reason: the shell passes an unquoted variable as ONE argument, so this iterates or matches once over the whole newline-joined string and reads exactly like absence."}
+$ echo '{"tool_name":"Bash","tool_input":{"command":"for b in $BRANCHES; do echo $b; done"},"cwd":"."}' | fleet guard shell-trap --adapter other
+```
+
+Both exit 0. No `--adapter`, or one fleet cannot read a mapping from, is the
+one judging route that does not: it prints one line on standard error and
+exits 2, before it reads the payload.
+Through the claude-code pack's hook, Claude Code reads that 2 as a block.
+The lines are under [When it refuses](#when-it-refuses).
+
+### Running the declared classes
+
+With `--adapter` and no class, `fleet guard` runs the declared classes
+against the one payload, in the order shell-trap, record, release-ref,
+production-write, and prints the first refusal alone. A declared class you
+switch off in `[guards]` refuses nothing. With `release_ref_glob =
+"refs/heads/release/*"` set and the defaults alone, a push to `release/1.2`
+is let through, because nothing declares release-ref; with a pack installed
+that names release-ref in its `guard_classes`, the same payload is refused:
+
+```sh
+$ echo '{"tool_name":"Bash","tool_input":{"command":"git push origin release/1.2"},"cwd":"."}' | fleet guard --adapter <agent>
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"fleet guard release-ref: A RELEASE REF — release/1.2 -> refs/heads/release/1.2 → push the same commit to a work branch — `git push <remote> <local>:refs/heads/<your-branch>` — and leave `refs/heads/release/*` to the person cutting the release; no escape at this layer — a release is cut by a person from their own shell. The reason: a release ref deploys, so this push is a deployment wearing the clothes of a branch update — and it is one act, with nothing between it and production."}}
+```
+
+It exits 0. A refusal it prints is the one `fleet guard <class>` prints for
+that class through the same mapping, byte for byte. Naming a class runs that
+class alone, whether or not a pack declares it.
+
+When fleet cannot tell which classes are declared — the installed packs do
+not resolve, or an installed pack's `guard_classes` is a defect — it prints
+one line on standard error and exits 2 before it reads the payload. The
+lines are under [When it refuses](#when-it-refuses).
+
+An escape counts only when it is among the assignments that open the command
+text, and it covers every statement after them: `FLEET_TRAP_OK=1 ls; for b in $LIST;
+do :; done` is let through, and `cd <dir> && FLEET_TRAP_OK=1 <command>` is
+judged as if the escape were not there. Any value turns an escape on except
+an empty one, `0`, `false` and `no`.
+
+A command a class cannot read, such as one with a quote left open, is let
+through by shell-trap and release-ref. Record and production-write fall back
+to a plain text match for it, described under each class, and say so in the
+refusal: `(this command could not be read, so the conservative text match
+applied)`.
+
+Which fleet binary a hook runs is the agent pack's to say. fleet sets
+`FLEET_BIN`, the absolute path of its own binary, in every seat's session it
+starts. The claude-code pack's plugin runs the binary `FLEET_BIN` names and
+no other, and blocks a guarded command where it names none. The README of
+the claude-code pack says how, and what a session of your own needs.
+
+## Where a guard reads its settings
+
+A guard starts from the command's working directory, as the payload gives
+it, and walks up to the first directory that has either file:
+
+- **A directory with `.fleet/project.toml`** is a standalone project, even
+  where a `fleet.toml` sits beside it. The on and off switches come from the
+  fleet's own `fleet.toml`, the one the machine directory names. The targets
+  come from the project's `.fleet/project.toml`.
+- **A directory with `fleet.toml`** is an embedded fleet. The switches and
+  the targets both come from that file.
+- **Neither, all the way up**: the switches come from the fleet's own
+  `fleet.toml`, and no target is set. With no machine directory naming a
+  `fleet.toml`, every class is on.
+
+The targets live in two tables:
+
+| Key | Class | Check |
+| --- | --- | --- |
+| `[project] item_prefix` | record | bare-id |
+| `[guards.targets] release_ref_glob` | release-ref | push-target |
+| `[guards.targets] prod_buckets` | production-write | bucket |
+| `[guards.targets] prod_projects` | production-write | project |
+| `[guards.targets] prod_apps` | production-write | app |
+| `[guards.targets] prod_make_goals` | production-write | make-goal |
+| `[guards.targets] prod_dagger_functions` | production-write | module-function |
+| `[guards.targets] prod_workflow_refs` | production-write | workflow-ref |
+
+`release_ref_glob` is a string. The six `prod_` keys are lists of strings.
+An empty string, an empty list and an absent key all leave the check refusing
+nothing. A guard reads these keys from `[guards.targets]` alone: the same key
+under any other table sets no target.
+
+A file that cannot be read or parsed counts as an empty one: it switches no
+class off and sets no target, and nothing is printed about it.
+
+## Switching a class off
+
+Every class is on unless its table says `enabled = false`:
+
+```toml
+[guards]
+release-ref = { enabled = false }
+production-write = { enabled = false }
+```
+
+Only the boolean `false` switches a class off. An absent table, an absent
+key, and a value of any other type (`"no"`, `0`) leave it on. In a
+standalone project the switches are read from the fleet's `fleet.toml` only;
+a switch set in `.fleet/project.toml` or in a `fleet.toml` beside it changes
+nothing.
+
+A switch only turns a class off. Which classes run with no class named is
+the declared set (see
+[Running the declared classes](#running-the-declared-classes)), and a
+`[guards]` table never adds to it.
+
+`fleet prime`, which a session runs at its start, ends its first line with
+each declared class and whether it is on, for example `guards: shell-trap on,
+record on, release-ref off, production-write on` with a pack installed that
+names the last two. With the defaults alone it names shell-trap and record.
+"on" says the class runs, not that its targets are set. When the installed
+packs do not resolve, the line names shell-trap and record alone; when a
+pack's `guard_classes` is a defect, it reads `guards: could not be read — `
+and the reason.
+
+## The shell-trap class
+
+Shell-trap refuses shell shapes that give a plausible wrong answer rather
+than an error. It needs no target. Its escape is `FLEET_TRAP_OK=1`. Its five
+checks, in the order it runs them:
+
+| Check | Refuses | Write instead |
+| --- | --- | --- |
+| `record-backtick` | a backtick inside double quotes in text the store's command stores (see below) | the text in a file written through a quoted heredoc (`<<'EOF'`), passed as `"$(cat <file>)"` |
+| `modifier` | `$NAME:` followed by one of `a c e h l q r s t u A P Q &`, unbraced | `"${NAME}:..."` |
+| `unsplit-variable` | a lone `$LIST` as the whole list of a `for ... in`, as an argument to `xargs` or `kill`, or after a bare `--` | explicit arguments, a `while read` loop, or `"${LIST}"` where one argument is meant |
+| `pipe-rc` | reading `$?` right after a pipeline whose last stage only formats | the command without the pipe, output to a file, then its own `$?` |
+| `false-alternative` | `A && B \|\| C` where C only reports (`echo`, `printf`, `true`, `:`, `print`) and A has a third answer | `if A; then B; else ...; exit 1; fi` |
+
+The store's command is the one the project's store declares (see
+[The store's command](#the-stores-command)). The examples on this page use
+`bd`, the command the bd pack's store declares. Whatever the command, the
+stored text `record-backtick` reads is the same: with `bd`, it is the text
+argument of `bd note` and `bd comment`, the title and `--description`, `-d`,
+`--notes` and `--append-notes` of `bd create`, `--reason` and `-r` of
+`bd close`, and `--title`, `--description`, `-d`, `--acceptance`, `--design`
+and `--append-notes` of `bd update`. A backtick inside single quotes, and text
+passed as `"$(cat <file>)"`, are let through.
+
+The stages `pipe-rc` treats as formatting are `head`, `tail`, `cat`, `cut`,
+`sed`, `awk`, `tr`, `sort`, `uniq`, `fold`, `tee`, `nl`, `rev`, `column`,
+`wc`, `less`, `more`, `pr`, `expand`, `unexpand` and `tac`. A pipeline ending
+in `grep`, `diff`, `cmp` or `test` reports its own answer, so
+`cargo test | grep -q ok; echo $?` is let through.
+
+The A commands `false-alternative` knows a third answer for are
+`git merge-tree`, `git merge-base`, `grep`, `diff`, `cmp` and `curl`. Any
+other A is let through, so `test -e p && echo EXISTS || echo MISSING` is
+let through.
+`for b in $A $B` names its items one by one and is let through.
+
+## The record class
+
+Record refuses writes to items that destroy text, skip the audit row, or
+leave an id a later reader cannot resolve. It reads calls of the store's
+command only, by that name or by a path ending in it (see
+[The store's command](#the-stores-command)). Its examples use `bd`, the bd
+pack's command, as the shell-trap class's do. Its three checks, in order,
+each with its own escape:
+
+| Check | Refuses | Write instead | Escape |
+| --- | --- | --- | --- |
+| `notes-replace` | `bd update` with `--notes`, which replaces the whole notes field | `bd note <id> <text>`, or `bd update <id> --append-notes <text>` | `FLEET_NOTES_REPLACE_OK=1` |
+| `sql-write` | `bd sql` with a statement that writes | `bd update`, `bd note` or `bd close` | `FLEET_SQL_WRITE_OK=1` |
+| `bare-id` | an item named by its suffix alone in stored text | the full id, `<prefix>-<suffix>` | `FLEET_BARE_ID_OK=1` |
+
+Each escape lets through its own check and no other:
+`FLEET_SQL_WRITE_OK=1 bd update <item> --notes "done"` is still refused as
+`NOTES REPLACED`.
+
+`sql-write` reads the first keyword of the statement: `UPDATE`, `DELETE`,
+`INSERT`, `REPLACE`, `DROP`, `ALTER` or `TRUNCATE` is a write, and a `WITH`
+statement is a write when any of them follows. Words inside quotes are
+skipped, so `bd sql "SELECT 'DELETE' FROM issues"` is let through.
+
+`bare-id` needs `[project] item_prefix` and refuses nothing without it. It
+reads the same stored text as `record-backtick`, not ids given as arguments,
+so `bd show a1b2` is let through. A suffix it refuses is exactly four
+characters of lowercase letters and digits, with at least one of each,
+optionally followed by child numbers such as `.1`. It does not read a run
+that is part of a longer word, a path, a file name (`a1b2.md`) or an id
+already written in full. With `item_prefix = "acme"`, the refusal names each
+suffix it found and the full id it stands for: `a1b2 -> acme-a1b2, c3d4.1 ->
+acme-c3d4.1`.
+
+For a command it cannot read, `notes-replace` and `sql-write` refuse any
+`bd update` carrying `--notes`, and any `bd sql` carrying a write keyword, by
+plain text match. `bare-id` lets it through.
+
+### The store's command
+
+The store's command is the command a seat types in its shell to reach the
+project's store, as the store's capabilities declare it (see
+[The store contract](store.md#capabilities)). For the bd pack's store it is
+`bd`. A store that declares `tracker` has `tracker update <item> --notes n`
+refused and `bd update <item> --notes n` let through, and each rewrite names
+`tracker`.
+
+A store that declares no command has no command read: record refuses
+nothing, and neither does shell-trap's `record-backtick`. Shell-trap's other
+checks still refuse.
+
+fleet asks the project's store for its command only when the command being
+judged carries `note`, `comment`, `create`, `close`, `update` or `sql`
+somewhere in its text. A project file that does not read, a store that
+cannot be opened, and a store that does not answer readably within 2 seconds
+each leave `bd`, the bd pack's command, as the command read. So does a
+directory with no project above it.
+
+## The release-ref class
+
+Release-ref refuses a `git push` whose destination matches
+`[guards.targets] release_ref_glob`. It has no escape: the refusal prints
+`no escape at this layer — a release is cut by a person from their own shell`
+where the escape would be.
+
+```toml
+[guards.targets]
+release_ref_glob = "refs/heads/release/*"
+```
+
+In the glob, `*` matches any run of characters, a slash included, and `?`
+matches one character. Every other character, brackets included, matches
+itself. The glob is matched against the full ref name: a destination written
+without `refs/` is read as `refs/heads/<name>`, so `git push origin
+release/v1` is refused under `refs/heads/release/*`, and a glob written as
+`release/*` matches no push at all.
+
+The destinations it reads are every refspec after the remote (the part after
+a colon, with a leading `+` dropped), the refs after `--delete` or `-d`, and
+the ref named in `--force-with-lease=<ref>`. It steps over git's own flags
+before `push`, such as `-C <path>`. A push that names no ref, such as a bare
+`git push`, `git push --all` or `git push --mirror`, is let through.
+
+## The production-write class
+
+Production-write refuses commands that write to a production target the
+project lists. Each list is the whole target set: fleet refuses a name
+because it is on a list, never because of how it is spelled. It reads
+`gsutil`, `gcloud`, `firebase`, `fly`, `flyctl`, `make`, `gmake`, `dagger`
+and `gh`. Its escape is `FLEET_PROD_WRITE_OK=1`, for all six checks.
+
+### bucket
+
+`prod_buckets` lists bucket names, matched against the host of a
+`gs://<bucket>/...` argument. It refuses `gsutil cp`, `mv`, `rm`, `rsync`,
+`rb` and `setmeta`, and `gsutil acl`, `iam`, `defacl`, `notification`,
+`retention`, `versioning`, `web`, `cors` and `lifecycle` unless the next word
+is `get`, `list` or `describe`. It refuses `gcloud storage cp`, `mv`, `rm`
+and `rsync`, `gcloud storage buckets create`, `delete` and `update`, and
+`gcloud storage objects delete` and `update`. Reads such as `gsutil ls` and
+`gsutil cat` are let through.
+
+For `cp`, `mv` and `rsync`, a listed bucket anywhere in the arguments
+refuses, so a download from a listed bucket is refused too, with the label
+`A LISTED BUCKET, AND THIS VERB READS ITS DIRECTION FROM ARGUMENT ORDER`.
+
+### project
+
+`prod_projects` lists cloud project ids. It refuses:
+
+- `gcloud run deploy`, `gcloud functions deploy` and `gcloud app deploy`;
+- `gcloud sql`, `gcloud compute` and `gcloud iam` commands whose verb is not
+  a read (`list`, `describe`, `get`, `get-value`, `get-iam-policy`,
+  `get-config`, `info`, `version`, `help`, `print-access-token`,
+  `print-identity-token`), a verb fleet does not recognise included;
+- `gcloud config set project <listed id>`;
+- `gcloud storage service-agent`;
+- `firebase deploy`, `firebase hosting:channel:deploy` and
+  `firebase functions:delete`.
+
+The project is the one named by `--project` (or `-p` for `gcloud`, `-P` for
+`firebase`). When a command that mentions `gcloud` names none, fleet asks
+`gcloud config get-value project`, waits up to five seconds, and refuses when
+the answer is listed; a `firebase` command in that same command line with no
+project flag is judged against that answer too. When that cannot answer, the
+command is let through, and so is a `firebase` command with no project flag in
+a command line that does not mention `gcloud`.
+
+### app
+
+`prod_apps` lists application names. It refuses `fly deploy`, `fly scale`,
+`fly secrets set`, and `fly machines` with any sub-verb other than `list`,
+`status` and `show`; `flyctl` the same. The application is the one named by
+`-a` or `--app`, or else the `app` key of a `fly.toml` in the command's
+working directory. With neither, the command is let through.
+
+### make-goal
+
+`prod_make_goals` lists goals that deploy. `make` or `gmake` with a listed
+goal among its words is refused, unless the last assignment to `dry` on the
+line is written exactly `dry=1`: `make deploy-prod dry=1` is let through,
+and `make deploy-prod dry=1 dry=0` and `make deploy-prod dry:=1` are
+refused.
+
+### module-function
+
+`prod_dagger_functions` lists functions that write production. `dagger` with
+a listed function among its words is refused, and so is one named inside the
+script given to `-c` or `--command`.
+
+### workflow-ref
+
+`prod_workflow_refs` lists entries written `<workflow>:<ref glob>`, such as
+`deploy.yml:release/*`. `gh workflow run <workflow> --ref <ref>` (or `-r`) is
+refused when an entry's workflow and glob both match. The glob is matched
+against the ref as you typed it, so `release/*` matches `--ref release/v1`. A
+dispatch with no `--ref` is let through.
+
+### A command it cannot read
+
+For a command it cannot read, production-write looks at each part that
+starts with one of its tools and refuses when any argument contains a listed
+bucket, project or app, read or write alike. `gsutil ls "gs://<bucket>` with
+its quote left open is refused this way.
+
+## Checking that the targets are set
+
+A check whose target is not set refuses nothing, and says nothing about it
+when it lets a command through. `fleet guard <class> --check` prints one line
+per check, in the order the class runs them, and exits 1 when any target is
+not set:
+
+```sh
+$ fleet guard release-ref --check
+release-ref push-target: not configured — [guards.targets] release_ref_glob
+```
+
+It exits 1. With every target set, it exits 0:
+
+```sh
+$ fleet guard record --check
+record notes-replace: configured
+record sql-write: configured
+record bare-id: configured — [project] item_prefix
+```
+
+A check with no target always prints `configured`, so
+`fleet guard shell-trap --check` always exits 0. `--check` walks up from the
+directory you run it in, the same way a guard walks up from the command's.
+It does not read the `[guards]` switches: a class you switched off still
+reports its checks, and still exits 1 when a target is not set.
+
+`fleet guard --check` with no class reports every declared class, one after
+another, in the order they run, and exits 1 when any target among them is
+not set. When fleet cannot tell which classes are declared, it prints
+`fleet: ` and the reason on standard error and exits 3.
+
+The defaults every fleet gets carry a doctor entry, `guards-installed`, that
+runs `--check` for shell-trap and record. The tiny pack shadows it with one
+that runs all four. Either prints every line and exits with the first
+non-zero status among them. `fleet doctor` runs it (see
+[Packs](packs.md#doctor-checks)).
+
+## When it refuses
+
+| Situation | Exit | What you see | What to do |
+| --- | --- | --- | --- |
+| A guard refuses a Bash command | 0 | the adapter's `deny` template with the reason filled in, one JSON object on standard output | write what the reason says instead, or put the class's escape at the front of the command |
+| `--adapter` names an adapter no installed pack carries | 2 | ``fleet guard: no installed pack carries the agent adapter `<name>` — `adapters/agent/<name>/adapter.toml` resolves nowhere`` | install the pack that carries it, or wire the hook to a name that is installed |
+| `--adapter` names an adapter whose `adapter.toml` has no `[hook]` | 2 | ``fleet guard: the agent adapter at <dir> declares no [hook] — a guard has no mapping to read its payload through`` | add the `[hook]` table to the adapter (see [Packs](packs.md#the-format)) |
+| `--adapter` is neither a bare name nor an absolute path | 2 | ``fleet guard: --adapter `<value>` is neither an agent adapter's name nor an absolute path to its directory`` | give the adapter's name, or its directory's absolute path |
+| `--adapter <name>` and the installed packs do not resolve | 2 | ``fleet guard: the agent adapter `<name>` is looked up in the installed packs:`` and the layering's refusal | fix what the refusal names; `fleet pack check` names a pack's defects |
+| `fleet guard` judging a payload with no `--adapter`, with a class or without | 2 | `fleet guard: name the --adapter whose [hook] mapping the payload is read through` | give `--adapter` the agent adapter whose hook hands the payload |
+| With no class, an installed pack's `guard_classes` is a defect | 2 | ``fleet guard: layer `<pack>` cannot say which guard classes it turns on:`` and the defect | fix the pack; `fleet pack check` names the defect |
+| With no class and an `--adapter` path, the installed packs do not resolve | 2 | `fleet guard: the declared guard classes: the pack layers do not resolve:` and the layering's refusal | fix what the refusal names |
+| `--check` with no class, and fleet cannot tell which classes are declared | 3 | `fleet: ` and the reason | fix what the reason names |
+| `fleet guard` with a class it does not know | 2 | ``error: invalid value 'shell' for '[CLASS]': unknown class `shell` — one of shell-trap, record, release-ref, production-write`` | use one of the names it lists |
+| `--check` finds a target not set | 1 | `<class> <check>: not configured — <key>` | set the key the line names, or leave it unset if the check does not apply to you |
+
+## See also
+
+- [Getting started](getting-started.md): installing fleet, and the plugin a
+  seat's session loads from its agent's pack.
+- [Packs](packs.md): the defaults and the tiny pack, which carry the
+  `guards-installed` doctor entry, and how one pack's file shadows another's.
+- [Items and the record](items.md): the items whose fields the record class
+  guards, and the timeline fleet's own verbs write on them.
+- [The controller and seats](seats.md): the sessions the controller starts,
+  and the `FLEET_BIN` each one carries.
+- [The agent contract](agent.md): the agent adapter whose `[hook]` table a
+  guard reads through.
+- [Exit codes and conventions](conventions.md): the exit table, and why items
+  are named by their full id.

@@ -1,8 +1,8 @@
-//! R2 and R17 — the layers and the shadow surface, over real folders.
+//! The layers and the shadow surface, over real folders.
 
 mod common;
 
-use common::{bundled_tiny, bundled_ts, Defaults, Fixture};
+use common::{fixture_tiny, fixture_ts, Defaults, Fixture};
 use fleet_core::resolve::{Layer, Refusal};
 use fleet_core::{registry, resolve};
 
@@ -90,10 +90,17 @@ fn agent_names_unique_across_layers_resolve() {
     );
 }
 
+/// A chain: `top` imports `middle`, which declares an import of its own. The
+/// refusal names the pack in the middle and the pack that imports it, and never
+/// the one on top, whose import is what a layering is for.
 #[test]
 fn a_listed_import_declaring_its_own_import_is_refused_by_name() {
     let top = Fixture::new("trans-top");
-    top.manifest("top");
+    top.file(
+        "pack.toml",
+        "[pack]\nname = \"top\"\nversion = \"1\"\nschema = 3\n\n\
+         [imports.middle]\nsource = \"git@example:middle\"\nversion = \"^1\"\n",
+    );
     let middle = Fixture::new("trans-middle");
     middle.file(
         "pack.toml",
@@ -108,8 +115,48 @@ fn a_listed_import_declaring_its_own_import_is_refused_by_name() {
         vec![Refusal::TransitiveImport {
             layer: "middle".into(),
             import: "deeper".into(),
+            importers: vec!["top".into()],
         }]
     );
+    assert_eq!(
+        refusals[0].to_string(),
+        "layer `middle` declares its own import `deeper` and is imported by `top` — \
+         imports are one level deep"
+    );
+}
+
+/// fleet-6oc: a layer BELOW the top that declares an import is not a chain
+/// when nothing above it imports it. The store's pack and the agent's pack
+/// both import the runtime, neither imports the other, and whichever of the
+/// two sits higher, the three resolve.
+#[test]
+fn two_packs_importing_one_pack_resolve_whichever_sits_higher() {
+    let store = Fixture::new("two-bd");
+    store.file(
+        "pack.toml",
+        "[pack]\nname = \"bd\"\nversion = \"1\"\nschema = 3\n\n\
+         [imports.ts]\nsource = \"../../../runtimes/ts\"\nversion = \"1\"\n",
+    );
+    let agent = Fixture::new("two-coder");
+    agent.file(
+        "pack.toml",
+        "[pack]\nname = \"coder\"\nversion = \"1\"\nschema = 3\n\n\
+         [imports.ts]\nsource = \"../../../runtimes/ts\"\nversion = \"1\"\n",
+    );
+    let runtime = Fixture::new("two-ts");
+    runtime.manifest("ts");
+
+    for order in [
+        [("bd", &store), ("coder", &agent), ("ts", &runtime)],
+        [("coder", &agent), ("bd", &store), ("ts", &runtime)],
+    ] {
+        resolve::resolve(&layers(&order)).unwrap_or_else(|refusals| {
+            panic!(
+                "{:?} resolve: {refusals:?}",
+                order.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+            )
+        });
+    }
 }
 
 #[test]
@@ -298,6 +345,132 @@ fn ordered_puts_every_pack_before_what_it_imports() {
     );
 }
 
+/// fleet-6oc: every pack nothing imports sits above every pack one of them
+/// imports, so a pack's NAME moves it only among the packs of its own kind.
+/// With tiny importing ts, `abc` and `zed` both land above ts — never one
+/// above tiny and the other beneath the runtime.
+#[test]
+fn ordered_lays_every_pack_nothing_imports_above_every_pack_imported() {
+    for (name, wanted) in [
+        ("abc", ["abc", "tiny", "ts"]),
+        ("zed", ["tiny", "zed", "ts"]),
+    ] {
+        let dir = Fixture::new(&format!("tiers-{name}"));
+        pack_in(&dir, "tiny", &["ts"]);
+        pack_in(&dir, "ts", &[]);
+        pack_in(&dir, name, &[]);
+        assert_eq!(
+            names_of(resolve::ordered(resolve::installed(&dir.root)).expect("no cycle")),
+            wanted.map(String::from).to_vec(),
+            "{name} sits among the packs nothing imports"
+        );
+    }
+}
+
+/// fleet-6oc's arm on the resolution itself: whatever a third pack is called,
+/// and whether it imports ts or nothing, it resolves beside tiny over the
+/// defaults. Before this, `abc` took the top and pushed tiny down, and the
+/// refusal named tiny for an import it had always declared.
+#[test]
+fn a_third_pack_resolves_the_same_whatever_its_name_and_whatever_it_imports() {
+    for name in ["abc", "zed"] {
+        for imports in [&[][..], &["ts"][..]] {
+            let dir = Fixture::new(&format!("named-{name}-{}", imports.len()));
+            pack_in(&dir, "tiny", &["ts"]);
+            pack_in(&dir, "ts", &[]);
+            pack_in(&dir, name, imports);
+            let held = Defaults::new("bottom");
+            let layers = resolve::layers(&dir.root, held.path())
+                .unwrap_or_else(|r| panic!("{name} importing {imports:?} orders: {r:?}"));
+            resolve::resolve(&layers)
+                .unwrap_or_else(|r| panic!("{name} importing {imports:?} resolves: {r:?}"));
+        }
+    }
+}
+
+/// fleet-6oc's fleet: the store's pack, the agent's pack and tiny, each
+/// importing ts, placed straight into a packs directory. The one reading every
+/// verb makes of it — `fleet prime`'s through [`resolve::layers`], and the
+/// brief's, dispatch's and run's through `Packs::under` — resolves, with the
+/// runtime beneath all three.
+#[test]
+fn three_packs_importing_one_runtime_resolve_for_every_verb() {
+    let held = Defaults::new("three");
+    let dir = Fixture::new("three-packs");
+    for name in ["tiny", "coder", "bd"] {
+        pack_in(&dir, name, &["ts"]);
+    }
+    pack_in(&dir, "ts", &[]);
+    let packs = &dir.root;
+
+    let layers = resolve::layers(packs, held.path()).expect("no cycle");
+    assert_eq!(
+        names_of(layers.clone()),
+        vec!["bd", "coder", "tiny", "ts", fleet_core::defaults::LAYER]
+    );
+    resolve::resolve(&layers).expect("the layering resolves");
+    fleet_core::item::brief::Packs::under(packs, held.path())
+        .unwrap_or_else(|stop| panic!("the packs every verb reads resolve: {stop:?}"));
+}
+
+/// A genuine chain is refused whatever the packs are called: `top` imports
+/// `middle`, which imports `bottom`, beside a pack named to sort before all
+/// three. The refusal names the pack in the middle and the one importing it,
+/// and nothing else — the bystander and the top are not blamed.
+#[test]
+fn a_chain_is_refused_naming_the_middle_pack_whatever_the_names() {
+    for (top, middle, bottom) in [("abc", "mid", "zed"), ("zed", "mid", "abc")] {
+        let dir = Fixture::new(&format!("chain-{top}"));
+        pack_in(&dir, "aaa", &[]);
+        pack_in(&dir, top, &[middle]);
+        pack_in(&dir, middle, &[bottom]);
+        pack_in(&dir, bottom, &[]);
+        let held = Defaults::new("bottom");
+
+        let refusals = resolve::resolve(
+            &resolve::layers(&dir.root, held.path()).expect("a chain is not a cycle"),
+        )
+        .expect_err("imports are one level deep");
+        assert_eq!(
+            refusals,
+            vec![Refusal::TransitiveImport {
+                layer: middle.into(),
+                import: bottom.into(),
+                importers: vec![top.into()],
+            }],
+            "{top} -> {middle} -> {bottom}"
+        );
+    }
+}
+
+/// A manifest that does not parse, on a pack nothing imports, is not the
+/// import rule's to refuse — whatever the pack is called, where the rule once
+/// read every manifest but the top one's. On a pack something imports it is
+/// refused by name: that pack cannot show it declares no import of its own.
+#[test]
+fn an_unparsable_manifest_is_refused_only_on_a_pack_something_imports() {
+    for name in ["abc", "zed"] {
+        let dir = Fixture::new(&format!("broken-{name}"));
+        pack_in(&dir, "tiny", &["ts"]);
+        pack_in(&dir, "ts", &[]);
+        dir.file(&format!("{name}/pack.toml"), "[pack\nname = \n");
+        let held = Defaults::new("bottom");
+        resolve::resolve(&resolve::layers(&dir.root, held.path()).expect("no cycle"))
+            .unwrap_or_else(|r| panic!("a broken {name} nothing imports resolves: {r:?}"));
+    }
+
+    let dir = Fixture::new("broken-imported");
+    pack_in(&dir, "tiny", &["ts"]);
+    dir.file("ts/pack.toml", "[pack\nname = \n");
+    let held = Defaults::new("bottom");
+    let refusals = resolve::resolve(&resolve::layers(&dir.root, held.path()).expect("no cycle"))
+        .expect_err("an import whose manifest cannot be read");
+    assert!(
+        matches!(refusals.as_slice(), [Refusal::Manifest { layer, .. }] if layer == "ts"),
+        "{refusals:?}"
+    );
+}
+
 /// The bottom layer is the caller's to append and never `ordered`'s to sort —
 /// and a pack that takes its NAME is refused by `resolve`, because a resolution
 /// names the layer carrying each path by name and two layers under one name
@@ -395,32 +568,71 @@ fn a_slot_path_resolves_to_the_file_the_highest_layer_carries() {
     );
 }
 
-/// The doctrine pack over the binary's defaults, resolved as two layers:
-/// nothing refuses, the doctrine pack carries the every-turn rules it shadows,
-/// and the defaults still carry the brief template nobody has shadowed. Read
-/// off the tree rather than from fixtures, so a registry entry withdrawn from
-/// the defaults reds this rather than passing against a copy. The third shipped
-/// pack, and the layering a real fleet installs both as, is the arm after this
-/// one.
+/// Two packs a file browser has opened both carry a `.DS_Store` in the same
+/// slot. Neither file is part of either pack, so neither resolves and neither
+/// shadows the other.
 #[test]
-fn the_doctrine_pack_over_the_defaults_alone_resolves() {
-    let tiny = bundled_tiny();
+fn os_litter_in_two_layers_neither_resolves_nor_shadows() {
+    let top = Fixture::new("litter-top");
+    top.manifest("top").file("assets/brief.md", "the top\n");
+    let bottom = Fixture::new("litter-bottom");
+    bottom
+        .manifest("bottom")
+        .file("assets/rules.md", "the rules\n");
+    for fixture in [&top, &bottom] {
+        std::fs::write(
+            fixture.path("assets/.DS_Store"),
+            b"\x00\x00\x00\x01Bud1\xff",
+        )
+        .expect("the litter is written");
+    }
+
+    let layers = layers(&[("top", &top), ("bottom", &bottom)]);
+    let resolution = resolve::resolve(&layers).expect("two littered layers resolve");
+    assert_eq!(
+        resolution.files.keys().collect::<Vec<_>>(),
+        vec!["assets/brief.md", "assets/rules.md"],
+        "the resolution carries each pack's own files and nothing else"
+    );
+    assert!(
+        resolution.shadowed.is_empty(),
+        "and the two copies of the litter are no shadow: {:?}",
+        resolution.shadowed
+    );
+}
+
+/// The fixture shaped as the doctrine pack over the binary's defaults,
+/// resolved as two layers: nothing refuses, the pack carries the every-turn
+/// rules it shadows, and the defaults still carry the brief template nobody
+/// has shadowed. The bottom layer is the binary's own set and not a fixture,
+/// so a registry entry withdrawn from the defaults for any of the four paths
+/// the pack shadows reds this rather than passing against a copy. The runtime
+/// pack beneath it, and the layering a fleet installs the two as, is the arm
+/// after this one.
+#[test]
+fn the_doctrine_shaped_pack_over_the_defaults_alone_resolves() {
+    let tiny = fixture_tiny();
     let held = Defaults::new("bottom");
     let bottom = held.path();
     let layers = vec![Layer::new("tiny", tiny.clone()), Layer::defaults(bottom)];
 
     let resolution = resolve::resolve(&layers)
-        .expect("the shipped layering resolves: the registry permits what tiny shadows");
+        .expect("the layering resolves: the registry permits what tiny shadows");
 
     assert_eq!(
         resolution.files.get("assets/rules.md").map(String::as_str),
         Some("tiny"),
-        "the doctrine pack carries the every-turn rules"
+        "the pack carries the every-turn rules"
     );
     assert_eq!(
         resolution.files.get("assets/brief.md").map(String::as_str),
         Some(fleet_core::defaults::LAYER),
         "and the defaults still carry the brief template, which nothing shadows"
+    );
+    assert_eq!(
+        resolution.files.get("overlay/seat.md").map(String::as_str),
+        Some("tiny"),
+        "the pack's overlay is its own, and no defaults' file it shadows"
     );
     assert_eq!(
         resolve::slot_path(&resolution, &layers, "assets/rules.md"),
@@ -443,31 +655,34 @@ fn the_doctrine_pack_over_the_defaults_alone_resolves() {
             "assets/rules.md",
             "doctor/guards-installed/doctor.toml",
             "doctor/guards-installed/run.sh",
-            "overlay/per-provider/claude/hooks.json",
         ],
         "every shadowed path is one the pack means to shadow, and no other: the \
-         rules file, and the three that wire and report on the two guard classes \
-         this pack adds"
+         rules file, and the two that report on the two guard classes this pack \
+         adds"
     );
 }
 
-/// The two shipped packs, as `installed` reads them off the tree and `ordered`
-/// lays them, over the binary's own defaults: tiny over ts, because tiny
-/// imports ts and ts imports nothing, and the defaults appended under both by
-/// the caller. tiny's import resolves to the ts folder beside it, the layering
-/// resolves with nothing refused, the doctor instance ts adds is carried by ts
-/// alone, and the shadow list is the doctrine pack's unchanged — so the middle
-/// layer adds a file and shadows none.
+/// The two fixture packs, as `installed` reads them off a packs directory and
+/// `ordered` lays them, over the binary's own defaults: tiny over ts, because
+/// tiny imports ts and ts imports nothing, and the defaults appended under both
+/// by the caller. tiny's import resolves to the ts folder beside it, the
+/// layering resolves with nothing refused, the doctor instance ts adds is
+/// carried by ts alone, and the shadow list is the doctrine-shaped pack's
+/// unchanged — so the middle layer adds a file and shadows none.
 #[test]
-fn the_shipped_packs_order_tiny_over_ts_over_the_defaults_and_resolve() {
-    let installed = resolve::installed(&common::workspace().join("packs"));
-    let mut ordered = resolve::ordered(installed).expect("the shipped packs order without a cycle");
+fn a_pack_and_its_import_order_tiny_over_ts_over_the_defaults_and_resolve() {
+    let packs_dir = fixture_tiny()
+        .parent()
+        .expect("the fixtures sit in one packs directory")
+        .to_path_buf();
+    let installed = resolve::installed(&packs_dir);
+    let mut ordered = resolve::ordered(installed).expect("the two packs order without a cycle");
     let held = Defaults::new("bottom");
     ordered.push(Layer::defaults(held.path()));
     let names: Vec<&str> = ordered.iter().map(|l| l.name.as_str()).collect();
     assert_eq!(names, vec!["tiny", "ts", fleet_core::defaults::LAYER]);
 
-    let tiny = std::fs::read_to_string(bundled_tiny().join(fleet_core::pack::MANIFEST))
+    let tiny = std::fs::read_to_string(fixture_tiny().join(fleet_core::pack::MANIFEST))
         .expect("tiny's manifest is readable");
     let manifest = fleet_core::pack::parse_manifest(&tiny).expect("tiny's manifest parses");
     let import = manifest
@@ -476,16 +691,16 @@ fn the_shipped_packs_order_tiny_over_ts_over_the_defaults_and_resolve() {
         .find(|i| i.name == "ts")
         .expect("tiny imports ts");
     assert_eq!(
-        bundled_tiny()
+        fixture_tiny()
             .join(&import.source)
             .canonicalize()
             .expect("the import's source is a folder beside tiny"),
-        bundled_ts()
+        fixture_ts()
             .canonicalize()
             .expect("the ts pack is a folder"),
-        "the import's source names the shipped ts folder"
+        "the import's source names the ts folder beside it"
     );
-    let ts = std::fs::read_to_string(bundled_ts().join(fleet_core::pack::MANIFEST))
+    let ts = std::fs::read_to_string(fixture_ts().join(fleet_core::pack::MANIFEST))
         .expect("ts's manifest is readable");
     let ts = fleet_core::pack::parse_manifest(&ts).expect("ts's manifest parses");
     assert_eq!(
@@ -493,7 +708,7 @@ fn the_shipped_packs_order_tiny_over_ts_over_the_defaults_and_resolve() {
         "the import pins the version ts declares"
     );
 
-    let resolution = resolve::resolve(&ordered).expect("the three-layer shipped layering resolves");
+    let resolution = resolve::resolve(&ordered).expect("the three-layer layering resolves");
     assert_eq!(
         resolution
             .files
@@ -520,8 +735,7 @@ fn the_shipped_packs_order_tiny_over_ts_over_the_defaults_and_resolve() {
             "assets/rules.md",
             "doctor/guards-installed/doctor.toml",
             "doctor/guards-installed/run.sh",
-            "overlay/per-provider/claude/hooks.json",
         ],
-        "the middle layer shadows nothing: the list is the doctrine pack's alone"
+        "the middle layer shadows nothing: the list is the doctrine-shaped pack's alone"
     );
 }

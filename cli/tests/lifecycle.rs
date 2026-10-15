@@ -1,5 +1,4 @@
-//! `fleet create`, `fleet start` and `fleet stop` through the shipped binary
-//! (PRD R1–R4, R28, R33; cli PRD § Lifecycle).
+//! `fleet create`, `fleet start` and `fleet stop` through the shipped binary.
 //!
 //! One rig per arm: its own scratch project, its own HOME, its own machine
 //! directory, and its own stub for the platform's service manager. NOTHING HERE
@@ -13,6 +12,7 @@
 
 use fleet_controller::events::EventLog;
 use fleet_controller::runs;
+use fleet_core::seat::identity::{self, MachineIdentity, SeatId};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -21,18 +21,50 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::hermetic::Hermetic;
+use common::hermetic::{FLEET_DIR, FLEET_HOME, XDG_CONFIG_HOME, XDG_STATE_HOME};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-/// The one agent name the adapters answer to.
-const AGENT: &str = "claude_code";
+/// The agent `fleet create` installs a pack for by default, and the name the
+/// file it writes gives `[agent] adapter`: fleet-packs'
+/// `adapters/agent/<this>`, carried here by the rig's own checkout.
+const AGENT: &str = fleet_core::agent::DEFAULT_AGENT_ADAPTER;
 
-/// What `fleet create --embedded` writes, byte for byte.
-const EMBEDDED: &str = "\
+/// The store pack `fleet create` installs by default, and the name the file
+/// it writes gives `[store] adapter`: fleet-packs' `adapters/store/<this>`.
+const STORE: &str = fleet_core::store::DEFAULT_ADAPTER;
+
+/// Seat ids written out by hand, so a row's `<slug>-<short>` name is read
+/// against a spelling this suite fixed and not one it computed. They share
+/// their first eight characters the way ids minted in one minute do, and each
+/// ends in its own eight — the short id.
+const SEAT_A: &str = "01a0d1f1-0aec-765f-9abe-d4f993b9739a";
+const SEAT_B: &str = "01a0d1f1-0aec-765f-9abe-5c21e8a04b17";
+const SEAT_C: &str = "01a0d1f1-0aec-765f-9abe-0f3b6d2c8e44";
+const SEAT_H: &str = "01a0d1f1-0aec-765f-9abe-7a9e1c4f05d2";
+/// A transient seat's row, and a row whose seat has left the table.
+const SPAWNED: &str = "01a0d1f1-0aec-765f-9abe-00002f6d1a93";
+const GONE: &str = "01a0d1f1-0aec-765f-9abe-0000000a90e5";
+
+/// The model the rig's agent pack names as its default: the agent stub's own
+/// answer, read after the install and carried by the example seat row.
+fn model() -> String {
+    fleet_controller::test_support::Answers::default()
+        .capabilities
+        .default_model
+}
+
+/// What `fleet create --embedded` writes, byte for byte, with the model the
+/// installed adapter names in the example row, or no model line at all.
+fn embedded_with(model: Option<&str>) -> String {
+    let model = model
+        .map(|model| format!("#   model = \"{model}\"\n"))
+        .unwrap_or_default();
+    format!(
+        "\
 # This fleet is EMBEDDED: this file is its policy and it sits at the
 # project's root, so the fleet and the project are one directory.
-# Its agent is `claude_code`.
-# Written by `fleet create --embedded --agent claude_code`.
+# Written by `fleet create --embedded --agent {AGENT} --store none`.
 #
 # Every key the controller defaults is left out on purpose. Add one here
 # to override it for this fleet.
@@ -46,17 +78,38 @@ record.enabled = true
 [telemetry]
 enabled = false
 
-# One table per seat, rendered into the machine's seat list by
-# `fleet start`. A row looks like this:
+# The agent every seat of this fleet runs on: the agent adapter an
+# installed pack carries under this name.
+[agent]
+adapter = \"{AGENT}\"
+
+# One table per seat, keyed by the seat's id. fleet seat add writes them
+# and fleet start renders the agent seats into the machine's seat list.
+# A row looks like this:
 #
-#   [seats.a-seat]
-#   model = \"claude-opus-5\"
-#   chosen_name = \"what a person calls it\"
-#   status = \"active\"
+#   [seats.01a0d1f1-0aec-765f-9abe-d4f993b9739a]
+#   kind = \"agent\"
+#   name = \"what a person calls it\"
+{model}#   status = \"active\"
 [seats]
-";
+"
+    )
+}
+
+/// What `fleet create --embedded` writes, byte for byte.
+fn embedded() -> String {
+    embedded_with(Some(&model()))
+}
+
+/// The embedded file once `create` has listed its creator: [`embedded`] and
+/// one human table after it, keyed by the machine's identity.
+fn embedded_listing(id: &SeatId) -> String {
+    format!("{}\n[seats.{id}]\nkind = \"human\"\n", embedded())
+}
 
 /// What `fleet create --standalone` writes, byte for byte, for one project.
+/// The header names no `--agent` though the call carried one: the agent is
+/// the fleet's, and a project declared to it records none.
 fn standalone_text(name: &str, item_prefix: Option<&str>, root: &Path, worktrees: &Path) -> String {
     let prefix = match item_prefix {
         Some(prefix) => format!("item_prefix = \"{prefix}\"\n"),
@@ -64,7 +117,7 @@ fn standalone_text(name: &str, item_prefix: Option<&str>, root: &Path, worktrees
     };
     format!(
         "# This project is declared to the STANDALONE fleet this machine runs.\n\
-         # Written by `fleet create --standalone --agent claude_code`.\n\
+         # Written by `fleet create --standalone --store none`.\n\
          \n\
          [project]\n\
          name = \"{name}\"\n\
@@ -72,10 +125,11 @@ fn standalone_text(name: &str, item_prefix: Option<&str>, root: &Path, worktrees
          primary = \"{root}\"\n\
          worktrees = \"{worktrees}\"\n\
          \n\
-         # Owed, and left for the person: a landing gates on the project's own\n\
-         # suite, and a suite this file guessed would gate on nothing.\n\
-         [gates]\n\
-         # suite = \"the command a landing runs\"\n\
+         # Owed, and left for the person: a marker this file guessed would\n\
+         # skip a pipeline nobody chose to skip. The test commands are not set\n\
+         # here — a workflow hands them to the landing; for takeoff they are\n\
+         # takeoff.test and takeoff.touched under [packs.tiny] in fleet.toml.\n\
+         [landing]\n\
          # ci_marker = \"the marker a landing's commit carries\"\n",
         root = root.display(),
         worktrees = worktrees.display(),
@@ -123,6 +177,14 @@ fn code(out: &Output) -> i32 {
         .expect("the binary exited rather than died")
 }
 
+/// Whether a service file tells the service `machine` as FLEET_DIR, in either
+/// platform's spelling.
+fn sets_fleet_dir(text: &str, machine: &Path) -> bool {
+    let dir = machine.display().to_string();
+    text.contains(&format!("<key>FLEET_DIR</key>\n    <string>{dir}</string>"))
+        || text.contains(&format!("Environment=\"FLEET_DIR={dir}\"\n"))
+}
+
 fn write(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).expect("the fixture directory is made");
@@ -147,7 +209,9 @@ struct Rig {
     manager: PathBuf,
     argv: PathBuf,
     pid: PathBuf,
-    agent: PathBuf,
+    /// The rig's own fleet-packs checkout, which every embedded `create` here
+    /// installs the agent's pack from.
+    packs: String,
 }
 
 impl Rig {
@@ -171,7 +235,7 @@ impl Rig {
             manager: root.join("manager.sh"),
             argv: root.join("manager-argv"),
             pid: root.join("manager-pid"),
-            agent: root.join("agent.sh"),
+            packs: common::packs_checkout(&root),
             root,
         };
         for dir in [&rig.project, &rig.home] {
@@ -181,11 +245,10 @@ impl Rig {
         // A store that is already there, so the arm that says this verb never
         // touches one has a subject to read.
         write(
-            &rig.project.join(".beads/config.yaml"),
+            &rig.project.join(".tracker/config.yaml"),
             "# the project's own store config\nissue-prefix: ap\n",
         );
         rig.a_manager();
-        rig.an_agent();
         rig
     }
 
@@ -223,7 +286,7 @@ impl Rig {
              \x20 if [ -f \"$stream\" ]; then n=$(awk 'END{{print NR+1}}' \"$stream\"); else n=1; fi\n\
              \x20 mkdir -p {machine}\n\
              \x20 printf '{{\"id\":\"stub-%s\",\"seq\":%s,\"ts\":\"2026-09-12T00:00:00Z\",\
-             \"type\":\"%s\",\"actor\":\"controller\",\"payload\":{{}}}}\\n' \"$n\" \"$n\" \"$1\" \
+             \"type\":\"%s\",\"actor\":{{\"kind\":\"controller\",\"id\":\"a-machine\"}},\"payload\":{{}}}}\\n' \"$n\" \"$n\" \"$1\" \
              >> \"$stream\"\n\
              }}\n\
              verb=$1\n\
@@ -257,10 +320,50 @@ impl Rig {
         write(&self.pid, "");
     }
 
-    /// The agent binary, which `start` resolves and never runs here.
-    fn an_agent(&self) {
-        write(&self.agent, "#!/bin/sh\nexit 0\n");
-        executable(&self.agent);
+    /// The rig's checkout laid out as fleet-packs is, for `--packs-from`:
+    /// [`common::packs_checkout`]'s, carrying the default store pack, the
+    /// runtime pack it imports and the default agent pack.
+    fn a_packs_checkout(&self) -> String {
+        self.packs.clone()
+    }
+
+    /// The call every arm not about the questions creates its embedded fleet
+    /// with: every answer scripted, no store pack, and the agent's pack from
+    /// the rig's own checkout, so no call reaches the published source.
+    fn embedded(&self) -> [&str; 8] {
+        [
+            "create",
+            "--embedded",
+            "--agent",
+            AGENT,
+            "--store",
+            "none",
+            "--packs-from",
+            &self.packs,
+        ]
+    }
+
+    /// The agent's pack `create` installed, taken back out: the fleet's file
+    /// still names it, and no pack carries the name.
+    fn without_the_agent_pack(&self) -> &Rig {
+        std::fs::remove_dir_all(self.machine.join("packs").join(AGENT))
+            .expect("the agent's pack was installed by create");
+        self
+    }
+
+    /// The fleet's file with `[agent] adapter` naming `value` in place of the
+    /// name `create` wrote, or with no `[agent]` table at all for `None`.
+    fn agent_is(&self, value: Option<&str>) -> &Rig {
+        let path = self.project.join("fleet.toml");
+        let body = std::fs::read_to_string(&path).expect("the policy is there");
+        let written = format!("[agent]\nadapter = \"{AGENT}\"\n");
+        assert!(body.contains(&written), "create wrote the key: {body}");
+        let now = match value {
+            Some(value) => format!("[agent]\nadapter = {value:?}\n"),
+            None => String::new(),
+        };
+        write(&path, &body.replace(&written, &now));
+        self
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -273,14 +376,42 @@ impl Rig {
     fn envs(&self, command: &mut Command) {
         command
             .current_dir(&self.project)
-            .hermetic(&self.home, &self.machine, Some(&self.agent))
+            .hermetic(&self.home, &self.machine)
             .env("FLEET_SERVICE_BIN", &self.manager)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            // NO NETWORK: `create` fetches the agent's pack and a store's
+            // with git, and an arm that forgot `--packs-from` would reach the
+            // pinned source over https. Local paths are git's `file`
+            // transport, and nothing else is let through.
+            .env("GIT_ALLOW_PROTOCOL", "file");
     }
 
     fn run(&self, args: &[&str]) -> Output {
         self.command(args).output().expect("the built binary runs")
+    }
+
+    /// A rig whose machine directory is `pick(&rig)` rather than the block's
+    /// own, for an arm that starts with no FLEET_DIR and lets the call resolve
+    /// it. The manager stub is written again: it bakes in the stream it
+    /// appends to.
+    fn resolving_to(label: &str, pick: impl Fn(&Rig) -> PathBuf) -> Rig {
+        let mut rig = Rig::new(label);
+        rig.machine = pick(&rig);
+        rig.a_manager();
+        rig
+    }
+
+    /// The call with `set` put on and `removed` taken out, after the block.
+    fn run_in_env(&self, args: &[&str], set: &[(&str, &Path)], removed: &[&str]) -> Output {
+        let mut command = self.command(args);
+        for (name, value) in set {
+            command.env(name, value);
+        }
+        for name in removed {
+            command.env_remove(name);
+        }
+        command.output().expect("the built binary runs")
     }
 
     /// The verb on a pseudo-terminal, with `keys` typed at it.
@@ -374,9 +505,16 @@ impl Rig {
 
     /// The fleet created, so an arm about `start` does not re-assert `create`.
     fn created(&self) -> &Rig {
-        let out = self.run(&["create", "--embedded", "--agent", AGENT]);
+        let out = self.run(&self.embedded());
         assert_eq!(code(&out), 0, "create: {}", stderr(&out));
         self
+    }
+
+    /// The identity `create` minted in this rig's machine directory.
+    fn identity(&self) -> MachineIdentity {
+        identity::read_identity(&self.machine)
+            .expect("identity.toml reads")
+            .expect("identity.toml is there")
     }
 
     /// The policy file with one more line in it.
@@ -440,7 +578,7 @@ fn until(what: &str, deadline: Duration, mut ready: impl FnMut() -> bool) {
 fn create_refuses_a_fleet_that_is_already_here_and_a_dot_fleet_that_is_not_a_project() {
     let rig = Rig::new("refusals");
     write(&rig.project.join("fleet.toml"), "[controller]\n");
-    let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
+    let out = rig.run(&rig.embedded());
     assert_eq!(code(&out), 1, "{}", stderr(&out));
     assert!(
         stderr(&out).contains(&rig.project.join("fleet.toml").display().to_string()),
@@ -451,7 +589,7 @@ fn create_refuses_a_fleet_that_is_already_here_and_a_dot_fleet_that_is_not_a_pro
 
     // A `.fleet/` with no declaration in it is somebody else's directory.
     std::fs::create_dir_all(rig.project.join(".fleet/elsewhere")).unwrap();
-    let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
+    let out = rig.run(&rig.embedded());
     assert_eq!(code(&out), 1, "{}", stderr(&out));
     assert!(
         stderr(&out).contains(&rig.project.join(".fleet").display().to_string()),
@@ -471,24 +609,48 @@ fn create_refuses_a_fleet_that_is_already_here_and_a_dot_fleet_that_is_not_a_pro
         &rig.project.join(".fleet/project.toml"),
         "[project]\nname = \"a-project\"\n",
     );
-    let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
+    let out = rig.run(&rig.embedded());
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 }
 
+/// A name `create` installs no agent pack for is a usage refusal naming the
+/// ones it does, before any question and before anything is written — and
+/// [`AGENT`] with an underscore for its dash is such a name: there is one
+/// spelling (ruling 17).
 #[test]
 fn create_refuses_an_agent_no_adapter_answers_to() {
     let rig = Rig::new("agent");
-    let out = rig.run(&["create", "--embedded", "--agent", "not-an-agent"]);
+    let underscored = AGENT.replace('-', "_");
+    for named in ["not-an-agent", underscored.as_str()] {
+        let out = rig.run(&[
+            "create",
+            "--embedded",
+            "--agent",
+            named,
+            "--packs-from",
+            &rig.packs,
+        ]);
+        assert_eq!(code(&out), 2, "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains(&format!(
+                "no agent pack answers to `{named}` — this fleet installs {AGENT}"
+            )),
+            "it names what is known: {}",
+            stderr(&out)
+        );
+    }
+    // Before any question: a pipe with no mode answered meets the agent's
+    // refusal, not the mode's.
+    let out = rig.run(&["create", "--agent", &underscored]);
     assert_eq!(code(&out), 2, "{}", stderr(&out));
-    assert!(stderr(&out).contains("not-an-agent"), "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains(AGENT),
-        "it names what is known: {}",
-        stderr(&out)
-    );
+    assert!(stderr(&out).contains(&underscored), "{}", stderr(&out));
     assert!(
         !rig.project.join("fleet.toml").exists(),
         "nothing was written"
+    );
+    assert!(
+        !rig.machine.join("packs.lock").exists(),
+        "nothing was pinned"
     );
 }
 
@@ -497,7 +659,14 @@ fn create_refuses_an_agent_no_adapter_answers_to() {
 #[test]
 fn create_refuses_standalone_with_no_fleet_on_the_machine_and_names_start() {
     let rig = Rig::new("standalone-alone");
-    let out = rig.run(&["create", "--standalone", "--agent", AGENT]);
+    let out = rig.run(&[
+        "create",
+        "--standalone",
+        "--agent",
+        AGENT,
+        "--store",
+        "none",
+    ]);
     assert_eq!(code(&out), 1, "{}", stderr(&out));
     assert!(stderr(&out).contains("fleet start"), "{}", stderr(&out));
     assert!(
@@ -521,6 +690,8 @@ fn create_refuses_a_fleet_flag_whose_directory_holds_no_policy_file() {
         "--standalone",
         "--agent",
         AGENT,
+        "--store",
+        "none",
         "--fleet",
         &nowhere.display().to_string(),
     ]);
@@ -554,14 +725,17 @@ fn create_standalone_names_the_fleet_and_one_start_renders_the_seat() {
     let fleet = rig.root.join("the-fleet");
     std::fs::create_dir_all(&fleet).expect("the fleet's own directory is made");
     let out = rig
-        .command(&["create", "--embedded", "--agent", AGENT])
+        .command(&rig.embedded())
         .current_dir(&fleet)
         .output()
         .expect("the built binary runs");
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let policy = fleet.join("fleet.toml");
     let body = std::fs::read_to_string(&policy).expect("the policy is there");
-    write(&policy, &format!("{body}\n[seats.one]\n"));
+    write(
+        &policy,
+        &format!("{body}\n[seats.{SEAT_A}]\nkind = \"agent\"\n"),
+    );
     // ACT ONE LEAVES NO SEAT LIST. It is `start` that writes one, and the whole
     // point of this arm is that no start has run.
     assert!(
@@ -575,6 +749,8 @@ fn create_standalone_names_the_fleet_and_one_start_renders_the_seat() {
         "--standalone",
         "--agent",
         AGENT,
+        "--store",
+        "none",
         "--fleet",
         &fleet.display().to_string(),
     ]);
@@ -619,7 +795,9 @@ fn create_standalone_names_the_fleet_and_one_start_renders_the_seat() {
         map.get("a-project").map(ToString::to_string),
         Some(format!(
             "\"{}\"",
-            rig.root.join("a-project-worktrees/one").display()
+            rig.root
+                .join("a-project-worktrees/agent-93b9739a")
+                .display()
         )),
         "the row is keyed on the registered project: {after}"
     );
@@ -654,46 +832,224 @@ fn create_standalone_names_the_fleet_and_one_start_renders_the_seat() {
     );
 }
 
-/// A question put to a pipe is a usage error naming the flag that answers it,
-/// never a wait for an answer that cannot come.
+/// A question put to a pipe is a usage error under the verb's one prefix,
+/// naming every flag that answers it, never a wait for an answer that cannot
+/// come.
 #[test]
-fn create_refuses_a_question_it_cannot_ask_and_names_the_flag() {
+fn create_refuses_a_question_it_cannot_ask_and_names_every_flag() {
     let rig = Rig::new("piped");
     let out = rig.run(&["create"]);
     assert_eq!(code(&out), 2, "{}", stderr(&out));
-    assert!(stderr(&out).contains("--embedded"), "{}", stderr(&out));
-    assert!(stderr(&out).contains("not a terminal"), "{}", stderr(&out));
+    let printed = stderr(&out);
+    assert!(
+        printed.lines().any(|line| line
+            == "fleet create: embedded or standalone? — stdin is not a terminal; \
+                answer it with --embedded or --standalone"),
+        "one prefix, and both flags that answer: {printed}"
+    );
+    assert!(
+        !printed.contains("fleet create: fleet:"),
+        "no second prefix: {printed}"
+    );
 
-    // The mode answered and the agent not: the second question is the one that
-    // refuses, and it names its own flag.
-    let out = rig.run(&["create", "--embedded"]);
-    assert_eq!(code(&out), 2, "{}", stderr(&out));
-    assert!(stderr(&out).contains("--agent"), "{}", stderr(&out));
     assert!(
         !rig.project.join("fleet.toml").exists(),
         "nothing was written"
     );
 }
 
-/// The two questions answered by two Enters, on a real terminal.
+/// THE AGENT IS A QUESTION WITH A DEFAULT, as the store is: no terminal and no
+/// `--agent` takes the first agent rather than being refused. Its pack is
+/// installed from the source `--packs-from` names at the tag this binary
+/// pins, pinned in the lock, and named in the file as `[agent] adapter`; the
+/// header names no `--agent`, because the call carried none and nothing was
+/// asked.
+#[test]
+fn create_with_no_terminal_and_no_agent_takes_the_default_and_installs_its_pack() {
+    let rig = Rig::new("agent-default");
+    let out = rig.run(&[
+        "create",
+        "--embedded",
+        "--store",
+        "none",
+        "--packs-from",
+        &rig.packs,
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 0, "{said}");
+
+    let pin = fleet_core::supported::PINNED_PACKS;
+    let source = format!("{}//adapters/agent/{AGENT}", rig.packs);
+    let lines = locked(&rig.machine);
+    let (_, version, commit) = lines
+        .iter()
+        .find(|(held, _, _)| *held == source)
+        .unwrap_or_else(|| panic!("the lock pins {source}: {lines:?}"))
+        .clone();
+    assert_eq!(version, pin, "pinned at the tag the binary pins");
+    assert!(rig
+        .machine
+        .join("packs")
+        .join(AGENT)
+        .join(format!("adapters/agent/{AGENT}/adapter.toml"))
+        .is_file());
+    assert!(
+        said.contains(&format!(
+            "agent: {AGENT} {pin} at {commit}, installed and pinned — {}",
+            rig.machine.join("packs").join(AGENT).display()
+        )),
+        "{said}"
+    );
+
+    let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
+    assert!(
+        written.contains(&format!("[agent]\nadapter = \"{AGENT}\"\n")),
+        "{written}"
+    );
+    assert!(
+        written.contains("# Written by `fleet create --embedded --store none`.\n"),
+        "{written}"
+    );
+}
+
+/// THE EXAMPLE ROW'S MODEL IS THE ADAPTER'S: read off the installed agent
+/// adapter's capabilities after the install, never a constant of this binary.
+/// The stub's state names another default model here, and that one is written.
 ///
-/// Both rows are the first row, which is what Enter alone takes: a prompt that
+/// RED-PROOF: with the row's model read from anything but the adapter, the
+/// file carries the stub's usual default and not this one.
+#[test]
+fn create_writes_the_model_the_installed_adapter_names_as_its_default() {
+    let rig = Rig::new("agent-model");
+    fleet_controller::test_support::agent_stub::script(&rig.project, |answers| {
+        answers.capabilities.default_model = "quill-large-2".to_string();
+    });
+    let out = rig.run(&rig.embedded());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
+    assert!(
+        written.contains("\n#   model = \"quill-large-2\"\n"),
+        "{written}"
+    );
+    assert_ne!(model(), "quill-large-2", "the arm reads a different model");
+}
+
+/// An agent pack already on the machine is left as it stands, and one whose
+/// adapter does not answer leaves the example row's model OUT rather than
+/// guessing one: the rest of the file is written as ever.
+#[test]
+fn create_leaves_the_example_model_out_where_the_adapter_does_not_answer() {
+    let rig = Rig::new("agent-mute");
+    let pack = rig.machine.join("packs").join(AGENT);
+    let dir = pack.join(format!("adapters/agent/{AGENT}"));
+    write(
+        &pack.join("pack.toml"),
+        &format!("[pack]\nname = \"{AGENT}\"\nversion = \"0.1.0\"\nschema = 3\n"),
+    );
+    write(
+        &dir.join("adapter.toml"),
+        &format!(
+            "[adapter]\nname = \"{AGENT}\"\nkind = \"agent\"\nversion = \"0.1.0\"\n\
+             entry = \"main\"\n"
+        ),
+    );
+    write(&dir.join("main"), "#!/bin/sh\ncat > /dev/null\nexit 3\n");
+    executable(&dir.join("main"));
+
+    let out = rig.run(&rig.embedded());
+    let said = stderr(&out);
+    assert_eq!(code(&out), 0, "{said}");
+    assert!(
+        said.contains(&format!(
+            "agent: {AGENT}, already installed on this machine — left as it stands"
+        )),
+        "{said}"
+    );
+    let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
+    assert_eq!(
+        written,
+        format!(
+            "{}\n[seats.{}]\nkind = \"human\"\n",
+            embedded_with(None),
+            rig.identity().id
+        )
+    );
+}
+
+/// A fetch of the agent's pack that fails — a checkout that carries no tag the
+/// binary pins — refuses with no fleet file written, naming git's reason and
+/// the `fleet pack add` line that installs the pack.
+#[test]
+fn create_refuses_with_no_fleet_written_when_the_agent_pack_cannot_be_fetched() {
+    let rig = Rig::new("agent-unfetched");
+    let untagged = rig.root.join("untagged");
+    write(&untagged.join("README"), "no packs here\n");
+    git(&untagged, &["init", "--quiet", "-b", "main"]);
+    git(&untagged, &["add", "--all"]);
+    git(
+        &untagged,
+        &["commit", "--quiet", "--no-gpg-sign", "-m", "nothing"],
+    );
+    let untagged = untagged.display().to_string();
+
+    let out = rig.run(&[
+        "create",
+        "--embedded",
+        "--agent",
+        AGENT,
+        "--store",
+        "none",
+        "--packs-from",
+        &untagged,
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 1, "{said}");
+    assert!(
+        said.contains(
+            "the agent's pack was not installed, so no fleet file was written: git checkout"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "`fleet pack add {untagged}//adapters/agent/{AGENT} --version {}` installs it",
+            fleet_core::supported::PINNED_PACKS
+        )),
+        "{said}"
+    );
+    assert!(!rig.project.join("fleet.toml").exists(), "no fleet file");
+    assert!(!rig.machine.join("packs").join(AGENT).exists(), "no pack");
+}
+
+/// The three questions answered by three Enters, on a real terminal.
+///
+/// Every row is the first row, which is what Enter alone takes: a prompt that
 /// starts with nothing selected refuses Enter and redraws, and the arm's red is
-/// the timeout below rather than a wrong answer.
+/// the timeout below rather than a wrong answer. The store's first row is the
+/// default store pack and the agent's the default agent's pack, both installed
+/// from the rig's own fleet-packs checkout.
 #[test]
 fn create_takes_the_first_row_of_each_prompt_on_enter_alone() {
     let rig = Rig::new("pty-enter");
-    let (status, seen) = rig.on_a_pty(&["create"], "\n\n");
+    let packs = rig.a_packs_checkout();
+    let (status, seen) = rig.on_a_pty(&["create", "--packs-from", &packs], "\n\n\n");
     assert_eq!(
         status,
         Some(0),
-        "two Enters answer the two questions; the terminal showed:\n{seen}"
+        "three Enters answer the three questions; the terminal showed:\n{seen}"
     );
     assert!(
         seen.contains("embedded or standalone?"),
-        "both questions were asked: {seen}"
+        "every question was asked: {seen}"
     );
-    assert!(seen.contains("which agent?"), "{seen}");
+    // The agent is asked AFTER the store, and its row is the pack's name.
+    let store_at = seen.find("which store?").expect("the store was asked");
+    let agent_at = seen.find("which agent?").expect("the agent was asked");
+    assert!(store_at < agent_at, "the store first: {seen}");
+    assert!(
+        seen.contains(&format!("{AGENT} — installed from fleet-packs")),
+        "{seen}"
+    );
 
     // The first row of the first question is `embedded`, so the embedded file is
     // the one written — the answer is read out of what landed, not out of what
@@ -706,11 +1062,34 @@ fn create_takes_the_first_row_of_each_prompt_on_enter_alone() {
         "the second row was not taken"
     );
 
-    // The first row of the second question is the one agent, and the file
-    // carries it.
+    // The first row of the second question is the default store pack:
+    // installed, and the file naming it.
     assert!(
-        written.contains(&format!("# Its agent is `{AGENT}`.")),
+        written.contains(&format!("[store]\nadapter = \"{STORE}\"\n")),
         "{written}"
+    );
+    assert!(
+        rig.machine
+            .join("packs")
+            .join(STORE)
+            .join("pack.toml")
+            .is_file(),
+        "the store's pack is installed"
+    );
+
+    // The first row of the third is the default agent: its pack installed,
+    // and the file naming it.
+    assert!(
+        written.contains(&format!("[agent]\nadapter = \"{AGENT}\"\n")),
+        "{written}"
+    );
+    assert!(
+        rig.machine
+            .join("packs")
+            .join(AGENT)
+            .join("pack.toml")
+            .is_file(),
+        "the agent's pack is installed"
     );
 }
 
@@ -718,7 +1097,8 @@ fn create_takes_the_first_row_of_each_prompt_on_enter_alone() {
 #[test]
 fn create_writes_a_header_naming_only_the_flags_the_call_carried() {
     let rig = Rig::new("pty-header");
-    let (status, seen) = rig.on_a_pty(&["create"], "\n\n");
+    let packs = rig.a_packs_checkout();
+    let (status, seen) = rig.on_a_pty(&["create", "--packs-from", &packs], "\n\n\n");
     assert_eq!(status, Some(0), "{seen}");
 
     let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
@@ -726,7 +1106,13 @@ fn create_writes_a_header_naming_only_the_flags_the_call_carried() {
         written.contains("# Written by `fleet create`, answered at its prompts."),
         "{written}"
     );
-    for flag in ["--embedded", "--standalone", "--agent"] {
+    for flag in [
+        "--embedded",
+        "--standalone",
+        "--agent",
+        "--store",
+        "--packs-from",
+    ] {
         assert!(
             !written.contains(flag),
             "no flag was passed, so none is named: {flag} in\n{written}"
@@ -736,32 +1122,459 @@ fn create_writes_a_header_naming_only_the_flags_the_call_carried() {
     // The pair: a call that DID carry its flags names them, on the same
     // assertion the arm above makes about their absence.
     let flagged = Rig::new("pty-header-flagged");
-    let out = flagged.run(&["create", "--embedded", "--agent", AGENT]);
+    let out = flagged.run(&flagged.embedded());
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let written = std::fs::read_to_string(flagged.project.join("fleet.toml")).expect("it landed");
+    assert!(
+        written.contains(&format!(
+            "# Written by `fleet create --embedded --agent {AGENT} --store none`."
+        )),
+        "{written}"
+    );
+}
+
+// ---- fleet create: the store's pack (fleet-3krx.1) --------------------------
+
+/// The lines the machine's lock holds, as `(source, version, commit)`.
+fn locked(machine: &Path) -> Vec<(String, String, String)> {
+    fleet_core::lock::read(&machine.join(fleet_core::lock::LOCK))
+        .expect("the lock reads")
+        .into_iter()
+        .map(|line| (line.source, line.version, line.commit))
+        .collect()
+}
+
+/// The `[store] adapter` the project at `root` names in its own file, read the
+/// way the store is opened by.
+fn store_named(root: &Path) -> Option<String> {
+    let policy = fleet_core::store::project_policy(root).expect("the project's file parses");
+    policy
+        .get("store")
+        .and_then(|store| store.get("adapter"))
+        .and_then(|adapter| adapter.as_str())
+        .map(str::to_string)
+}
+
+/// No terminal and no `--store`: the default is taken rather than refused, and
+/// the default is the bd pack — fetched from the source `--packs-from` names at
+/// the tag this binary pins, installed with the runtime pack it imports out of
+/// the same checkout, both pinned in the lock at that tag and commit, and the
+/// file naming the adapter. The header names no `--store`, because the call
+/// carried none.
+#[test]
+fn create_with_no_terminal_installs_the_default_store_pack_and_pins_it() {
+    let rig = Rig::new("store-default");
+    let packs = rig.a_packs_checkout();
+    let out = rig.run(&[
+        "create",
+        "--embedded",
+        "--agent",
+        AGENT,
+        "--packs-from",
+        &packs,
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 0, "{said}");
+
+    let pin = fleet_core::supported::PINNED_PACKS;
+    let store = format!("{packs}//adapters/store/{STORE}");
+    let ts = format!("{packs}//runtimes/ts");
+    let lines = locked(&rig.machine);
+    let line = |source: &str| {
+        lines
+            .iter()
+            .find(|(held, _, _)| held == source)
+            .unwrap_or_else(|| panic!("the lock pins {source}: {lines:?}"))
+            .clone()
+    };
+    let (_, version, commit) = line(&store);
+    assert_eq!(version, pin, "pinned at the tag the binary pins");
+    assert_eq!(commit.len(), 40, "and the commit it resolved to: {commit}");
+    assert_eq!(line(&ts).1, pin, "the import at the same tag");
+    assert_eq!(line(&ts).2, commit, "out of the same checkout");
+    let installed = rig.machine.join("packs").join(STORE);
+    assert!(installed.join("pack.toml").is_file());
+    assert!(installed
+        .join(format!("adapters/store/{STORE}/main.sh"))
+        .is_file());
+    assert!(rig.machine.join("packs/ts/pack.toml").is_file());
+    assert!(
+        rig.machine.join("defaults").is_dir(),
+        "the defaults beneath it, as ever"
+    );
+
+    let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
+    assert_eq!(
+        store_named(&rig.project).as_deref(),
+        Some(STORE),
+        "the file names the store its pack carries: {written}"
+    );
     assert!(
         written.contains(&format!(
             "# Written by `fleet create --embedded --agent {AGENT}`."
         )),
         "{written}"
     );
+    assert!(
+        said.contains(&format!(
+            "store: {STORE} {pin} at {commit}, installed and pinned"
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "store: ts {pin} at {commit}, which {STORE} imports"
+        )),
+        "{said}"
+    );
+
+    // --packs-from SERVES BOTH PACKS: the agent's comes out of the same
+    // checkout, at the same tag and commit, beside the store's.
+    let agent = format!("{packs}//adapters/agent/{AGENT}");
+    assert_eq!(line(&agent).1, pin, "the agent's pack at the same tag");
+    assert_eq!(line(&agent).2, commit, "out of the same checkout");
+    assert!(
+        said.contains(&format!(
+            "agent: {AGENT} {pin} at {commit}, installed and pinned"
+        )),
+        "{said}"
+    );
+    assert!(
+        written.contains(&format!("[agent]\nadapter = \"{AGENT}\"\n")),
+        "{written}"
+    );
+}
+
+/// fleet-6oc: a DEFAULT embedded create over a checkout whose store pack and
+/// agent pack both import ts, as the published two do. Both install beside the
+/// one ts, the file is written naming both, and tiny — a third pack importing
+/// ts — then adds beside them; `prime` reads the four in one layering, the three
+/// importers above the runtime they share. Before, the second importer was
+/// refused for the import it declares, and no file was written.
+#[test]
+fn a_default_create_installs_two_packs_importing_ts_and_tiny_adds_beside_them() {
+    let rig = Rig::new("importers");
+    let packs = rig.a_packs_checkout();
+    let out = rig.run(&["create", "--embedded", "--packs-from", &packs]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
+    assert_eq!(
+        store_named(&rig.project).as_deref(),
+        Some(STORE),
+        "{written}"
+    );
+    assert!(
+        written.contains(&format!("[agent]\nadapter = \"{AGENT}\"\n")),
+        "{written}"
+    );
+    let mut installed: Vec<String> = locked(&rig.machine)
+        .into_iter()
+        .map(|(source, _, _)| source)
+        .collect();
+    installed.sort();
+    assert_eq!(
+        installed,
+        vec![
+            format!("{packs}//adapters/agent/{AGENT}"),
+            format!("{packs}//adapters/store/{STORE}"),
+            format!("{packs}//runtimes/ts"),
+            String::from("embedded:defaults"),
+        ],
+        "both importers and the one runtime they share"
+    );
+
+    let added = rig.run(&[
+        "pack",
+        "add",
+        &format!("{packs}//tiny"),
+        "--version",
+        fleet_core::supported::PINNED_PACKS,
+    ]);
+    assert_eq!(code(&added), 0, "{}", stderr(&added));
+
+    let primed = rig.run(&["prime"]);
+    assert_eq!(code(&primed), 0, "{}", stderr(&primed));
+    let page = stdout(&primed);
+    let line_one = page.lines().next().expect("prime printed a line");
+    assert!(
+        line_one.contains(&format!("packs: {STORE}, {AGENT}, tiny, ts;")),
+        "line 1 names the four, the runtime last: {line_one}"
+    );
+}
+
+/// `--store none`: no store pack fetched, nothing pinned but the defaults, the
+/// agent's pack and the ts it imports, no `[store]` table, and the line that installs the
+/// default store pack later printed with the source this call named and the
+/// tag this binary pins.
+#[test]
+fn create_with_store_none_installs_nothing_and_prints_the_line_that_does() {
+    let rig = Rig::new("store-none");
+    let out = rig.run(&rig.embedded());
+    let said = stderr(&out);
+    assert_eq!(code(&out), 0, "{said}");
+
+    let line = format!(
+        "fleet pack add {}//adapters/store/{STORE} --version {}",
+        rig.packs,
+        fleet_core::supported::PINNED_PACKS
+    );
+    assert!(
+        said.contains(&format!("store: none installed — `{line}` installs one")),
+        "{said}"
+    );
+    let mut sources: Vec<String> = locked(&rig.machine)
+        .into_iter()
+        .map(|(source, _, _)| source)
+        .collect();
+    sources.sort();
+    let mut expected = vec![
+        format!("{}//adapters/agent/{AGENT}", rig.packs),
+        format!("{}//runtimes/ts", rig.packs),
+        fleet_core::defaults::SOURCE.to_string(),
+    ];
+    expected.sort();
+    assert_eq!(
+        sources, expected,
+        "only the defaults, the agent's pack and the ts it imports"
+    );
+    assert!(
+        !rig.machine.join("packs").join(STORE).exists(),
+        "no pack installed"
+    );
+    let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
+    assert!(!written.contains("[store]"), "{written}");
+}
+
+/// The store's scripted answer is refused before any question and before
+/// anything is written: a name no pack is installed for, and `--packs-from`
+/// beside `--standalone --store none`, which would name a source for nothing —
+/// a standalone project installs no agent's pack, the fleet's being the one it
+/// runs on. Beside `--embedded --store none` it serves the agent's pack.
+#[test]
+fn create_refuses_a_store_it_does_not_install_before_anything_is_written() {
+    let rig = Rig::new("store-refused");
+    let out = rig.run(&[
+        "create",
+        "--embedded",
+        "--agent",
+        AGENT,
+        "--store",
+        "sqlite",
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 2, "{said}");
+    assert!(
+        said.contains(&format!(
+            "no store pack answers to `sqlite` — this fleet installs {STORE}, or none"
+        )),
+        "{said}"
+    );
+
+    // A pipe with no mode answered: the store is refused, not the question.
+    let out = rig.run(&["create", "--store", "sqlite"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    assert!(stderr(&out).contains("sqlite"), "{}", stderr(&out));
+
+    let packs = rig.a_packs_checkout();
+    let out = rig.run(&[
+        "create",
+        "--standalone",
+        "--store",
+        "none",
+        "--packs-from",
+        &packs,
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 2, "{said}");
+    assert!(
+        said.contains("--packs-from") && said.contains("a standalone project with --store none"),
+        "{said}"
+    );
+
+    assert!(
+        !rig.project.join("fleet.toml").exists(),
+        "nothing was written"
+    );
+    assert!(
+        !rig.machine.join("packs.lock").exists(),
+        "nothing was pinned"
+    );
+}
+
+/// A fetch that fails — here a checkout that carries no tag the binary pins,
+/// the offline case's stand-in — refuses with no fleet file written, naming
+/// git's reason and `--store none` as the way to create the fleet without it.
+#[test]
+fn create_refuses_with_no_fleet_written_when_the_store_pack_cannot_be_fetched() {
+    let rig = Rig::new("store-unfetched");
+    let untagged = rig.root.join("untagged");
+    write(&untagged.join("README"), "no packs here\n");
+    git(&untagged, &["init", "--quiet", "-b", "main"]);
+    git(&untagged, &["add", "--all"]);
+    git(
+        &untagged,
+        &["commit", "--quiet", "--no-gpg-sign", "-m", "nothing"],
+    );
+
+    let out = rig.run(&[
+        "create",
+        "--embedded",
+        "--agent",
+        AGENT,
+        "--packs-from",
+        &untagged.display().to_string(),
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 1, "{said}");
+    assert!(
+        said.contains(
+            "the store's pack was not installed, so no fleet file was written: git checkout"
+        ) && said.contains("`fleet create --store none` creates the fleet without one"),
+        "{said}"
+    );
+    assert!(!rig.project.join("fleet.toml").exists(), "no fleet file");
+    assert!(!rig.machine.join("packs").join(STORE).exists(), "no pack");
+}
+
+/// A second fleet on the machine reads the pack the first installed: the
+/// standalone project declared to the first finds the store pack already
+/// there, leaves it as it stands, says where it came from, and names it in its
+/// own file — with the prefix the store's capabilities answer, read through
+/// that pack's adapter.
+#[test]
+fn create_leaves_a_store_pack_already_on_the_machine_as_it_stands() {
+    let rig = Rig::new("store-already");
+    let packs = rig.a_packs_checkout();
+    let fleet = rig.root.join("the-fleet");
+    std::fs::create_dir_all(&fleet).expect("the fleet's own directory is made");
+    let out = rig
+        .command(&[
+            "create",
+            "--embedded",
+            "--agent",
+            AGENT,
+            "--packs-from",
+            &packs,
+        ])
+        .current_dir(&fleet)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let pinned = locked(&rig.machine);
+
+    let out = rig.run(&[
+        "create",
+        "--standalone",
+        "--agent",
+        AGENT,
+        "--packs-from",
+        &packs,
+        "--fleet",
+        &fleet.display().to_string(),
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 0, "{said}");
+    assert!(
+        said.contains(&format!(
+            "store: {STORE}, already installed on this machine at {} from \
+             {packs}//adapters/store/{STORE} — left as it stands",
+            fleet_core::supported::PINNED_PACKS
+        )),
+        "{said}"
+    );
+    assert_eq!(locked(&rig.machine), pinned, "the lock is as it was");
+    let declared = std::fs::read_to_string(rig.project.join(".fleet/project.toml"))
+        .expect("the declaration landed");
+    assert_eq!(
+        store_named(&rig.project).as_deref(),
+        Some(STORE),
+        "the project's own file names its store: {declared}"
+    );
+    assert!(
+        declared.contains("\nitem_prefix = \"zz\"\n"),
+        "the prefix the pack's adapter answers: {declared}"
+    );
+}
+
+/// OPT-IN, and the one arm that reaches the network: `fleet create` with no
+/// `--packs-from` and every default installs the bd pack and the agent's pack
+/// from the source and tag this binary pins, the real fleet-packs on GitHub,
+/// and the file names both. Skipped, with a line saying so, unless
+/// `FLEET_TEST_NETWORK` is set, and when it is set and the source does not
+/// answer for the tag. The published bd and claude-code packs both import
+/// `ts`, and install beside the one ts they share.
+#[test]
+fn create_installs_the_pinned_packs_from_the_published_source() {
+    let arm = "create_installs_the_pinned_packs_from_the_published_source";
+    if std::env::var_os("FLEET_TEST_NETWORK").is_none() {
+        eprintln!("SKIP {arm}: FLEET_TEST_NETWORK is unset, and this arm reaches GitHub");
+        return;
+    }
+    let source = fleet_core::supported::PINNED_PACKS_SOURCE;
+    let pin = fleet_core::supported::PINNED_PACKS;
+    let reached = Command::new("git")
+        .args(["ls-remote", "--tags", source, pin])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map(|out| out.status.success() && !out.stdout.is_empty())
+        .unwrap_or(false);
+    if !reached {
+        eprintln!("SKIP {arm}: {source} did not answer for {pin} — offline, or the tag is gone");
+        return;
+    }
+
+    let rig = Rig::new("packs-network");
+    let out = rig
+        .command(&["create", "--embedded"])
+        .env_remove("GIT_ALLOW_PROTOCOL")
+        .output()
+        .expect("the built binary runs");
+    let said = stderr(&out);
+    assert_eq!(code(&out), 0, "{said}");
+    for (kind, name) in [("store", STORE), ("agent", AGENT)] {
+        let pack = format!("{source}//adapters/{kind}/{name}");
+        assert!(
+            locked(&rig.machine)
+                .iter()
+                .any(|(held, version, _)| *held == pack && version == pin),
+            "the lock pins {pack} at {pin}"
+        );
+        assert!(rig
+            .machine
+            .join("packs")
+            .join(name)
+            .join(format!("adapters/{kind}/{name}/adapter.toml"))
+            .is_file());
+    }
+    let written = std::fs::read_to_string(rig.project.join("fleet.toml")).expect("the file landed");
+    assert!(
+        written.contains(&format!("[agent]\nadapter = \"{AGENT}\"\n")),
+        "{written}"
+    );
 }
 
 /// The embedded file, byte for byte, with the binary's own defaults
-/// materialized beside it and NO PACK INSTALLED (AC1).
+/// materialized beside it and NO PACK INSTALLED but the agent's and the ts it
+/// imports (AC1).
 #[test]
 fn create_embedded_writes_the_smallest_file_that_runs_and_materializes_the_defaults() {
     let rig = Rig::new("embedded");
-    let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
+    let out = rig.run(&rig.embedded());
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 
     let written = std::fs::read_to_string(rig.project.join("fleet.toml")).unwrap();
-    assert_eq!(written, EMBEDDED, "the file is not the expected text");
+    assert_eq!(
+        written,
+        embedded_listing(&rig.identity().id),
+        "the file is not the expected text"
+    );
 
-    // NOTHING under packs: `create` installs no pack, and the word core names
-    // no directory a person could meet.
+    // NOTHING under packs but the agent's and the ts it imports: `create
+    // --store none` installs no store pack, and the word core names no
+    // directory a person could meet.
     let packs = rig.machine.join("packs");
-    let installed: Vec<String> = std::fs::read_dir(&packs)
+    let mut installed: Vec<String> = std::fs::read_dir(&packs)
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
@@ -769,7 +1582,8 @@ fn create_embedded_writes_the_smallest_file_that_runs_and_materializes_the_defau
                 .collect()
         })
         .unwrap_or_default();
-    assert_eq!(installed, Vec::<String>::new(), "a pack was installed");
+    installed.sort();
+    assert_eq!(installed, [AGENT, "ts"], "another pack was installed");
 
     // The defaults: the whole embedded set, file for file, and the lock line
     // that says which binary put it there.
@@ -797,24 +1611,29 @@ fn create_embedded_writes_the_smallest_file_that_runs_and_materializes_the_defau
         stderr(&out)
     );
 
-    // And what a person reads after it: `prime` names the installed packs, of
-    // which there are none, and never the defaults — which resolve all the same,
-    // or the rules file below line 1 would be missing.
+    // And what a person reads after it: `prime` names the installed packs, the
+    // agent's over the ts it imports, and never the defaults — which resolve
+    // all the same, or
+    // the rules file below line 1 would be missing.
+    // Line 2 is the store's own version, and the file `create` wrote names
+    // none: the project is kept on the stub before it is asked.
+    common::take_a_store(&rig.project);
     let primed = rig.run(&["prime"]);
     assert_eq!(code(&primed), 0, "{}", stderr(&primed));
     let page = stdout(&primed);
     let line_one = page.lines().next().expect("prime printed a line");
     assert!(
-        line_one.contains("packs: none installed"),
-        "line 1 does not read `none installed`: {line_one}"
+        line_one.contains(&format!("packs: {AGENT}, ts;")),
+        "line 1 names the agent's pack over its ts alone: {line_one}"
     );
     assert!(
         !line_one.contains(fleet_core::defaults::LAYER),
         "the defaults are the binary's and are on no packs line: {line_one}"
     );
     assert!(
-        page.lines().count() > 1,
-        "the rules file resolved through the defaults and follows line 1: {page}"
+        page.lines().count() > 2,
+        "the rules file resolved through the defaults and follows line 2, the \
+         store's: {page}"
     );
 
     // The done message.
@@ -823,8 +1642,7 @@ fn create_embedded_writes_the_smallest_file_that_runs_and_materializes_the_defau
         "embedded fleet",
         "shell-trap on, record on",
         "off — nothing leaves this machine",
-        "[seats.a-seat]",
-        "git worktree add",
+        "seat: you — human",
         "fleet start",
     ] {
         assert!(
@@ -839,12 +1657,214 @@ fn create_embedded_writes_the_smallest_file_that_runs_and_materializes_the_defau
     );
 }
 
-/// R3's refusal, from the other end: the controller never initialises and never
-/// rewrites a project's work-graph store.
+/// The person who ran `create` is the fleet's first seat, a human one, listed
+/// under the identity the call minted — and nobody is handed a table to write.
+#[test]
+fn create_embedded_lists_its_creator_as_a_human_seat_under_a_minted_identity() {
+    let rig = Rig::new("creator");
+    let identity_file = rig.machine.join(identity::IDENTITY);
+    assert!(!identity_file.exists(), "the rig starts with no identity");
+
+    let out = rig.run(&rig.embedded());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    // The id is READ from the minted file, so the table is checked against the
+    // identity this machine now answers to and not one this arm made up.
+    let mine = rig.identity();
+    let fleet_toml = rig.project.join("fleet.toml");
+    assert_eq!(
+        std::fs::read_to_string(&fleet_toml).unwrap(),
+        embedded_listing(&mine.id),
+        "the file is EMBEDDED followed by one human table"
+    );
+
+    let said = stderr(&out);
+    assert!(
+        said.contains(&format!(
+            "seat: you — human human-{}, listed as [seats.{}] — {}",
+            mine.id.short(),
+            mine.id,
+            fleet_toml.display()
+        )),
+        "the seat line names the table and the file: {said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "identity: minted — who acts here when no --by is given — {}",
+            identity_file.display()
+        )),
+        "the mint is said, with its path: {said}"
+    );
+    for gone in ["first seat:", "[seats.a-seat]", "git worktree add"] {
+        assert!(
+            !said.contains(gone),
+            "the hand-written first-seat block is gone, and {gone:?} is in: {said}"
+        );
+    }
+
+    // A SECOND create on the same machine, in another project, lists the same
+    // person: the identity is the machine's, and it is minted once.
+    let second = rig.root.join("b-project");
+    std::fs::create_dir_all(&second).unwrap();
+    let out = rig
+        .command(&rig.embedded())
+        .current_dir(&second)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(second.join("fleet.toml")).unwrap(),
+        embedded_listing(&mine.id),
+        "the second fleet lists the same identity"
+    );
+    assert_eq!(rig.identity(), mine, "the identity is not re-minted");
+    let said = stderr(&out);
+    assert!(
+        said.contains(&format!("listed as [seats.{}]", mine.id)),
+        "{said}"
+    );
+    assert!(
+        !said.contains("identity:") && !said.contains("minted"),
+        "nothing was minted, so nothing says so: {said}"
+    );
+}
+
+/// A standalone project declared to a fleet that already lists this machine's
+/// person: the listing is said and not refused, and the fleet's file is left
+/// byte for byte as it was.
+#[test]
+fn create_standalone_into_a_fleet_that_already_lists_the_identity_says_so_and_writes_nothing() {
+    let rig = Rig::new("standalone-listed");
+    let fleet = rig.root.join("the-fleet");
+    std::fs::create_dir_all(&fleet).unwrap();
+    let out = rig
+        .command(&rig.embedded())
+        .current_dir(&fleet)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let policy = fleet.join("fleet.toml");
+    let before = std::fs::read(&policy).unwrap();
+    let mine = rig.identity();
+
+    let out = rig.run(&[
+        "create",
+        "--standalone",
+        "--agent",
+        AGENT,
+        "--store",
+        "none",
+        "--fleet",
+        &fleet.display().to_string(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let said = stderr(&out);
+    assert!(
+        said.contains(&format!(
+            "seat: you — human human-{}, already listed",
+            mine.id.short()
+        )),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read(&policy).unwrap(),
+        before,
+        "the fleet's file is byte-unchanged"
+    );
+    assert!(!said.contains("identity:"), "nothing was minted: {said}");
+}
+
+/// A fleet's file this verb cannot read as a roster is not a refusal of the
+/// declaration: the project is registered, the seat line says why nobody was
+/// listed and which verb lists them, and the call answers 0.
+#[test]
+fn create_standalone_into_a_fleet_whose_seats_do_not_read_says_so_and_answers_0() {
+    let rig = Rig::new("standalone-unread");
+    let fleet = rig.root.join("the-fleet");
+    let policy = fleet.join("fleet.toml");
+    write(&policy, "[seats.alpha]\nkind = \"agent\"\n");
+    let before = std::fs::read(&policy).unwrap();
+
+    let out = rig.run(&[
+        "create",
+        "--standalone",
+        "--agent",
+        AGENT,
+        "--store",
+        "none",
+        "--fleet",
+        &fleet.display().to_string(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let said = stderr(&out);
+    assert!(said.contains("seat: not listed — "), "{said}");
+    assert!(
+        said.contains("[seats.alpha] is keyed by a name"),
+        "the why is the roster's: {said}"
+    );
+    assert!(
+        said.contains("; fleet seat add --human lists you"),
+        "{said}"
+    );
+    assert!(said.contains("registered"), "{said}");
+    assert_eq!(
+        std::fs::read(&policy).unwrap(),
+        before,
+        "nothing was written"
+    );
+}
+
+/// An identity that cannot be minted — a directory standing where its file
+/// goes — is a fleet that lists nobody: exit 3, said, and the fleet.toml the
+/// call wrote stays written without a human table.
+///
+/// A machine directory that cannot be written in at all is refused BEFORE any
+/// fleet file now: the agent's pack goes in first, over the defaults, and
+/// neither can land there.
+#[test]
+fn create_embedded_with_an_unmintable_identity_exits_3_and_lists_nobody() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = Rig::new("unmintable");
+    std::fs::create_dir_all(rig.machine.join(identity::IDENTITY)).unwrap();
+
+    let out = rig.run(&rig.embedded());
+    assert_eq!(code(&out), 3, "{}", stderr(&out));
+    let said = stderr(&out);
+    assert!(
+        said.contains("fleet create: the fleet was written and lists nobody: "),
+        "{said}"
+    );
+    assert!(
+        said.contains(" — fleet seat add --human finishes it"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(rig.project.join("fleet.toml")).unwrap(),
+        embedded(),
+        "the fleet.toml is there, without a human table"
+    );
+    assert!(rig.machine.join(identity::IDENTITY).is_dir());
+
+    let unwritable = Rig::new("unwritable");
+    std::fs::create_dir_all(&unwritable.machine).unwrap();
+    std::fs::set_permissions(&unwritable.machine, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let out = unwritable.run(&unwritable.embedded());
+    // Writable again BEFORE any assertion, so a failing arm still cleans up.
+    std::fs::set_permissions(&unwritable.machine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert!(
+        !unwritable.project.join("fleet.toml").exists(),
+        "no fleet file: {}",
+        stderr(&out)
+    );
+}
+
+/// The store refusal, from the other end: the controller never initialises and
+/// never rewrites a project's work-graph store.
 #[test]
 fn create_never_touches_the_projects_work_graph_store() {
     let rig = Rig::new("store");
-    let store = rig.project.join(".beads");
+    let store = rig.project.join(".tracker");
     let before = std::fs::metadata(&store).unwrap().modified().unwrap();
     let listed = |dir: &Path| {
         let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -857,7 +1877,7 @@ fn create_never_touches_the_projects_work_graph_store() {
     };
     let names_before = listed(&store);
 
-    let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
+    let out = rig.run(&rig.embedded());
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 
     assert_eq!(
@@ -878,6 +1898,54 @@ fn create_never_touches_the_projects_work_graph_store() {
     assert!(rig.project.join("fleet.toml").is_file());
 }
 
+/// A standalone project runs on its fleet's agent (ruling 11): nothing asks
+/// which, nothing is installed for it, and an `--agent` naming another adapter
+/// than the fleet's is a usage refusal naming the fleet's, before anything is
+/// written. Leaving the flag out is no refusal.
+#[test]
+fn create_standalone_refuses_an_agent_that_is_not_the_fleets() {
+    let rig = Rig::new("standalone-agent");
+    let fleet = rig.root.join("the-fleet");
+    let fleet_toml = fleet.join("fleet.toml");
+    write(&fleet_toml, "[agent]\nadapter = \"quill\"\n");
+    let named = fleet.display().to_string();
+    let out = rig.run(&[
+        "create",
+        "--standalone",
+        "--agent",
+        AGENT,
+        "--store",
+        "none",
+        "--fleet",
+        &named,
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 2, "{said}");
+    assert!(
+        said.contains(&format!(
+            "--agent {AGENT} is not this fleet's agent — {} runs `quill`, and a project \
+             declared to it runs on that one; drop --agent",
+            fleet_toml.display()
+        )),
+        "{said}"
+    );
+    assert!(!rig.project.join(".fleet/project.toml").exists());
+    assert!(!rig.machine.join("config.json").exists());
+
+    let out = rig.run(&[
+        "create",
+        "--standalone",
+        "--store",
+        "none",
+        "--fleet",
+        &named,
+    ]);
+    let said = stderr(&out);
+    assert_eq!(code(&out), 0, "{said}");
+    assert!(!said.contains("agent:"), "nothing installed for it: {said}");
+    assert!(!rig.machine.join("packs").join(AGENT).exists());
+}
+
 /// The standalone file, byte for byte, the register, and the event.
 #[test]
 fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream() {
@@ -892,11 +1960,31 @@ fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream
     // The host's own fleet.toml is embedded, so a second create in the same
     // directory would refuse. The standalone project is a second directory that
     // shares the machine.
+    //
+    // The default store's pack is on the machine, added by hand: `--store
+    // none` writes no `[store]` table, so the project names no store and the
+    // default name opens that pack's adapter, whose capabilities name the
+    // prefix the declaration carries.
+    let packs = host.a_packs_checkout();
+    let added = host.run(&[
+        "pack",
+        "add",
+        &format!("{packs}//adapters/store/{STORE}"),
+        "--version",
+        fleet_core::supported::PINNED_PACKS,
+    ]);
+    assert_eq!(code(&added), 0, "{}", stderr(&added));
     let second = host.root.join("b-project");
-    std::fs::create_dir_all(second.join(".beads")).unwrap();
-    write(&second.join(".beads/config.yaml"), "issue-prefix: bp\n");
+    std::fs::create_dir_all(&second).unwrap();
     let out = host
-        .command(&["create", "--standalone", "--agent", AGENT])
+        .command(&[
+            "create",
+            "--standalone",
+            "--agent",
+            AGENT,
+            "--store",
+            "none",
+        ])
         .current_dir(&second)
         .output()
         .expect("the built binary runs");
@@ -910,7 +1998,7 @@ fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream
         written,
         standalone_text(
             "b-project",
-            Some("bp"),
+            Some("zz"),
             &second,
             &host.root.join("b-project-worktrees")
         ),
@@ -919,26 +2007,24 @@ fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream
 
     // THE DONE MESSAGE IN STANDALONE MODE reports only what this call did. The
     // guards and telemetry lines belong to a policy file this mode does not
-    // write, and the seat edit belongs to the FLEET's own file: a `[seats]` or
-    // a `[core]` table in a project's declaration does nothing at all.
+    // write, and the seat belongs to the FLEET's own file: a `[seats]` table in
+    // a project's declaration does nothing at all. The host's own create listed
+    // this machine's person there already, so this one says so.
     let said = stderr(&out);
     let fleet_toml = host.project.join("fleet.toml").display().to_string();
     assert!(said.contains("standalone fleet"), "{said}");
     assert!(
-        said.contains(&format!("add this to {fleet_toml}")),
-        "the seat edit names the fleet's own file, not the declaration: {said}"
+        said.contains(&format!("already listed — {fleet_toml}")),
+        "the seat line names the fleet's own file, not the declaration: {said}"
     );
     assert!(
-        !said.contains(&second.join(".fleet/project.toml").display().to_string()[..]) || {
-            // The declaration is named as what was written; what it must not be
-            // named as is the file to add the seat to.
-            !said.contains(&format!(
-                "add this to {}",
-                second.join(".fleet/project.toml").display()
-            ))
-        },
+        !said.contains(&format!(
+            "listed — {}",
+            second.join(".fleet/project.toml").display()
+        )),
         "{said}"
     );
+    assert!(!said.contains("first seat:"), "{said}");
     assert!(
         !said.contains("shell-trap on"),
         "this mode wrote no guards table to report: {said}"
@@ -954,7 +2040,7 @@ fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream
     let third = host.root.join("d-project");
     std::fs::create_dir_all(&third).unwrap();
     let embedded = host
-        .command(&["create", "--embedded", "--agent", AGENT])
+        .command(&host.embedded())
         .current_dir(&third)
         .output()
         .expect("the built binary runs");
@@ -964,10 +2050,11 @@ fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream
     assert!(embedded.contains("telemetry:"), "{embedded}");
     assert!(
         embedded.contains(&format!(
-            "add this to {}",
+            "listed as [seats.{}] — {}",
+            host.identity().id,
             third.join("fleet.toml").display()
         )),
-        "an embedded fleet's seat edit is its own file: {embedded}"
+        "an embedded fleet's seat is listed in its own file: {embedded}"
     );
 
     let register = std::fs::read_to_string(host.machine.join("projects.toml")).unwrap();
@@ -994,7 +2081,14 @@ fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream
     // the file's keys, writes nothing over it, and leaves the register a set
     // rather than a log.
     let out = host
-        .command(&["create", "--standalone", "--agent", AGENT])
+        .command(&[
+            "create",
+            "--standalone",
+            "--agent",
+            AGENT,
+            "--store",
+            "none",
+        ])
         .current_dir(&second)
         .output()
         .expect("the built binary runs");
@@ -1022,21 +2116,63 @@ fn create_standalone_declares_the_project_registers_it_and_says_so_on_the_stream
     let third = host.root.join("c-project");
     write(
         &third.join(".fleet/project.toml"),
-        "[gates]\nsuite = \"make check\"\n",
+        "[landing]\nci_marker = \"printf '[skip ci]'\"\n",
     );
     let out = host
-        .command(&["create", "--standalone", "--agent", AGENT])
+        .command(&[
+            "create",
+            "--standalone",
+            "--agent",
+            AGENT,
+            "--store",
+            "none",
+        ])
         .current_dir(&third)
         .output()
         .expect("the built binary runs");
     assert_eq!(code(&out), 1, "{}", stderr(&out));
     assert!(stderr(&out).contains("[project] name"), "{}", stderr(&out));
+
+    // A project whose store names no prefix — here no store at all, the pack
+    // taken back off the machine — is declared with the commented line, and
+    // never with a prefix guessed.
+    let removed = host.run(&[
+        "pack",
+        "remove",
+        &format!("{packs}//adapters/store/{STORE}"),
+    ]);
+    assert_eq!(code(&removed), 0, "{}", stderr(&removed));
+    let bare = host.root.join("e-project");
+    std::fs::create_dir_all(&bare).unwrap();
+    let out = host
+        .command(&[
+            "create",
+            "--standalone",
+            "--agent",
+            AGENT,
+            "--store",
+            "none",
+        ])
+        .current_dir(&bare)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(bare.join(".fleet/project.toml")).unwrap(),
+        standalone_text(
+            "e-project",
+            None,
+            &bare,
+            &host.root.join("e-project-worktrees")
+        ),
+        "the declaration is not the expected text"
+    );
 }
 
-/// A DECLARED PROJECT WINS AT ITS OWN LEVEL (controller PRD § Two modes): `--standalone`
-/// registers the declaration in a directory that also carries a `fleet.toml`,
-/// because the resolver reads that directory as a standalone project and the
-/// neighbour is some other tool's file rather than this project's fleet.
+/// A DECLARED PROJECT WINS AT ITS OWN LEVEL: `--standalone` registers the
+/// declaration in a directory that also carries a `fleet.toml`, because the
+/// resolver reads that directory as a standalone project and the neighbour is
+/// some other tool's file rather than this project's fleet.
 /// `--embedded` still refuses there — the refusal is one mode's now, not both —
 /// and the keys of a file somebody wrote are ALL read, not only the one the
 /// register is keyed on.
@@ -1062,7 +2198,14 @@ fn a_declaration_beside_a_fleet_toml_is_registered_and_every_key_is_read() {
     write(&both.join(".fleet/project.toml"), &declaration);
 
     let out = host
-        .command(&["create", "--standalone", "--agent", AGENT])
+        .command(&[
+            "create",
+            "--standalone",
+            "--agent",
+            AGENT,
+            "--store",
+            "none",
+        ])
         .current_dir(&both)
         .output()
         .expect("the built binary runs");
@@ -1089,7 +2232,7 @@ fn a_declaration_beside_a_fleet_toml_is_registered_and_every_key_is_read() {
     // `--embedded` in the same directory still refuses, naming the neighbour:
     // the declaration excuses the standalone mode and nothing else.
     let out = host
-        .command(&["create", "--embedded", "--agent", AGENT])
+        .command(&host.embedded())
         .current_dir(&both)
         .output()
         .expect("the built binary runs");
@@ -1112,7 +2255,14 @@ fn a_declaration_beside_a_fleet_toml_is_registered_and_every_key_is_read() {
         ),
     );
     let out = host
-        .command(&["create", "--standalone", "--agent", AGENT])
+        .command(&[
+            "create",
+            "--standalone",
+            "--agent",
+            AGENT,
+            "--store",
+            "none",
+        ])
         .current_dir(&short)
         .output()
         .expect("the built binary runs");
@@ -1131,6 +2281,97 @@ fn a_declaration_beside_a_fleet_toml_is_registered_and_every_key_is_read() {
 }
 
 // ---- fleet start and fleet stop ---------------------------------------------
+
+/// shared.locations R20: the service is told the machine directory `start`
+/// resolved, whichever variable produced it (here FLEET_HOME, then HOME
+/// alone) with no FLEET_DIR set anywhere, so the manager's environment, which
+/// holds neither, cannot send the controller to another directory.
+#[test]
+fn the_service_file_carries_the_machine_directory_start_resolved() {
+    for (label, removed) in [
+        ("from-fleet-home", &[FLEET_DIR][..]),
+        ("from-home", &[FLEET_DIR, FLEET_HOME][..]),
+    ] {
+        let rig = Rig::resolving_to(label, |rig| rig.home.join(".fleet"));
+        rig.created();
+        let out = rig.run_in_env(&["start"], &[], removed);
+        assert_eq!(code(&out), 0, "{label}: {}", stderr(&out));
+        let text = std::fs::read_to_string(rig.service_file()).expect("the service file reads");
+        assert!(
+            sets_fleet_dir(&text, &rig.machine),
+            "{label}: the service is told {}: {text}",
+            rig.machine.display()
+        );
+    }
+}
+
+/// shared.locations R20 with R4 and R5: a start under XDG_STATE_HOME tells the
+/// service what this platform resolved: `fleet` under it on Linux, and on
+/// macOS, which never reads it, `.fleet` under the home.
+#[test]
+fn a_start_under_xdg_state_home_tells_the_service_what_this_platform_resolved() {
+    let rig = Rig::resolving_to("xdg-state", |rig| {
+        if cfg!(target_os = "linux") {
+            rig.root.join("state").join("fleet")
+        } else {
+            rig.home.join(".fleet")
+        }
+    });
+    rig.created();
+    let state = rig.root.join("state");
+    let out = rig.run_in_env(&["start"], &[(XDG_STATE_HOME, &state)], &[FLEET_DIR]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = std::fs::read_to_string(rig.service_file()).expect("the service file reads");
+    assert!(sets_fleet_dir(&text, &rig.machine), "{text}");
+}
+
+/// shared.locations R18, R19: the service file follows XDG_CONFIG_HOME on
+/// Linux and only there. Each box asserts its own platform's answer.
+#[test]
+fn the_service_file_follows_xdg_config_home_on_linux_alone() {
+    let rig = Rig::new("xdg-config");
+    rig.created();
+    let config = rig.root.join("config");
+    let out = rig.run_in_env(&["start"], &[(XDG_CONFIG_HOME, &config)], &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let unit = config.join("systemd/user/dev.fleet.controller.service");
+    if cfg!(target_os = "linux") {
+        assert!(
+            unit.is_file(),
+            "the unit is under XDG_CONFIG_HOME: {}",
+            unit.display()
+        );
+        assert!(
+            !rig.home
+                .join(".config/systemd/user/dev.fleet.controller.service")
+                .exists(),
+            "no unit under the home's .config while XDG_CONFIG_HOME is set"
+        );
+    } else {
+        assert!(
+            rig.home
+                .join("Library/LaunchAgents/dev.fleet.controller.plist")
+                .is_file(),
+            "the agent file is under HOME whatever XDG_CONFIG_HOME says"
+        );
+        assert!(
+            !config.exists(),
+            "nothing is written under XDG_CONFIG_HOME on macOS"
+        );
+    }
+}
+
+/// shared.locations R1 for XDG_CONFIG_HOME: spaces only counts as unset, so
+/// the file is where it is with no XDG_CONFIG_HOME at all, under the home.
+#[test]
+fn a_blank_xdg_config_home_counts_as_unset() {
+    let rig = Rig::new("xdg-config-blank");
+    rig.created();
+    let out = rig.run_in_env(&["start"], &[(XDG_CONFIG_HOME, Path::new("  "))], &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let file = rig.service_file();
+    assert!(file.starts_with(&rig.home), "{}", file.display());
+}
 
 /// The first run's own idempotence: a second start repeats none of it and says
 /// so, line by line.
@@ -1201,13 +2442,10 @@ fn a_second_start_writes_nothing_and_says_so() {
 #[test]
 fn start_refreshes_a_defaults_set_this_binary_no_longer_carries() {
     let rig = Rig::new("defaults-refresh");
-    assert_eq!(
-        code(&rig.run(&["create", "--embedded", "--agent", AGENT])),
-        0
-    );
+    assert_eq!(code(&rig.run(&rig.embedded())), 0);
 
     let root = rig.machine.join(fleet_core::defaults::DIR);
-    let dropped = root.join("assets/park-note.md");
+    let dropped = root.join("assets/brief.md");
     let body = std::fs::read(&dropped).expect("the default reads");
     std::fs::remove_file(&dropped).expect("the older set is one file short");
     let older = fleet_core::defaults::tree_hash(&root).expect("the older set hashes");
@@ -1249,140 +2487,6 @@ fn start_refreshes_a_defaults_set_this_binary_no_longer_carries() {
     );
 }
 
-/// ITEM 7 — THE MACHINE THE PREVIOUS BINARY LEFT. Seeded the way the reviewer
-/// seeded it off this box's own `~/.fleet`: `packs/core` beside a `bundled:core`
-/// line pinned at that tree's hash, and two packs a person added, which stay.
-///
-/// Without the retirement the old pack is not refused and not removable — it is
-/// an ordinary installed pack now, so it layers ABOVE the defaults and answers
-/// every template out of the stale tree, and `fleet pack remove core` refuses
-/// because the lock is keyed by source. The three readings below are `prime`'s
-/// packs line, the directory, and the line.
-#[test]
-fn create_retires_the_bundled_core_pack_a_previous_binary_installed() {
-    let rig = Rig::new("retire-core");
-    let packs = rig.machine.join("packs");
-    let stale = packs.join("core");
-    write(&stale.join("pack.toml"), "[pack]\nname = \"core\"\n");
-    write(&stale.join("assets/rules.md"), "THE STALE RULES\n");
-    // A pack a person added, which is not this binary's to touch.
-    write(
-        &packs.join("tiny/pack.toml"),
-        "[pack]\nname = \"tiny\"\nschema = 3\n",
-    );
-    let lock_path = rig.machine.join(fleet_core::lock::LOCK);
-    fleet_core::lock::write(
-        &lock_path,
-        &[
-            fleet_core::lock::Entry {
-                source: fleet_core::defaults::RETIRED_SOURCE.to_string(),
-                name: Some("core".to_string()),
-                version: "0.1.0".to_string(),
-                commit: "bundled".to_string(),
-                fetched: "2026-09-01".to_string(),
-                tree: Some(
-                    fleet_core::defaults::tree_hash(&stale).expect("the seeded pack hashes"),
-                ),
-            },
-            fleet_core::lock::Entry {
-                source: "git@example:tiny".to_string(),
-                name: Some("tiny".to_string()),
-                version: "v1".to_string(),
-                commit: "0".repeat(40),
-                fetched: "2026-09-01".to_string(),
-                tree: None,
-            },
-        ],
-    )
-    .expect("the machine the previous binary left is seeded");
-
-    let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
-    assert_eq!(code(&out), 0, "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains("retired the bundled core pack"),
-        "the removal is not said in a line: {}",
-        stderr(&out)
-    );
-    assert!(!stale.exists(), "the stale pack is still on disk");
-    let pinned = fleet_core::lock::read(&lock_path).expect("the lock reads");
-    assert!(
-        !pinned
-            .iter()
-            .any(|e| e.source == fleet_core::defaults::RETIRED_SOURCE),
-        "the stale line is still on the lock: {pinned:?}"
-    );
-    assert!(
-        packs.join("tiny/pack.toml").is_file()
-            && pinned.iter().any(|e| e.source == "git@example:tiny"),
-        "a pack a person added was taken with it: {pinned:?}"
-    );
-
-    // What a person reads afterwards: the added pack alone, over the defaults.
-    let primed = rig.run(&["prime"]);
-    assert_eq!(code(&primed), 0, "{}", stderr(&primed));
-    let page = stdout(&primed);
-    let line_one = page.lines().next().expect("prime printed a line");
-    assert!(
-        line_one.contains("packs: tiny"),
-        "line 1 does not read the added pack alone: {line_one}"
-    );
-    assert!(
-        !line_one.contains("core"),
-        "the stale pack is still a layer: {line_one}"
-    );
-    assert!(
-        !page.contains("THE STALE RULES"),
-        "the rules still resolve through the stale tree:\n{page}"
-    );
-}
-
-/// The other half, and the control on the arm above: a copy nothing accounts
-/// for is NAMED and left standing, directory and line both, so a person can act
-/// on it. Without this arm the removal above would pass on a rule that removed
-/// whatever it found.
-#[test]
-fn a_bundled_core_pack_edited_since_it_was_pinned_is_named_and_left_where_it_stands() {
-    let rig = Rig::new("retire-edited");
-    let stale = rig.machine.join("packs/core");
-    write(&stale.join("pack.toml"), "[pack]\nname = \"core\"\n");
-    write(&stale.join("assets/rules.md"), "THE RULES AS PINNED\n");
-    let lock_path = rig.machine.join(fleet_core::lock::LOCK);
-    let pinned_at = fleet_core::defaults::tree_hash(&stale).expect("the seeded pack hashes");
-    write(&stale.join("assets/rules.md"), "A LINE A PERSON PUT HERE\n");
-    fleet_core::lock::write(
-        &lock_path,
-        &[fleet_core::lock::Entry {
-            source: fleet_core::defaults::RETIRED_SOURCE.to_string(),
-            name: Some("core".to_string()),
-            version: "0.1.0".to_string(),
-            commit: "bundled".to_string(),
-            fetched: "2026-09-01".to_string(),
-            tree: Some(pinned_at),
-        }],
-    )
-    .expect("the machine is seeded");
-
-    let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
-    assert_eq!(code(&out), 0, "{}", stderr(&out));
-    let said = stderr(&out);
-    assert!(
-        said.contains("not this binary's to remove") && said.contains("edited since"),
-        "the refusal to remove is not said: {said}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(stale.join("assets/rules.md")).unwrap(),
-        "A LINE A PERSON PUT HERE\n",
-        "their copy was removed"
-    );
-    assert!(
-        fleet_core::lock::read(&lock_path)
-            .expect("the lock reads")
-            .iter()
-            .any(|e| e.source == fleet_core::defaults::RETIRED_SOURCE),
-        "the line went without the directory"
-    );
-}
-
 /// The already-running refusal reads its pid from the manager and its tick FROM
 /// THE FILE — never from the process table.
 #[test]
@@ -1410,15 +2514,123 @@ fn start_refuses_a_controller_that_is_already_running_with_its_pid_and_its_last_
     assert_eq!(rig.of_class("load").len(), 1, "{:?}", rig.calls());
 }
 
-/// An agent binary that does not resolve is could-not-tell, and NOTHING IS
-/// LOADED — the refusal comes before the first-run work.
+/// A fleet whose agent's pack was taken out is could-not-tell, naming the line
+/// that installs it, and NOTHING IS LOADED — the refusal comes before the
+/// first-run work. The default's name is a name like any other: no pack
+/// carrying it is no adapter at all, whether the fleet's file writes the key
+/// as `create` does or leaves it out.
+///
+/// RED-PROOF: with the default's name opening an adapter of its own where no
+/// pack carries it, the start goes past the opener and the line is never said.
 #[test]
-fn start_refuses_an_unresolvable_agent_binary_and_loads_nothing() {
-    let rig = Rig::new("no-agent");
+fn start_refuses_a_fleet_whose_agent_pack_is_removed_naming_the_pack_add_line() {
+    for (label, written) in [("agent-gone-named", true), ("agent-gone", false)] {
+        let rig = Rig::new(label);
+        rig.created().without_the_agent_pack();
+        if !written {
+            rig.agent_is(None);
+        }
+        let out = rig.run(&["start"]);
+        let said = stderr(&out);
+        assert_eq!(code(&out), 3, "{label}: {said}");
+        assert!(
+            said.contains(&format!(
+                "no agent adapter named `{AGENT}` in the installed packs — `{}` installs the one \
+                 fleet-packs carries — nothing was loaded",
+                fleet_core::pack::AdapterKind::Agent.pack_line(
+                    fleet_core::supported::PINNED_PACKS_SOURCE,
+                    AGENT,
+                    fleet_core::supported::PINNED_PACKS
+                )
+            )),
+            "{label}: {said}"
+        );
+        assert!(rig.of_class("load").is_empty(), "{:?}", rig.calls());
+        assert!(
+            !rig.machine.join("config.json").exists(),
+            "{label}: no first-run work ran"
+        );
+    }
+}
+
+/// An agent adapter named by path whose capabilities do not answer is a
+/// controller that could start no seat: could-not-tell, naming the adapter,
+/// and NOTHING IS LOADED.
+#[test]
+fn start_refuses_an_agent_adapter_whose_capabilities_exit_3_and_loads_nothing() {
+    let rig = Rig::new("agent-exec-3");
+    rig.created();
+    let adapter = rig.root.join("agent-adapter");
+    write(
+        &adapter,
+        "#!/bin/sh\ncat > /dev/null\necho 'the agent is not set up' >&2\nexit 3\n",
+    );
+    executable(&adapter);
+    rig.agent_is(Some(&adapter.display().to_string()));
+    let out = rig
+        .command(&["start"])
+        // The stub is a script written a moment ago, whose first exec this
+        // platform can hold past the agent's own bound.
+        .env("FLEET_AGENT_TIMEOUT_MS", "300000")
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&out), 3, "{}", stderr(&out));
+    let said = stderr(&out);
+    assert!(
+        said.contains(&format!(
+            "{} capabilities could not tell: the agent is not set up",
+            adapter.display()
+        )),
+        "{said}"
+    );
+    assert!(said.contains("nothing was loaded"), "{said}");
+    assert!(rig.of_class("load").is_empty(), "{:?}", rig.calls());
+    assert!(
+        !rig.machine.join("config.json").exists(),
+        "no first-run work ran"
+    );
+}
+
+/// A fleet whose file names no agent adapter, with the default's pack
+/// installed, starts THROUGH THAT PACK: the gate asks the pack's adapter its
+/// capabilities and its version, and the service is loaded. The same fleet
+/// naming the adapter, as `create` writes it, starts the same way.
+///
+/// The pack is the rig's agent stub, which logs every call to the state under
+/// the fleet's root once one is scripted there.
+#[test]
+fn start_loads_a_fleet_whose_agent_is_the_installed_default_pack() {
+    for (label, written) in [("agent-pack-named", true), ("agent-pack", false)] {
+        let rig = Rig::new(label);
+        rig.created();
+        if !written {
+            rig.agent_is(None);
+        }
+        fleet_controller::test_support::agent_stub::script(&rig.project, |_| {});
+        let out = rig.run(&["start"]);
+        assert_eq!(code(&out), 0, "{label}: {}", stderr(&out));
+        assert_eq!(rig.of_class("load").len(), 1, "{:?}", rig.calls());
+        let asked: Vec<&str> = fleet_controller::test_support::agent_stub::calls(&rig.project)
+            .iter()
+            .map(|call| call.verb)
+            .collect();
+        assert!(
+            asked.starts_with(&["capabilities", "version"]),
+            "{label}: the pack's adapter answered the gate: {asked:?}"
+        );
+    }
+}
+
+/// A tmux that does not resolve is could-not-tell beside the agent binary, and
+/// NOTHING IS LOADED: every seat's session runs on it, so a controller without
+/// one would start no seat at all.
+#[test]
+fn start_refuses_an_unresolvable_tmux_and_loads_nothing() {
+    let rig = Rig::new("no-tmux");
     rig.created();
     let out = rig
         .command(&["start"])
-        .env(common::hermetic::CLAUDE_BIN, rig.root.join("not-a-binary"))
+        .env(common::hermetic::TMUX_BIN, rig.root.join("not-a-tmux"))
         .output()
         .expect("the built binary runs");
     assert_eq!(code(&out), 3, "{}", stderr(&out));
@@ -1428,7 +2640,7 @@ fn start_refuses_an_unresolvable_agent_binary_and_loads_nothing() {
         stderr(&out)
     );
     assert!(
-        stderr(&out).contains(&rig.root.join("not-a-binary").display().to_string()),
+        stderr(&out).contains(&rig.root.join("not-a-tmux").display().to_string()),
         "{}",
         stderr(&out)
     );
@@ -1439,14 +2651,15 @@ fn start_refuses_an_unresolvable_agent_binary_and_loads_nothing() {
     );
 }
 
-/// `--foreground` IS THE SERVICE'S LOOP, workflows included (cli PRD § `fleet
-/// start`): a waiting run whose stream has moved is advanced under it.
+/// `--foreground` IS THE SERVICE'S LOOP, workflows included: a waiting run
+/// whose stream has moved is advanced under it.
 ///
 /// WHY THE READING IS A REFUSAL. The seam a foreground start wires is the real
 /// engine, and the engine resolves a run by asking each registered project's
 /// store for its record. The run named here is in no store, so the advance the
 /// fold decided on is visible as the run pass's own refusal, naming that run —
-/// a reading that needs no workflow to execute and no store to be seeded. A
+/// a reading that needs no workflow to execute and nothing in the project's
+/// store, which is an empty one on the stub. A
 /// foreground loop wired with no seam never folds the stream at all: it prints
 /// nothing about any run, which is the failure this arm answers with.
 #[test]
@@ -1457,6 +2670,7 @@ fn the_foreground_loop_advances_a_waiting_run() {
 
     let rig = Rig::new("foreground-runs");
     rig.created();
+    common::take_a_store(&rig.project);
 
     // `run.waiting` recording position 0, so the controller's own
     // `controller.started` is a line above what the run left behind — which is
@@ -1465,7 +2679,7 @@ fn the_foreground_loop_advances_a_waiting_run() {
     EventLog::open(&stream)
         .append(
             runs::RUN_WAITING,
-            "a-runner",
+            &fleet_controller::events::ActorRef::new(fleet_controller::events::RUN, "a-runner"),
             serde_json::json!({ "run": RUN, "wake": { "for": "a line" }, "seq": 0 }),
         )
         .expect("the stream takes the waiting line");
@@ -1512,24 +2726,38 @@ fn the_foreground_loop_advances_a_waiting_run() {
     );
 }
 
-/// The `[seats]` table, rendered (R4).
+/// The `[seats.<id>]` tables, rendered: every active agent seat a row keyed by
+/// its id, carrying its kind and the seat's own name where it has one, and no
+/// row for a parked seat or for a person's.
 #[test]
 fn the_seats_table_is_rendered_into_rows_and_a_transient_row_survives_it() {
     let rig = Rig::new("seats");
-    rig.created().policy_says(
-        "\n[seats.one]\nmodel = \"a-model\"\nchosen_name = \"Kite\"\n\
-         \n[seats.two]\n\
-         \n[seats.three]\nstatus = \"parked\"\n",
-    );
-    // A transient row and an unknown key, written before the render: both are
-    // what the document-edit discipline exists for.
+    rig.created().policy_says(&format!(
+        "\n[seats.{SEAT_A}]\nkind = \"agent\"\nname = \"Kite\"\nmodel = \"a-model\"\n\
+         \n[seats.{SEAT_B}]\nkind = \"agent\"\n\
+         \n[seats.{SEAT_C}]\nkind = \"agent\"\nstatus = \"parked\"\n\
+         \n[seats.{SEAT_H}]\nkind = \"human\"\nname = \"Orla\"\n",
+    ));
+    // A transient row, an unknown key and a row keyed by its name alone,
+    // written before the render: all three are what the document-edit
+    // discipline exists for, and the name-keyed row is the shape the clean
+    // break retired — not a seat this render reconciles, and not migrated. B's
+    // row is already there under its id and still carries the machine name and
+    // the `chosen_name` a render before this one wrote, both of which this
+    // render owns and takes off: B has no name of its own.
     write(
         &rig.machine.join("config.json"),
         &format!(
             "{{\n  \"fleet_toml\": \"{}\",\n  \"autopilot\": {{\"on\": true}},\n  \
-             \"children\": [\n    {{\"name\": \"transient-1\", \"transient\": true, \
-             \"spawned_by\": \"somebody\", \"worktrees\": {{\"a-project\": \"/wt/t1\"}}}},\n    \
-             {{\"name\": \"gone\", \"worktrees\": {{\"a-project\": \"/wt/gone\"}}}}\n  ]\n}}\n",
+             \"children\": [\n    {{\"id\": \"{SPAWNED}\", \"kind\": \"agent\", \
+             \"transient\": true, \"spawned_by\": \"somebody\", \
+             \"worktrees\": {{\"a-project\": \"/wt/t1\"}}}},\n    \
+             {{\"id\": \"{SEAT_B}\", \"name\": \"agent-e8a04b17\", \"chosen_name\": \"Pell\", \
+             \"worktrees\": {{\"a-project\": \"/wt/b\"}}}},\n    \
+             {{\"id\": \"{GONE}\", \"name\": \"Gone\", \
+             \"worktrees\": {{\"a-project\": \"/wt/gone\"}}}},\n    \
+             {{\"name\": \"a-row-keyed-by-its-name\", \
+             \"worktrees\": {{\"a-project\": \"/wt/old\"}}}}\n  ]\n}}\n",
             rig.project.join("fleet.toml").display()
         ),
     );
@@ -1540,38 +2768,81 @@ fn the_seats_table_is_rendered_into_rows_and_a_transient_row_survives_it() {
     let after = rig.seat_list();
     let rows = after["children"].as_array().expect("children is an array");
 
-    let row = |name: &str| {
+    let row = |id: &str| {
         rows.iter()
-            .find(|r| r["name"] == name)
-            .unwrap_or_else(|| panic!("no row for {name}: {after}"))
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no row for {id}: {after}"))
     };
-    assert_eq!(row("one")["model"], "a-model");
-    assert_eq!(row("one")["chosen_name"], "Kite");
     assert_eq!(
-        row("one")["worktrees"]["a-project"],
+        row(SEAT_A)["name"],
+        "Kite",
+        "the row carries the seat's own name, not a slug"
+    );
+    assert_eq!(row(SEAT_A)["kind"], "agent");
+    assert_eq!(row(SEAT_A)["model"], "a-model");
+    assert_eq!(
+        row(SEAT_A)["worktrees"]["a-project"],
         rig.root
-            .join("a-project-worktrees/one")
+            .join("a-project-worktrees/kite-93b9739a")
             .display()
-            .to_string()
+            .to_string(),
+        "with no directory ending in its short id, a seat's worktree is its machine name"
+    );
+    assert!(
+        row(SEAT_B).get("name").is_none(),
+        "a seat with no name carries none on its row: {after}"
+    );
+    assert_eq!(row(SEAT_B)["kind"], "agent");
+    assert_eq!(
+        row(SEAT_B)["model"],
+        model(),
+        "a row naming no model takes the default the fleet's agent declares"
     );
     assert_eq!(
-        row("two")["model"],
-        "claude-opus-5",
-        "a row naming no model takes the policy's default"
+        row(SEAT_B)["worktrees"]["a-project"],
+        rig.root
+            .join("a-project-worktrees/agent-e8a04b17")
+            .display()
+            .to_string(),
+        "a seat with no name takes its kind as its slug"
+    );
+    for (id, who) in [(SEAT_C, "the parked seat"), (SEAT_H, "the human seat")] {
+        assert!(
+            !rows.iter().any(|r| r["id"] == id),
+            "{who} is not rendered: {after}"
+        );
+    }
+    assert!(
+        !rows.iter().any(|r| r["id"] == GONE),
+        "a row whose seat left the table is dropped: {after}"
+    );
+    assert_eq!(
+        rows.len(),
+        4,
+        "the two agent rows, the transient and the name-keyed row: {after}"
     );
     assert!(
-        !rows.iter().any(|r| r["name"] == "three"),
-        "a parked seat is not rendered: {after}"
+        rows.iter().all(|r| r.get("chosen_name").is_none()),
+        "no row carries chosen_name: {after}"
     );
     assert!(
-        !rows.iter().any(|r| r["name"] == "gone"),
-        "a named row whose seat left the table is dropped: {after}"
+        stderr(&out).contains("seats: 2 row(s) rendered — 1 added, 1 updated, 1 dropped"),
+        "{}",
+        stderr(&out)
+    );
+    // Two people: Orla, and the one `create` listed for the machine it ran on.
+    assert!(
+        stderr(&out).contains("2 human seat(s) listed and not rendered"),
+        "{}",
+        stderr(&out)
     );
 
-    // BYTE-IDENTICAL: the transient row and the unknown key survive, field for
-    // field, because the document is edited and never re-serialized.
-    let transient_before = before["children"][0].clone();
-    assert_eq!(*row("transient-1"), transient_before, "{after}");
+    // BYTE-IDENTICAL: the transient row, the name-keyed row and the unknown key
+    // survive, field for field, because the document is edited and never
+    // re-serialized.
+    assert_eq!(*row(SPAWNED), before["children"][0], "{after}");
+    let keyless: Vec<&serde_json::Value> = rows.iter().filter(|r| r["id"].is_null()).collect();
+    assert_eq!(keyless, vec![&before["children"][3]], "{after}");
     assert_eq!(after["autopilot"], before["autopilot"]);
     assert_eq!(after["fleet_toml"], before["fleet_toml"]);
 
@@ -1586,17 +2857,49 @@ fn the_seats_table_is_rendered_into_rows_and_a_transient_row_survives_it() {
     );
 
     // The worktree directory is NOT created: starting a named seat is the
-    // person's, and the done message names the git command.
+    // person's, and `fleet seat add --agent` names the git command.
     assert!(!rig.root.join("a-project-worktrees").exists());
 }
 
-/// `config.json` is local and beats policy per key (R28), through the same
-/// readers the file goes through.
+/// THE CLEAN BREAK: a seat table keyed by a name is refused, and nothing
+/// migrates it. A start that read around it would come up short of the seat
+/// its person wrote down, so it stops before the render with core's refusal.
+#[test]
+fn a_seat_table_keyed_by_a_name_is_refused_by_start() {
+    let rig = Rig::new("seats-by-name");
+    rig.created()
+        .policy_says("\n[seats.alpha]\nkind = \"agent\"\n");
+
+    let out = rig.run(&["start"]);
+    assert_eq!(code(&out), 3, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("[seats.alpha] is keyed by a name"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !rig.seat_list()["children"]
+            .as_array()
+            .expect("children is an array")
+            .iter()
+            .any(|row| row["name"] == "alpha"),
+        "no row is rendered for a table keyed by a name: {}",
+        rig.seat_list()
+    );
+    assert!(
+        rig.of_class("load").is_empty(),
+        "nothing is loaded after the refusal: {:?}",
+        rig.calls()
+    );
+}
+
+/// `config.json` is local and beats policy per key, through the same readers
+/// the file goes through.
 #[test]
 fn the_seat_list_overrides_policy_per_key_and_a_zero_falls_back_to_it() {
     let rig = Rig::new("override");
     rig.created()
-        .policy_says("\n[controller]\npoll_seconds = 7\nnudge_model = \"from-policy\"\n");
+        .policy_says("\n[controller]\npoll_seconds = 7\ndefault_model = \"from-policy\"\n");
     assert_eq!(code(&rig.run(&["start"])), 0);
     assert_eq!(code(&rig.run(&["stop"])), 0);
 
@@ -1636,8 +2939,7 @@ fn the_seat_list_overrides_policy_per_key_and_a_zero_falls_back_to_it() {
     let mut seats = rig.seat_list();
     seats["controller"] = serde_json::json!({
         "poll_seconds": 11,
-        "nudge_model": "not-a-number-either",
-        "stopped_recency_hours": "a string where a count goes",
+        "rest_threshold_tokens": "a string where a count goes",
     });
     write(
         &rig.machine.join("config.json"),
@@ -1654,7 +2956,7 @@ fn the_seat_list_overrides_policy_per_key_and_a_zero_falls_back_to_it() {
         "the good key beside the bad one still lands: {published}"
     );
     assert!(
-        stderr(&out).contains("stopped_recency_hours"),
+        stderr(&out).contains("rest_threshold_tokens"),
         "the bad key is named: {}",
         stderr(&out)
     );
@@ -1744,13 +3046,14 @@ fn the_first_run_sequence_leaves_the_grant_ok_with_no_worktree_made_yet() {
     let rig = Rig::new("sequence");
     // NO MODEL on the row, so it takes the fleet's default — which is one the
     // posture gate was measured on. A row naming an unmeasured model is dropped
-    // from the seat list before the loop reads it (lessons claude-code D3), and
-    // a dropped row has no worktree to probe, which would leave this arm
-    // measuring nothing.
-    rig.created().policy_says("\n[seats.one]\n");
+    // from the seat list before the loop reads it (the claude-code pack's
+    // lessons D3), and a dropped row has no worktree to probe, which would
+    // leave this arm measuring nothing.
+    rig.created()
+        .policy_says(&format!("\n[seats.{SEAT_A}]\nkind = \"agent\"\n"));
 
     assert_eq!(code(&rig.run(&["start"])), 0);
-    let worktree = rig.root.join("a-project-worktrees/one");
+    let worktree = rig.root.join("a-project-worktrees/agent-93b9739a");
     assert!(
         !worktree.exists(),
         "the render does not create the worktree: {}",
@@ -1879,6 +3182,42 @@ fn start_runs_outside_every_project_when_the_seat_list_names_a_fleet() {
     assert!(stderr(&out).contains("fleet create"), "{}", stderr(&out));
 }
 
+/// shared.locations.R28: `fleet start` acts from any directory, and the
+/// register's refusal of a declared project (R35) is the project verbs', not
+/// its: run from a declaration the machine has not registered, it starts and
+/// keys its rows on that declaration, as it always has.
+#[test]
+fn start_from_a_declaration_the_machine_does_not_register_still_starts() {
+    let rig = Rig::new("start-unregistered");
+    rig.created();
+    assert_eq!(code(&rig.run(&["start"])), 0);
+    assert_eq!(code(&rig.run(&["stop"])), 0);
+
+    let by_hand = rig.root.join("by-hand");
+    let worktrees = rig.root.join("by-hand-elsewhere");
+    write(
+        &by_hand.join(".fleet/project.toml"),
+        &standalone_text("by-hand", Some("bh"), &by_hand, &worktrees),
+    );
+    let out = rig
+        .command(&["start"])
+        .current_dir(&by_hand)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!("rows keyed on by-hand at {}", worktrees.display())),
+        "the rows are keyed on the declaration: {}",
+        stderr(&out)
+    );
+    let stopped = rig
+        .command(&["stop"])
+        .current_dir(&by_hand)
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+}
+
 /// An embedded fleet INSIDE a registered project renders its seat rows under
 /// THAT project and not under the fleet's own directory.
 ///
@@ -1900,7 +3239,7 @@ fn an_embedded_fleet_inside_a_registered_project_keys_its_rows_on_that_project()
     let inside = rig.project.join("fleet");
     std::fs::create_dir_all(&inside).expect("the fleet's own directory is made");
     let out = rig
-        .command(&["create", "--embedded", "--agent", AGENT])
+        .command(&rig.embedded())
         .current_dir(&inside)
         .output()
         .expect("the built binary runs");
@@ -1914,7 +3253,10 @@ fn an_embedded_fleet_inside_a_registered_project_keys_its_rows_on_that_project()
     );
     let policy = inside.join("fleet.toml");
     let body = std::fs::read_to_string(&policy).expect("the policy is there");
-    write(&policy, &format!("{body}\n[seats.one]\n"));
+    write(
+        &policy,
+        &format!("{body}\n[seats.{SEAT_A}]\nkind = \"agent\"\n"),
+    );
 
     let out = rig
         .command(&["start"])
@@ -1931,7 +3273,10 @@ fn an_embedded_fleet_inside_a_registered_project_keys_its_rows_on_that_project()
     assert_eq!(map.len(), 1, "one project key: {after}");
     assert_eq!(
         map.get("outer").map(ToString::to_string),
-        Some(format!("\"{}\"", worktrees.join("one").display())),
+        Some(format!(
+            "\"{}\"",
+            worktrees.join("agent-93b9739a").display()
+        )),
         "the row is keyed on the containing project: {after}"
     );
     assert!(
@@ -1972,7 +3317,7 @@ fn an_embedded_fleet_inside_a_registered_project_keys_its_rows_on_that_project()
         map.get("fleet").map(ToString::to_string),
         Some(format!(
             "\"{}\"",
-            rig.project.join("fleet-worktrees/one").display()
+            rig.project.join("fleet-worktrees/agent-93b9739a").display()
         )),
         "with no register above it, the fleet's own directory is the project: {after}"
     );
@@ -2044,7 +3389,7 @@ mod lessons {
     #[test]
     fn telemetry_is_off_and_asked() {
         let rig = Rig::new("g2");
-        let out = rig.run(&["create", "--embedded", "--agent", AGENT]);
+        let out = rig.run(&rig.embedded());
         assert_eq!(code(&out), 0, "{}", stderr(&out));
 
         let policy = rig.project.join("fleet.toml");
@@ -2086,6 +3431,9 @@ mod lessons {
             &bare.project.join("fleet.toml"),
             "[controller]\npoll_seconds = 5\n",
         );
+        // Written by hand, so no pack carries its agent: the agent stub, by
+        // path.
+        common::stub_agent(&bare.project);
         let out = bare.run(&["start"]);
         assert_eq!(code(&out), 0, "{}", stderr(&out));
         let body = std::fs::read_to_string(bare.project.join("fleet.toml")).unwrap();

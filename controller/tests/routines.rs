@@ -1,18 +1,53 @@
-//! The routine file, the three roots and the clock (PRD R22, Q1).
+//! The routine file, the three roots and the clock.
 //!
 //! Every arm here is offline: the loader is a pure function over a list of
-//! directories, and the gate takes the instant and the check runner as
+//! directories, and the trigger takes the instant and the check runner as
 //! arguments, so nothing below asks this machine what time it is or runs a
 //! command it did not write.
 
-use fleet_controller::routines::file::{self, Action, Loaded, Routine, Source, Trigger, When};
-use fleet_controller::routines::gate::{self, CheckOutcome, Due, LocalMinute};
+use fleet_controller::routines::file::{self, Action, Loaded, Routine, Source, When};
 use fleet_controller::routines::load;
+use fleet_controller::routines::trigger::{self, CheckOutcome, Due, LocalMinute, Trigger};
+use fleet_core::seat::identity::{Directory, Kind, SeatId, SeatRef};
 use std::path::{Path, PathBuf};
 
-/// The seat list every arm validates a ring against, unless it says otherwise.
-fn seats() -> Vec<String> {
-    vec!["builder-1".to_string(), "architect".to_string()]
+/// The host a machine whose actions ring nobody carries: every verb refuses,
+/// so an arm that reached one would say so.
+static NO_HOST: fleet_controller::host::Unresolved = fleet_controller::host::Unresolved {
+    cause: String::new(),
+};
+
+/// The fixed ids this suite's seats carry.
+const BUILDER: &str = "01a0d1f1-0aec-765f-9abe-5c21e8a04b17";
+const ARCHITECT: &str = "01a0d1f1-0aec-765f-9abe-0000000a90e5";
+const ORLA: &str = "01a0d1f1-0aec-765f-9abe-d4f993b9739a";
+
+fn seat_ref(id: &str, name: &str) -> SeatRef {
+    SeatRef {
+        id: SeatId::parse(id).expect("a hand-written seat id parses"),
+        name: Some(name.to_string()),
+        kind: Kind::Agent,
+    }
+}
+
+/// A person the fleet lists and no machine runs.
+const ALBERTO: &str = "01a0d1f1-0aec-765f-9abe-00000a1be270";
+
+/// The seats every arm validates a routine against, unless it says otherwise:
+/// the three rows this machine runs, and a person the fleet lists besides. A
+/// ring names its seat the way a person would, so every row carries a name.
+fn seats() -> Directory {
+    let running = vec![
+        seat_ref(BUILDER, "builder-1"),
+        seat_ref(ARCHITECT, "architect"),
+        seat_ref(ORLA, "Orla"),
+    ];
+    let mut listed = running.clone();
+    listed.push(SeatRef {
+        kind: Kind::Human,
+        ..seat_ref(ALBERTO, "Alberto")
+    });
+    Directory { listed, running }
 }
 
 /// One file's read, with the whole file's text passed in.
@@ -75,7 +110,8 @@ fn a_file_that_names_only_what_it_must_carries_the_defaults() {
 }
 
 /// The unattended-fleet example in the workspace README, parsed through this
-/// same loader (flights PRD R26).
+/// same loader. Core ships no routine that composes or flies, so this file is
+/// the one a person writes.
 ///
 /// THE TEXT IS READ OUT OF THE DOCUMENT and never copied here: an example
 /// beside a format is a claim about that format, and a copy of it in this file
@@ -200,11 +236,11 @@ fn every_required_key_that_is_absent_is_refused_by_name() {
     }
 }
 
-/// A gate parameter under the wrong trigger, one arm per parameter. It is a
+/// A trigger parameter under the wrong trigger, one arm per parameter. It is a
 /// defect and never an ignored line: an `interval` on a cron routine is a plan its
 /// author believes in and nothing reads.
 #[test]
-fn a_gate_parameter_under_the_wrong_trigger_is_a_defect() {
+fn a_trigger_parameter_under_the_wrong_trigger_is_a_defect() {
     for (key, value, belongs, under) in [
         ("schedule", "\"* * * * *\"", "cron", "cooldown"),
         ("interval", "\"1m\"", "cooldown", "cron"),
@@ -351,24 +387,577 @@ fn an_unknown_action_kind_and_a_second_action_are_both_refused() {
 }
 
 /// A ring names a row of THIS machine's seat list, or it is a ring nobody would
-/// ever answer.
+/// ever answer. The seat is RESOLVED AT LOAD, through the resolver every seat
+/// argument takes: a name nobody holds refuses the file with the resolver's own
+/// reason, and one that resolves is stored as the id it found.
 #[test]
 fn a_nudge_to_a_seat_this_machine_does_not_carry_is_refused() {
     let body = "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"* * * * *\"\n\
-                [action.nudge]\nseat = \"builder-9\"\ntext = \"t\"\nauthority = \"a\"\n";
+                [action.nudge]\nseat = \"nobody\"\ntext = \"t\"\nauthority = \"a\"\n";
     let why = refusal(body);
     assert!(
-        why.contains("seat is `builder-9`, which names no row"),
+        why.contains("[action.nudge] seat is nobody, which nobody names no seat — the seats are "),
+        "{why}"
+    );
+    assert!(why.contains("orla-93b9739a"), "the seats are listed: {why}");
+
+    // The control: the same file naming a row that IS on the list reads, and
+    // carries the id the name resolved to.
+    let known = body.replace("nobody", "Orla");
+    let routine = routine_of(&known);
+    let nudge = routine.action.nudge.as_ref().expect("the nudge is read");
+    assert_eq!(nudge.seat, "Orla");
+    assert_eq!(
+        nudge.seat_id.map(|id| id.to_string()).as_deref(),
+        Some(ORLA)
+    );
+}
+
+/// The ring goes to the ROW THE LOAD RESOLVED, found by its id: a nudge naming
+/// `Orla` is typed into Orla's session, the one her id names on the host, and
+/// never a neighbour's — the control is a second live seat on the same
+/// machine that the ring passes by.
+#[test]
+fn a_nudge_to_a_seat_by_its_name_fires_at_that_seats_row() {
+    use fleet_controller::host::{self, Host};
+    use fleet_controller::observe::RosterState;
+    use fleet_controller::policy;
+    use fleet_controller::routines::{action, action::Machine, Outcome, SeatView};
+    use fleet_controller::test_support::{self, Answers, FakeHost, Sent, StubAgent};
+
+    let routine = routine_of(
+        "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"* * * * *\"\n\
+         [action.nudge]\nseat = \"Orla\"\ntext = \"t\"\nauthority = \"a\"\n",
+    );
+    let view = |id: &str, session_name: &str, worktree: &str| SeatView {
+        id: SeatId::parse(id).unwrap(),
+        session_name: session_name.to_string(),
+        worktree: worktree.to_string(),
+        state: RosterState::Present,
+        config_dir: None,
+    };
+    let views = vec![
+        view(BUILDER, "builder-1-e8a04b17", "/wt/builder"),
+        view(ORLA, "orla-93b9739a", "/wt/orla"),
+    ];
+    // Both seats live on the host, each in its own pane; the listing reads
+    // both idle before the ring and both busy after it.
+    let fake = FakeHost::new();
+    let session = |id: &str| host::session_for(&SeatId::parse(id).unwrap());
+    for id in [BUILDER, ORLA] {
+        fake.new_session(
+            &session(id),
+            Path::new("/"),
+            &["/nowhere/agent".to_string()],
+            &[],
+        )
+        .expect("the fake host starts the pane");
+    }
+    let rows = |status: &str| -> Result<String, String> {
+        let rows: Vec<String> = [BUILDER, ORLA]
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "sessionId": format!("{id}-session"),
+                    "cwd": "/anywhere",
+                    "pid": fake.session(&session(id)).map(|pane| pane.pid),
+                    "status": status,
+                })
+                .to_string()
+            })
+            .collect();
+        Ok(test_support::listing(&rows))
+    };
+    let agent = StubAgent::answering(Answers {
+        listing: rows("busy"),
+        ..Answers::default()
+    });
+    agent.list_next([rows("idle")]);
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+    let root = scratch("nudge-by-name");
+    let machine = Machine {
+        machine_dir: &root,
+        child_path: "/usr/bin:/bin",
+        policy: &policy,
+        seats: &views,
+        agent: Some(&agent),
+        host: &fake,
+        effects_off: None,
+    };
+
+    let done = action::run(&routine, &machine);
+    assert_eq!(done.outcome, Outcome::Delivered, "{}", done.detail);
+    assert_eq!(
+        fake.sends(&session(ORLA)),
+        vec![Sent::Paste("t\nauthority: a".to_string()), Sent::Submit],
+        "Orla's session takes the ring's text and its authority, typed"
+    );
+    assert!(
+        fake.sends(&session(BUILDER)).is_empty(),
+        "only Orla is rung: {:?}",
+        fake.sends(&session(BUILDER))
+    );
+
+    // The dry run reads the same row, and names the session it would type into.
+    let argv = action::argv_of(&routine, &machine);
+    assert_eq!(
+        argv,
+        vec![
+            "type".to_string(),
+            "-t".to_string(),
+            session(ORLA),
+            "t\nauthority: a".to_string()
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// [ASSUMES D14] An item's assignee is RESOLVED AT LOAD among every seat the
+/// fleet lists and every seat this machine runs, to the FULL ID the item is
+/// handed to: `Orla` resolves to Orla's id, a person the fleet lists is a seat
+/// an item may go to, and a name nobody holds refuses the file with the
+/// resolver's own reason. The id reaching the store is the filing arm's below.
+#[test]
+fn an_item_assignee_resolves_at_load_to_the_full_id() {
+    let head = "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"* * * * *\"\n\
+                [action.item]\ntitle = \"t\"\n";
+    let why = refusal(&format!("{head}assignee = \"nobody\"\n"));
+    assert!(
+        why.contains(
+            "[action.item] assignee is nobody, which nobody names no seat — the seats are "
+        ),
         "{why}"
     );
 
-    // The control: the same file naming a row that IS on the list reads.
-    let known = body.replace("builder-9", "builder-1");
-    let routine = routine_of(&known);
+    for (named, id) in [
+        ("Orla", ORLA),
+        ("orla-93b9739a", ORLA),
+        ("alberto", ALBERTO),
+    ] {
+        let routine = routine_of(&format!("{head}assignee = \"{named}\"\n"));
+        let item = routine.action.item.as_ref().expect("the item reads");
+        assert_eq!(item.assignee.as_deref(), Some(named), "the file's own word");
+        assert_eq!(
+            item.assignee_id.map(|found| found.to_string()).as_deref(),
+            Some(id),
+            "{named} resolves"
+        );
+    }
+}
+
+/// What the recording store answers a create: the id it filed.
+const FILED_FX_9: &str = r#"echo '{"schema_version":1,"id":"fx-9"}'"#;
+/// What it answers a write that landed.
+const ANSWERED: &str = r#"echo '{"schema_version":1}'"#;
+/// What it answers `capabilities` where an arm declares nothing: the
+/// contract's own item types and priorities.
+const DECLARES_NOTHING: &str = r#"echo '{"schema_version":1}'"#;
+
+/// An adapter executable that records what it is asked, named by `[store]
+/// adapter` in the own `fleet.toml` of a project at `<root>/project`, which is
+/// answered. Each call goes on `<root>/requests` as a `--- <verb>` line and the
+/// request on the next; each verb runs the shell `answers` gives it, and a verb
+/// it names nothing for exits 2 — bar `capabilities`, which declares nothing
+/// where `answers` does not name it.
+fn a_store_that_records(root: &Path, answers: &[(&str, &str)]) -> PathBuf {
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let adapter = root.join("adapter");
+    let cases: String = answers
+        .iter()
+        .map(|(verb, answer)| format!("{verb}) {answer} ;;\n"))
+        .chain([format!("capabilities) {DECLARES_NOTHING} ;;\n")])
+        .collect();
+    std::fs::write(
+        &adapter,
+        format!(
+            "#!/bin/sh\n\
+             {{ printf -- '--- %s\\n' \"$1\"; cat; printf '\\n'; }} >> '{log}'\n\
+             case \"$1\" in\n{cases}*) exit 2 ;;\nesac\n",
+            log = root.join("requests").display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        project.join("fleet.toml"),
+        format!("[store]\nadapter = \"{}\"\n", adapter.display()),
+    )
+    .unwrap();
+    project
+}
+
+/// Every call the recording store was handed, in order, as its verb and its
+/// request.
+fn requests(root: &Path) -> Vec<(String, serde_json::Value)> {
+    let text = std::fs::read_to_string(root.join("requests")).unwrap_or_default();
+    let mut calls = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if let Some(verb) = line.strip_prefix("--- ") {
+            let request = lines.next().unwrap_or_default();
+            let read = serde_json::from_str(request)
+                .unwrap_or_else(|e| panic!("the {verb} request is JSON: {e}: {request}"));
+            calls.push((verb.to_string(), read));
+        }
+    }
+    calls
+}
+
+fn verbs(calls: &[(String, serde_json::Value)]) -> Vec<&str> {
+    calls.iter().map(|(verb, _)| verb.as_str()).collect()
+}
+
+/// A routine filing one item, the `[action.item]` lines after its title as
+/// given, against the project at `project`.
+fn an_item_routine(project: &Path, lines: &str) -> Routine {
+    let mut routine = routine_of(&format!(
+        "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"* * * * *\"\n\
+         [action.item]\ntitle = \"t\"\n{lines}"
+    ));
+    routine.project_root = project.to_path_buf();
+    routine
+}
+
+/// The machine an item action runs on here: a child path that holds no store
+/// binary, so the one store asked is the project's own adapter.
+fn an_item_machine<'a>(
+    root: &'a Path,
+    policy: &'a fleet_controller::policy::Policy,
+) -> fleet_controller::routines::action::Machine<'a> {
+    fleet_controller::routines::action::Machine {
+        machine_dir: root,
+        child_path: "/usr/bin:/bin",
+        policy,
+        seats: &[],
+        agent: None,
+        host: &NO_HOST,
+        effects_off: None,
+    }
+}
+
+/// A ROUTINE FILES THROUGH THE STORE, AS ITSELF. The project's own store is
+/// opened and handed a create, then an update carrying the assignee's full
+/// id, both `by` the routine's typed actor — which is the item's author on
+/// the record, so no note says it again [ASSUMES D9]. The create names the
+/// type an item that names none is filed as, and the routine's own label
+/// beside the file's.
+#[test]
+fn a_routine_files_its_item_through_the_store_as_routine_colon_its_name() {
+    use fleet_controller::policy;
+    use fleet_controller::routines::{action, Outcome};
+
+    let root = scratch("item-store");
+    let project = a_store_that_records(&root, &[("create", FILED_FX_9), ("update", ANSWERED)]);
+    let routine = an_item_routine(&project, "labels = [\"lane\"]\nassignee = \"Orla\"\n");
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Filed, "{}", done.detail);
+    assert_eq!(done.detail, "filed fx-9");
+    assert_eq!(done.extra, vec![("item".to_string(), "fx-9".into())]);
+
+    let calls = requests(&root);
     assert_eq!(
-        routine.action.nudge.as_ref().map(|n| n.seat.as_str()),
-        Some("builder-1")
+        verbs(&calls),
+        vec!["capabilities", "create", "update"],
+        "the declaration, the create, then the assignee, and no note: {calls:?}"
     );
+    let (create, update) = (&calls[1].1, &calls[2].1);
+    assert_eq!(create["by"], "routine:a-routine");
+    assert_eq!(create["root"], project.display().to_string());
+    assert_eq!(
+        create["item"],
+        serde_json::json!({
+            "title": "t",
+            "description": "",
+            "type": "task",
+            "labels": ["lane", "routine:a-routine"],
+        })
+    );
+    assert_eq!(update["id"], "fx-9");
+    assert_eq!(update["assignee"], ORLA, "the full id the load resolved");
+    assert_eq!(update["by"], "routine:a-routine");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An assignee that resolved to no seat leaves the item filed and unassigned,
+/// and the routine failed, naming both — the item is on the record either way,
+/// so the line says which one it is.
+#[test]
+fn an_assignee_naming_no_seat_is_failed_and_the_item_stands_unassigned() {
+    use fleet_controller::policy;
+    use fleet_controller::routines::{action, Outcome};
+
+    let root = scratch("item-no-seat");
+    let project = a_store_that_records(&root, &[("create", FILED_FX_9), ("update", ANSWERED)]);
+    let mut routine = an_item_routine(&project, "");
+    let item = routine.action.item.as_mut().expect("the item reads");
+    item.assignee = Some("nobody".to_string());
+    item.assignee_id = None;
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Failed, "{}", done.detail);
+    assert_eq!(
+        done.detail,
+        "the routine's assignee nobody names no seat of this fleet — fx-9 was filed unassigned"
+    );
+    assert_eq!(done.extra, vec![("item".to_string(), "fx-9".into())]);
+    assert_eq!(
+        verbs(&requests(&root)),
+        vec!["capabilities", "create"],
+        "nothing assigned"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An assignee the store does not take is failed, naming the item filed.
+#[test]
+fn an_assignee_the_store_does_not_take_is_failed_naming_the_item_filed() {
+    use fleet_controller::policy;
+    use fleet_controller::routines::{action, Outcome};
+
+    let root = scratch("item-assign-refused");
+    let project = a_store_that_records(
+        &root,
+        &[
+            ("create", FILED_FX_9),
+            (
+                "update",
+                r#"echo '{"schema_version":1,"error":"the seat table is gone"}'; exit 3"#,
+            ),
+        ],
+    );
+    let routine = an_item_routine(&project, "assignee = \"Orla\"\n");
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Failed, "{}", done.detail);
+    assert!(
+        done.detail
+            .starts_with("fx-9 was filed, and its assignee did not land: "),
+        "{}",
+        done.detail
+    );
+    assert!(
+        done.detail.contains("the seat table is gone"),
+        "{}",
+        done.detail
+    );
+    assert_eq!(done.extra, vec![("item".to_string(), "fx-9".into())]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `dedupe = "open"` is the store's label listing: an open item carrying the
+/// routine's label is Deduped, naming it, and nothing is filed; a listing
+/// that does not answer is could-not-tell, and nothing is filed either.
+#[test]
+fn a_dedupe_asks_the_stores_label_listing() {
+    use fleet_controller::policy;
+    use fleet_controller::routines::{action, Outcome};
+
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+    let root = scratch("item-dedupe");
+    let project = a_store_that_records(
+        &root,
+        &[
+            (
+                "list",
+                r#"echo '{"schema_version":1,"items":[{"id":"fx-1","title":"x","status":"open","type":"task","labels":["routine:a-routine"]}]}'"#,
+            ),
+            ("create", FILED_FX_9),
+        ],
+    );
+    let routine = an_item_routine(&project, "dedupe = \"open\"\n");
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Deduped, "{}", done.detail);
+    assert_eq!(
+        done.detail,
+        "an open item already carries routine:a-routine: fx-1"
+    );
+    assert_eq!(
+        done.extra,
+        vec![("existing".to_string(), serde_json::json!(["fx-1"]))]
+    );
+    let calls = requests(&root);
+    assert_eq!(verbs(&calls), vec!["list"], "nothing filed: {calls:?}");
+    assert_eq!(
+        calls[0].1["filter"],
+        serde_json::json!({ "label": "routine:a-routine" })
+    );
+    let _ = std::fs::remove_dir_all(&root);
+
+    let root = scratch("item-dedupe-unread");
+    let project = a_store_that_records(
+        &root,
+        &[
+            ("list", "echo 'the index is locked' >&2; exit 3"),
+            ("create", FILED_FX_9),
+        ],
+    );
+    let routine = an_item_routine(&project, "dedupe = \"open\"\n");
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::CouldNotTell, "{}", done.detail);
+    assert!(
+        done.detail
+            .starts_with("the dedupe query could not be read: "),
+        "{}",
+        done.detail
+    );
+    assert!(
+        done.detail.contains("the index is locked"),
+        "{}",
+        done.detail
+    );
+    assert_eq!(verbs(&requests(&root)), vec!["list"], "nothing filed");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A store that cannot be opened is could-not-tell, and an item the contract
+/// refuses is failed before anything is sent: neither files anything.
+#[test]
+fn an_unopened_store_or_a_refused_item_files_nothing() {
+    use fleet_controller::policy;
+    use fleet_controller::routines::{action, Outcome};
+
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+    let root = scratch("item-unopened");
+    let project = a_store_that_records(&root, &[("create", FILED_FX_9)]);
+    std::fs::write(
+        project.join("fleet.toml"),
+        "[store]\nadapter = \"sqlite\"\n",
+    )
+    .unwrap();
+    let routine = an_item_routine(&project, "");
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::CouldNotTell, "{}", done.detail);
+    // The name is resolved through the machine's own packs, and this machine
+    // has not had its defaults written.
+    assert_eq!(
+        done.detail,
+        format!(
+            "the store could not be opened: no store adapter named `sqlite` resolves: the pack \
+             layers do not resolve: the defaults this binary carries are not at {} — `fleet \
+             start` writes them, and every template resolves through them",
+            root.join(fleet_core::defaults::DIR).display()
+        )
+    );
+    assert!(requests(&root).is_empty(), "nothing was asked");
+    let _ = std::fs::remove_dir_all(&root);
+
+    let root = scratch("item-refused");
+    let project = a_store_that_records(&root, &[("create", FILED_FX_9)]);
+    let mut routine = an_item_routine(&project, "");
+    routine
+        .action
+        .item
+        .as_mut()
+        .expect("the item reads")
+        .priority = Some(7);
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Failed, "{}", done.detail);
+    assert_eq!(
+        done.detail,
+        "the item was not filed: priority is 7; the range is 0 to 4"
+    );
+    assert!(requests(&root).is_empty(), "nothing was sent");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// THE ITEM IS HELD TO WHAT THE PROJECT'S STORE DECLARES, not to one store's
+/// list. A routine naming `story` loads whatever store it files into; a store
+/// declaring `story` files it, one declaring the contract's own six fails it
+/// naming them, one declaring a narrower range fails a priority outside it,
+/// and a store whose capabilities do not answer is could-not-tell. None of
+/// the three that fail is sent a create.
+///
+/// RED-PROOF: with the load holding a type to the six, the file naming
+/// `story` is refused at load and never reaches a store.
+#[test]
+fn a_routines_item_is_held_to_the_types_and_priorities_its_store_declares() {
+    use fleet_controller::policy;
+    use fleet_controller::routines::{action, Outcome};
+
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+    let declaring = |label: &str, capabilities: &str| {
+        let root = scratch(label);
+        let project = a_store_that_records(
+            &root,
+            &[("capabilities", capabilities), ("create", FILED_FX_9)],
+        );
+        (root, project)
+    };
+
+    let (root, project) = declaring(
+        "item-declared-story",
+        r#"echo '{"schema_version":1,"items":{"types":["story"],"priority":{"min":1,"max":3}}}'"#,
+    );
+    let routine = an_item_routine(&project, "type = \"story\"\npriority = 2\n");
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Filed, "{}", done.detail);
+    let calls = requests(&root);
+    assert_eq!(verbs(&calls), vec!["capabilities", "create"]);
+    assert_eq!(calls[1].1["item"]["type"], "story");
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (root, project) = declaring(
+        "item-declared-narrow",
+        r#"echo '{"schema_version":1,"items":{"types":["story"],"priority":{"min":1,"max":3}}}'"#,
+    );
+    let routine = an_item_routine(&project, "type = \"story\"\npriority = 4\n");
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Failed, "{}", done.detail);
+    assert_eq!(
+        done.detail,
+        "the item was not filed: priority is 4; the store takes 1 to 3"
+    );
+    assert_eq!(
+        verbs(&requests(&root)),
+        vec!["capabilities"],
+        "nothing filed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (root, project) = declaring("item-declared-nothing", DECLARES_NOTHING);
+    let routine = an_item_routine(&project, "type = \"story\"\n");
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::Failed, "{}", done.detail);
+    assert_eq!(
+        done.detail,
+        "the item was not filed: type is `story`; the store takes bug, feature, task, epic, \
+         chore, decision"
+    );
+    assert_eq!(
+        verbs(&requests(&root)),
+        vec!["capabilities"],
+        "nothing filed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (root, project) = declaring(
+        "item-declared-unread",
+        "echo 'the index is locked' >&2; exit 3",
+    );
+    let routine = an_item_routine(&project, "type = \"story\"\n");
+    let done = action::run(&routine, &an_item_machine(&root, &policy));
+    assert_eq!(done.outcome, Outcome::CouldNotTell, "{}", done.detail);
+    assert!(
+        done.detail
+            .starts_with("the store's capabilities could not be read: "),
+        "{}",
+        done.detail
+    );
+    assert_eq!(
+        verbs(&requests(&root)),
+        vec!["capabilities"],
+        "nothing filed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The item table's own vocabulary, each value refused by name.
@@ -377,7 +966,8 @@ fn an_item_refuses_a_priority_a_type_a_when_and_a_dedupe_it_does_not_know() {
     let head = "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"* * * * *\"\n\
                 [action.item]\ntitle = \"t\"\n";
     assert!(refusal(&format!("{head}priority = 5\n")).contains("priority is `5`"));
-    assert!(refusal(&format!("{head}type = \"story\"\n")).contains("type is `story`"));
+    assert!(refusal(&format!("{head}type = \"\"\n")).contains("type is ``"));
+    assert!(refusal(&format!("{head}type = 3\n")).contains("type is `3`"));
     assert!(refusal(&format!("{head}when = \"sometimes\"\n")).contains("when is `sometimes`"));
     assert!(refusal(&format!("{head}dedupe = \"all\"\n")).contains("dedupe is `all`"));
     assert!(refusal(&format!("{head}labels = \"one\"\n")).contains("labels is a string"));
@@ -547,6 +1137,106 @@ fn every_routine_carries_the_root_it_was_loaded_from() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A scratch machine whose seat list names `<dir>/fleet/fleet.toml`: the
+/// machine directory, and the fleet root that file sits in.
+fn a_machine_naming_a_fleet(dir: &Path) -> (PathBuf, PathBuf) {
+    let machine = dir.join("machine");
+    let fleet = dir.join("fleet");
+    write(
+        &fleet.join("fleet.toml"),
+        "[controller]\npoll_seconds = 1\n",
+    );
+    write(
+        &machine.join("config.json"),
+        &serde_json::json!({
+            "fleet_toml": fleet.join("fleet.toml"),
+            "children": [],
+        })
+        .to_string(),
+    );
+    (machine, fleet)
+}
+
+/// A walk that finds an embedded `fleet.toml` answers that file's directory.
+#[test]
+fn a_fleet_root_inside_an_embedded_fleet_is_that_directory() {
+    let dir = scratch("root-embedded");
+    let (machine, _) = a_machine_naming_a_fleet(&dir);
+    let embedded = dir.join("embedded");
+    write(
+        &embedded.join("fleet.toml"),
+        "[controller]\npoll_seconds = 1\n",
+    );
+    std::fs::create_dir_all(embedded.join("orders")).unwrap();
+
+    assert_eq!(
+        load::fleet_root(Some(&embedded.join("orders")), &machine),
+        Ok(embedded)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A declared project at `project` under `dir`, with a `fleet.toml` some other
+/// tool wrote beside the declaration and an `orders` directory to start from.
+fn a_declared_project(dir: &Path) -> PathBuf {
+    let project = dir.join("project");
+    write(
+        &project.join(".fleet").join("project.toml"),
+        "[project]\nname = \"demo\"\n",
+    );
+    write(&project.join("fleet.toml"), "[tool]\nname = \"other\"\n");
+    std::fs::create_dir_all(project.join("orders")).unwrap();
+    project
+}
+
+/// I5: a directory declaring itself a project the machine registers is the
+/// machine's fleet's, even where a `fleet.toml` some other tool wrote sits
+/// beside the declaration.
+#[test]
+fn a_fleet_root_inside_a_declared_project_is_the_fleet_the_machine_names() {
+    let dir = scratch("root-declared");
+    let (machine, fleet) = a_machine_naming_a_fleet(&dir);
+    let project = a_declared_project(&dir);
+    fleet_controller::lifecycle::register(&machine, &project, "demo").unwrap();
+
+    assert_eq!(
+        load::fleet_root(Some(&project.join("orders")), &machine),
+        Ok(fleet)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// shared.locations.R35: a declared project the machine does not register is
+/// refused, exit 1, naming the declaration's directory, and is never the
+/// machine's fleet.
+#[test]
+fn a_fleet_root_inside_an_unregistered_declaration_is_refused() {
+    let dir = scratch("root-unregistered");
+    let (machine, _) = a_machine_naming_a_fleet(&dir);
+    let project = a_declared_project(&dir);
+
+    match load::fleet_root(Some(&project.join("orders")), &machine) {
+        Err(load::NoFleet::Refused(1, why)) => assert!(
+            why.starts_with(&format!("{} declares a project that ", project.display())),
+            "{why}"
+        ),
+        other => panic!("the declaration is refused: {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A walk that finds nothing falls back to the fleet the machine names.
+#[test]
+fn a_fleet_root_with_nothing_above_it_is_the_fleet_the_machine_names() {
+    let dir = scratch("root-nowhere");
+    let (machine, fleet) = a_machine_naming_a_fleet(&dir);
+    let nowhere = dir.join("nowhere");
+    std::fs::create_dir_all(&nowhere).unwrap();
+
+    assert_eq!(load::fleet_root(Some(&nowhere), &machine), Ok(fleet));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Two files with one name refuse BOTH, and the defect names both paths.
 /// Picking one silently is how a duty runs from a file nobody is looking at.
 #[test]
@@ -657,31 +1347,31 @@ fn at(minute: i8, hour: i8, day: i8, month: i8, weekday: i8) -> LocalMinute {
 #[test]
 fn each_cron_field_form_matches_the_minute_it_names() {
     let noon = at(30, 12, 15, 6, 1);
-    assert_eq!(gate::cron_matches("* * * * *", &noon), Ok(true));
-    assert_eq!(gate::cron_matches("30 12 15 6 1", &noon), Ok(true));
-    assert_eq!(gate::cron_matches("31 12 15 6 1", &noon), Ok(false));
-    assert_eq!(gate::cron_matches("0,30 12 15 6 1", &noon), Ok(true));
-    assert_eq!(gate::cron_matches("0,29 * * * *", &noon), Ok(false));
-    assert_eq!(gate::cron_matches("*/15 * * * *", &noon), Ok(true));
-    assert_eq!(gate::cron_matches("*/7 * * * *", &noon), Ok(false));
-    assert_eq!(gate::cron_matches("* */6 * * *", &noon), Ok(true));
-    assert_eq!(gate::cron_matches("* * * 6 *", &noon), Ok(true));
-    assert_eq!(gate::cron_matches("* * * 7 *", &noon), Ok(false));
-    assert!(gate::cron_matches("1-5 * * * *", &noon).is_err());
+    assert_eq!(trigger::cron_matches("* * * * *", &noon), Ok(true));
+    assert_eq!(trigger::cron_matches("30 12 15 6 1", &noon), Ok(true));
+    assert_eq!(trigger::cron_matches("31 12 15 6 1", &noon), Ok(false));
+    assert_eq!(trigger::cron_matches("0,30 12 15 6 1", &noon), Ok(true));
+    assert_eq!(trigger::cron_matches("0,29 * * * *", &noon), Ok(false));
+    assert_eq!(trigger::cron_matches("*/15 * * * *", &noon), Ok(true));
+    assert_eq!(trigger::cron_matches("*/7 * * * *", &noon), Ok(false));
+    assert_eq!(trigger::cron_matches("* */6 * * *", &noon), Ok(true));
+    assert_eq!(trigger::cron_matches("* * * 6 *", &noon), Ok(true));
+    assert_eq!(trigger::cron_matches("* * * 7 *", &noon), Ok(false));
+    assert!(trigger::cron_matches("1-5 * * * *", &noon).is_err());
 }
 
 /// Sunday is 0 and 7 alike, and no other day answers to both.
 #[test]
 fn sunday_is_zero_and_seven_and_no_other_day_is_two_numbers() {
     let sunday = at(0, 0, 1, 1, 0);
-    assert_eq!(gate::cron_matches("* * * * 0", &sunday), Ok(true));
-    assert_eq!(gate::cron_matches("* * * * 7", &sunday), Ok(true));
-    assert_eq!(gate::cron_matches("* * * * 1", &sunday), Ok(false));
+    assert_eq!(trigger::cron_matches("* * * * 0", &sunday), Ok(true));
+    assert_eq!(trigger::cron_matches("* * * * 7", &sunday), Ok(true));
+    assert_eq!(trigger::cron_matches("* * * * 1", &sunday), Ok(false));
 
     let monday = at(0, 0, 2, 1, 1);
-    assert_eq!(gate::cron_matches("* * * * 1", &monday), Ok(true));
-    assert_eq!(gate::cron_matches("* * * * 0", &monday), Ok(false));
-    assert_eq!(gate::cron_matches("* * * * 7", &monday), Ok(false));
+    assert_eq!(trigger::cron_matches("* * * * 1", &monday), Ok(true));
+    assert_eq!(trigger::cron_matches("* * * * 0", &monday), Ok(false));
+    assert_eq!(trigger::cron_matches("* * * * 7", &monday), Ok(false));
 }
 
 /// The instant is read AS ITS MINUTE: every second inside one minute is the
@@ -692,21 +1382,21 @@ fn an_instant_is_read_as_the_minute_it_falls_in() {
     // minutes, which is every zone this reads.
     let boundary = 1_788_600_000;
     assert_eq!(boundary % 60, 0, "the fixture starts on a minute");
-    let first = gate::local_minute_of(boundary).expect("this machine has a zone");
+    let first = trigger::local_minute_of(boundary).expect("this machine has a zone");
     for inside in [1, 30, 59] {
         assert_eq!(
-            gate::local_minute_of(boundary + inside),
+            trigger::local_minute_of(boundary + inside),
             Ok(first),
             "second {inside} of the minute reads as the same minute"
         );
     }
-    let next = gate::local_minute_of(boundary + 60).expect("this machine has a zone");
+    let next = trigger::local_minute_of(boundary + 60).expect("this machine has a zone");
     assert_ne!(next, first, "the minute after is a different reading");
     assert_eq!(next.minute, (first.minute + 1) % 60);
 }
 
-/// A routine with no action to run, for an arm about the gate alone.
-fn gate_routine(body: &str) -> Routine {
+/// A routine with no action to run, for an arm about the trigger alone.
+fn trigger_routine(body: &str) -> Routine {
     routine_of(body)
 }
 
@@ -714,20 +1404,20 @@ const EVERY_MINUTE: &str = "[order]\ndescription = \"d\"\ntrigger = \"cron\"\n\
                             schedule = \"* * * * *\"\n[action.exec]\ncommand = \"true\"\n";
 
 fn never_run(_: &Routine) -> CheckOutcome {
-    panic!("the gate ran a check for a trigger that has none")
+    panic!("the evaluation ran a check for a trigger that has none")
 }
 
 /// A cron routine that matched and already fired in that minute does not fire
 /// twice, and the same routine in the NEXT minute does.
 #[test]
 fn a_cron_routine_fires_once_in_the_minute_it_matches() {
-    let routine = gate_routine(EVERY_MINUTE);
+    let routine = trigger_routine(EVERY_MINUTE);
     let now = 1_788_600_030;
     assert!(matches!(
-        gate::gate(&routine, now, None, &never_run),
+        trigger::evaluate(&routine, now, None, &never_run),
         Due::Due(_)
     ));
-    let inside = gate::gate(&routine, now, Some(now - 20), &never_run);
+    let inside = trigger::evaluate(&routine, now, Some(now - 20), &never_run);
     assert!(
         matches!(inside, Due::NotDue(ref why) if why.contains("already fired in that minute")),
         "{inside:?}"
@@ -735,7 +1425,7 @@ fn a_cron_routine_fires_once_in_the_minute_it_matches() {
     // The same last_fired, one minute later: the suppression is the MINUTE's
     // and not a fixed span.
     assert!(matches!(
-        gate::gate(&routine, now + 60, Some(now - 20), &never_run),
+        trigger::evaluate(&routine, now + 60, Some(now - 20), &never_run),
         Due::Due(_)
     ));
 }
@@ -744,38 +1434,38 @@ fn a_cron_routine_fires_once_in_the_minute_it_matches() {
 /// passed.
 #[test]
 fn a_cooldown_fires_when_it_never_has_and_when_its_interval_is_up() {
-    let routine = gate_routine(
+    let routine = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"cooldown\"\ninterval = \"1h\"\n\
          [action.exec]\ncommand = \"true\"\n",
     );
     let now = 1_788_600_000;
     assert!(matches!(
-        gate::gate(&routine, now, None, &never_run),
+        trigger::evaluate(&routine, now, None, &never_run),
         Due::Due(ref why) if why.contains("never fired")
     ));
     assert!(matches!(
-        gate::gate(&routine, now, Some(now - 3_599), &never_run),
+        trigger::evaluate(&routine, now, Some(now - 3_599), &never_run),
         Due::NotDue(_)
     ));
     assert!(matches!(
-        gate::gate(&routine, now, Some(now - 3_600), &never_run),
+        trigger::evaluate(&routine, now, Some(now - 3_600), &never_run),
         Due::Due(_)
     ));
 }
 
-/// The seven arms of the condition's gate, through an injected runner. Three
+/// The seven arms of the condition trigger, through an injected runner. Three
 /// answers and never two: the fourth arm is the one that says a status the
 /// routine names is read BEFORE the 0 test.
 #[test]
-fn the_condition_gate_answers_three_ways_and_reads_the_named_status_first() {
-    let routine = gate_routine(
+fn the_condition_trigger_answers_three_ways_and_reads_the_named_status_first() {
+    let routine = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"condition\"\ncheck = \"probe\"\n\
          check_unknown_exit = [3]\n[action.exec]\ncommand = \"true\"\n",
     );
     let now = 1_788_600_000;
     let answer = |outcome: CheckOutcome| {
         let run = move |_: &Routine| outcome.clone();
-        gate::gate(&routine, now, None, &run)
+        trigger::evaluate(&routine, now, None, &run)
     };
 
     assert!(matches!(answer(CheckOutcome::Exited(0)), Due::Due(_)));
@@ -794,22 +1484,22 @@ fn the_condition_gate_answers_three_ways_and_reads_the_named_status_first() {
     ));
 
     // Disabled is NOT-DUE and never could-not-tell: nothing was unreadable.
-    let off = gate_routine(
+    let off = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"condition\"\ncheck = \"probe\"\n\
          enabled = false\n[action.exec]\ncommand = \"true\"\n",
     );
     assert!(matches!(
-        gate::gate(&off, now, None, &never_run),
+        trigger::evaluate(&off, now, None, &never_run),
         Due::NotDue(ref why) if why.contains("disabled")
     ));
 
     // The ordering, on the one input that separates the two readings: a status
     // the routine maps to could-not-tell that is ALSO the due status. The file
     // reader refuses a 0 there, so this routine is built rather than parsed —
-    // which is what makes the clause a rule of the gate and not of the parser.
+    // which is what makes the clause a rule of the evaluation and not of the parser.
     let ambiguous = Routine {
         check_unknown_exit: vec![0],
-        ..gate_routine(
+        ..trigger_routine(
             "[order]\ndescription = \"d\"\ntrigger = \"condition\"\ncheck = \"probe\"\n\
              [action.exec]\ncommand = \"true\"\n",
         )
@@ -817,7 +1507,7 @@ fn the_condition_gate_answers_three_ways_and_reads_the_named_status_first() {
     let zero = |_: &Routine| CheckOutcome::Exited(0);
     assert!(
         matches!(
-            gate::gate(&ambiguous, now, None, &zero),
+            trigger::evaluate(&ambiguous, now, None, &zero),
             Due::CouldNotTell(_)
         ),
         "a named status is read before the 0 test"
@@ -836,53 +1526,53 @@ fn the_condition_gate_answers_three_ways_and_reads_the_named_status_first() {
 #[test]
 fn the_next_due_of_each_trigger_is_the_instant_a_reader_can_act_on() {
     let now = 1_788_600_000;
-    let every_minute = gate_routine(EVERY_MINUTE);
-    assert_eq!(gate::next_due(&every_minute, now, None, None), Some(now));
+    let every_minute = trigger_routine(EVERY_MINUTE);
+    assert_eq!(trigger::next_due(&every_minute, now, None, None), Some(now));
     assert_eq!(
-        gate::next_due(&every_minute, now, Some(now), None),
+        trigger::next_due(&every_minute, now, Some(now), None),
         Some(now + 60),
         "a minute this routine already fired in is behind it"
     );
 
-    let cooldown = gate_routine(
+    let cooldown = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"cooldown\"\ninterval = \"1h\"\n\
          [action.exec]\ncommand = \"true\"\n",
     );
-    assert_eq!(gate::next_due(&cooldown, now, None, None), Some(now));
+    assert_eq!(trigger::next_due(&cooldown, now, None, None), Some(now));
     assert_eq!(
-        gate::next_due(&cooldown, now, Some(now - 100), None),
+        trigger::next_due(&cooldown, now, Some(now - 100), None),
         Some(now - 100 + 3_600)
     );
 
-    let condition = gate_routine(
+    let condition = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"condition\"\ncheck = \"probe\"\n\
          poll = \"5m\"\n[action.exec]\ncommand = \"true\"\n",
     );
-    assert_eq!(gate::next_due(&condition, now, None, None), Some(now));
+    assert_eq!(trigger::next_due(&condition, now, None, None), Some(now));
     assert_eq!(
-        gate::next_due(&condition, now, None, Some(now - 60)),
+        trigger::next_due(&condition, now, None, Some(now - 60)),
         Some(now - 60 + 300)
     );
 
     // A schedule with no matching minute at all answers none rather than a date
     // nobody meant. The thirtieth of February is the case, and the search stops
     // at the limit rather than running forever.
-    let never = gate_routine(
+    let never = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"0 0 30 2 *\"\n\
          [action.exec]\ncommand = \"true\"\n",
     );
-    assert_eq!(gate::next_due(&never, now, None, None), None);
+    assert_eq!(trigger::next_due(&never, now, None, None), None);
 
     // The control that the search reaches far without being unbounded: a
     // schedule that matches once a year is found.
-    let yearly = gate_routine(
+    let yearly = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"0 0 1 1 *\"\n\
          [action.exec]\ncommand = \"true\"\n",
     );
-    let next = gate::next_due(&yearly, now, None, None).expect("a yearly schedule has a next");
+    let next = trigger::next_due(&yearly, now, None, None).expect("a yearly schedule has a next");
     assert!(next > now, "the next new year is ahead of {now}");
     assert!(
-        next - now < gate::SEARCH_LIMIT_MINUTES * 60,
+        next - now < trigger::SEARCH_LIMIT_MINUTES * 60,
         "and inside the search limit"
     );
 }
@@ -893,35 +1583,51 @@ fn the_next_due_of_each_trigger_is_the_instant_a_reader_can_act_on() {
 #[test]
 fn each_trigger_is_asked_no_more_often_than_it_can_answer() {
     let now = 1_788_600_000;
-    let cron = gate_routine(EVERY_MINUTE);
-    assert!(gate::is_due_an_evaluation(&cron, now, None));
-    assert!(!gate::is_due_an_evaluation(&cron, now + 59, Some(now)));
-    assert!(gate::is_due_an_evaluation(&cron, now + 60, Some(now)));
+    let cron = trigger_routine(EVERY_MINUTE);
+    assert!(trigger::is_due_an_evaluation(&cron, now, None));
+    assert!(!trigger::is_due_an_evaluation(&cron, now + 59, Some(now)));
+    assert!(trigger::is_due_an_evaluation(&cron, now + 60, Some(now)));
     // The drift a span would have: evaluated one second before the boundary,
     // the next minute is still asked about.
-    assert!(gate::is_due_an_evaluation(&cron, now + 60, Some(now + 59)));
+    assert!(trigger::is_due_an_evaluation(
+        &cron,
+        now + 60,
+        Some(now + 59)
+    ));
 
-    let cooldown = gate_routine(
+    let cooldown = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"cooldown\"\ninterval = \"1h\"\n\
          [action.exec]\ncommand = \"true\"\n",
     );
-    assert!(!gate::is_due_an_evaluation(&cooldown, now + 59, Some(now)));
-    assert!(gate::is_due_an_evaluation(&cooldown, now + 60, Some(now)));
+    assert!(!trigger::is_due_an_evaluation(
+        &cooldown,
+        now + 59,
+        Some(now)
+    ));
+    assert!(trigger::is_due_an_evaluation(
+        &cooldown,
+        now + 60,
+        Some(now)
+    ));
 
-    let condition = gate_routine(
+    let condition = trigger_routine(
         "[order]\ndescription = \"d\"\ntrigger = \"condition\"\ncheck = \"probe\"\n\
          poll = \"5m\"\n[action.exec]\ncommand = \"true\"\n",
     );
-    assert!(!gate::is_due_an_evaluation(
+    assert!(!trigger::is_due_an_evaluation(
         &condition,
         now + 299,
         Some(now)
     ));
-    assert!(gate::is_due_an_evaluation(&condition, now + 300, Some(now)));
+    assert!(trigger::is_due_an_evaluation(
+        &condition,
+        now + 300,
+        Some(now)
+    ));
 }
 
 /// A disabled routine is not-due whatever its trigger says, which is the first
-/// line of the gate and not a branch inside each one.
+/// line of the evaluation and not a branch inside each one.
 #[test]
 fn a_disabled_routine_is_not_due_under_every_trigger() {
     for body in [
@@ -930,9 +1636,9 @@ fn a_disabled_routine_is_not_due_under_every_trigger() {
         "[order]\ndescription = \"d\"\ntrigger = \"cooldown\"\ninterval = \"1s\"\n\
          enabled = false\n[action.exec]\ncommand = \"true\"\n",
     ] {
-        let routine = gate_routine(body);
+        let routine = trigger_routine(body);
         assert!(matches!(
-            gate::gate(&routine, 1_788_600_000, None, &never_run),
+            trigger::evaluate(&routine, 1_788_600_000, None, &never_run),
             Due::NotDue(ref why) if why.contains("disabled")
         ));
     }
@@ -1027,7 +1733,8 @@ fn a_run_action_names_a_workflow_and_pins_its_inputs_as_strings() {
 
 /// A `fleet` on the child path that answers `run` the way the verb does: the
 /// two lines on stdout, `run.started` and one terminal line on the stream
-/// under the actor it was given, and the exit the terminal line maps to.
+/// under the actor it was given — typed, as the stream stores it — and the
+/// exit the terminal line maps to.
 ///
 /// THE VERB IS A STUB HERE because this crate carries no fleet binary: the
 /// contract measured is the action's — what it types, where, and what it reads
@@ -1042,21 +1749,23 @@ stream="$FLEET_DIR/events.jsonl"
 printf '%s\n' "$@" > "$FLEET_DIR/fleet-argv.txt"
 pwd > "$FLEET_DIR/fleet-cwd.txt"
 for word; do by=$word; done
+kind=${by%%:*}
+id=${by#*:}
 workflow=$2
 last=$(tail -n 1 "$stream" 2>/dev/null | sed 's/.*"seq":\([0-9]*\).*/\1/')
 [ -n "$last" ] || last=0
 one=$((last + 1))
 two=$((last + 2))
-echo "{\"id\":\"e-$one\",\"seq\":$one,\"ts\":\"2026-09-18T00:00:00Z\",\"type\":\"run.started\",\"actor\":\"$by\",\"payload\":{\"run\":\"fx-7\",\"hash\":\"h\",\"workflow\":\"$workflow\"}}" >> "$stream"
+echo "{\"id\":\"e-$one\",\"seq\":$one,\"ts\":\"2026-09-18T00:00:00Z\",\"type\":\"run.started\",\"actor\":{\"kind\":\"$kind\",\"id\":\"$id\"},\"payload\":{\"run\":\"fx-7\",\"hash\":\"h\",\"workflow\":\"$workflow\"}}" >> "$stream"
 echo "fx-7 — h"
 case $workflow in
   falls)
-    echo "{\"id\":\"e-$two\",\"seq\":$two,\"ts\":\"2026-09-18T00:00:00Z\",\"type\":\"run.failed\",\"actor\":\"$by\",\"payload\":{\"run\":\"fx-7\",\"exit\":1}}" >> "$stream"
+    echo "{\"id\":\"e-$two\",\"seq\":$two,\"ts\":\"2026-09-18T00:00:00Z\",\"type\":\"run.failed\",\"actor\":{\"kind\":\"$kind\",\"id\":\"$id\"},\"payload\":{\"run\":\"fx-7\",\"exit\":1}}" >> "$stream"
     echo "fx-7 — failed"
     exit 1
     ;;
   *)
-    echo "{\"id\":\"e-$two\",\"seq\":$two,\"ts\":\"2026-09-18T00:00:00Z\",\"type\":\"run.closed\",\"actor\":\"$by\",\"payload\":{\"run\":\"fx-7\"}}" >> "$stream"
+    echo "{\"id\":\"e-$two\",\"seq\":$two,\"ts\":\"2026-09-18T00:00:00Z\",\"type\":\"run.closed\",\"actor\":{\"kind\":\"$kind\",\"id\":\"$id\"},\"payload\":{\"run\":\"fx-7\"}}" >> "$stream"
     echo "fx-7 — closed"
     exit 0
     ;;
@@ -1120,6 +1829,7 @@ fn fire_run_routine(
                 policy: &policy,
                 seats: &[],
                 agent: None,
+                host: &NO_HOST,
                 effects_off: None,
             },
             events: &mut log,
@@ -1130,7 +1840,7 @@ fn fire_run_routine(
     let argv = std::fs::read_to_string(machine_dir.join("fleet-argv.txt")).unwrap();
     assert_eq!(
         argv,
-        format!("run\n{workflow}\n--input\nwho=the-arm\n--by\nnightly\n"),
+        format!("run\n{workflow}\n--input\nwho=the-arm\n--by\nroutine:nightly\n"),
         "the verb, the workflow, each input as a pair and the routine as the runner"
     );
     let cwd = std::fs::read_to_string(machine_dir.join("fleet-cwd.txt")).unwrap();
@@ -1182,7 +1892,7 @@ fn a_run_action_calls_the_run_verb_and_the_run_id_rides_the_terminal_event() {
     assert!(fired < started && started < closed && closed < completed);
 
     let opening = &stream[0];
-    assert_eq!(opening.actor, "nightly");
+    assert_eq!(opening.actor, events::ActorRef::routine("nightly"));
     assert_eq!(opening.payload["order"], "nightly");
     assert!(
         opening.payload.get("run").is_none(),
@@ -1190,13 +1900,14 @@ fn a_run_action_calls_the_run_verb_and_the_run_id_rides_the_terminal_event() {
         opening.payload
     );
     assert_eq!(
-        stream[1].actor, "nightly",
-        "the run names the routine as its runner"
+        stream[1].actor,
+        events::ActorRef::routine("nightly"),
+        "the run names the routine as its runner, typed"
     );
     let run_id = stream[1].payload["run"].as_str().unwrap().to_string();
 
     let terminal = &stream[3];
-    assert_eq!(terminal.actor, "nightly");
+    assert_eq!(terminal.actor, events::ActorRef::routine("nightly"));
     assert_eq!(terminal.payload["order"], "nightly");
     assert_eq!(terminal.payload["outcome"], "ran");
     assert_eq!(terminal.payload["run"], run_id.as_str());
@@ -1259,9 +1970,10 @@ fn a_run_action_with_no_fleet_on_the_child_path_is_could_not_tell() {
         policy: &policy,
         seats: &[],
         agent: None,
+        host: &NO_HOST,
         effects_off: None,
     };
-    let done = action::run(&routine, &machine, "2026-09-18T00:00:00Z");
+    let done = action::run(&routine, &machine);
     assert_eq!(done.outcome, Outcome::CouldNotTell);
     assert!(
         done.detail
@@ -1272,6 +1984,48 @@ fn a_run_action_with_no_fleet_on_the_child_path_is_could_not_tell() {
 
     // The dry run's argv names the verb by its bare name where nothing resolves.
     let argv = action::argv_of(&routine, &machine);
-    assert_eq!(argv, vec!["fleet", "run", "takeoff", "--by", "a-routine"]);
+    assert_eq!(
+        argv,
+        vec!["fleet", "run", "takeoff", "--by", "routine:a-routine"]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An item's dry run prints the store request the filing sends — the create,
+/// as one line of the contract's JSON without the root — and never a store
+/// binary's argv.
+#[test]
+fn an_item_actions_dry_run_is_the_store_create_request() {
+    use fleet_controller::policy;
+    use fleet_controller::routines::action;
+
+    let root = scratch("item-dry-run");
+    let routine = routine_of(
+        "[order]\ndescription = \"d\"\ntrigger = \"cron\"\nschedule = \"* * * * *\"\n\
+         [action.item]\ntitle = \"t\"\ndescription = \"what it is\"\nlabels = [\"lane\"]\n\
+         type = \"bug\"\npriority = 1\nassignee = \"Orla\"\n",
+    );
+    let policy = policy::parse("").expect("the empty policy is the defaults");
+    let argv = action::argv_of(&routine, &an_item_machine(&root, &policy));
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "item": {
+            "title": "t",
+            "description": "what it is",
+            "type": "bug",
+            "labels": ["lane", "routine:a-routine"],
+            "priority": 1,
+        },
+        "by": "routine:a-routine",
+    });
+    assert_eq!(
+        argv,
+        vec![
+            "store".to_string(),
+            "create".to_string(),
+            request.to_string()
+        ]
+    );
+    assert!(!argv[2].contains('\n'), "one line: {}", argv[2]);
     let _ = std::fs::remove_dir_all(&root);
 }

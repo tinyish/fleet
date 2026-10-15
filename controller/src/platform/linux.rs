@@ -1,25 +1,24 @@
 //! The Linux half of the platform layer.
 
-use super::{resolve_on_path, run_bounded, ServiceFile};
+use super::ServiceFile;
+use fleet_core::process::{resolve_on_path, run_bounded};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
-pub fn machine_dir_under(home: &Path, xdg_state: Option<&Path>) -> PathBuf {
-    match xdg_state {
-        Some(state) => state.join("fleet"),
-        None => home.join(".fleet"),
-    }
+/// `fleet` under `XDG_STATE_HOME` where it is set, ahead of any home
+/// (shared.locations R5).
+pub fn state_dir(xdg_state: Option<&Path>) -> Option<PathBuf> {
+    xdg_state.map(|state| state.join("fleet"))
 }
 
 /// The directories a child of this controller searches, in order.
 ///
 /// Built from this list and the home passed in, never from the process's own
 /// `PATH`: a service-launched process carries a minimal one, and every session
-/// claimed from a daemon started under it inherits that (lessons claude-code
-/// D1). There is no `sbin` pair here and no package-manager prefix: a systemd
-/// user unit's own environment holds neither, and the agent installs under the
-/// home's local bin.
+/// started under it inherits that (lessons claude-code D1). There is no `sbin`
+/// pair here and no package-manager prefix: a systemd user unit's own
+/// environment holds neither, and the agent installs under the home's local
+/// bin.
 pub fn child_path_dirs(home: &Path) -> Vec<PathBuf> {
     vec![
         home.join(".local").join("bin"),
@@ -29,28 +28,9 @@ pub fn child_path_dirs(home: &Path) -> Vec<PathBuf> {
     ]
 }
 
-extern "C" {
-    fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32;
-}
-
-/// The five-minute load average, or `None` when the C library would not answer —
-/// which is a reading nobody has and never a machine under no load.
-///
-/// The C call rather than `/proc/loadavg`, unlike the process read below: both
-/// libc implementations this target ships read that file themselves, so parsing
-/// it here would be a second parser for the same bytes. Which of the three
-/// samples is the belt's is `super::LOAD_SAMPLE`'s to say, so the two platforms
-/// cannot read different minutes.
-pub fn load_average_5m() -> Option<f64> {
-    let mut samples = [0.0f64; 3];
-    // SAFETY: the pointer is to an array of three, and 3 is the count passed.
-    let filled = unsafe { getloadavg(samples.as_mut_ptr(), 3) };
-    super::belt_sample(&samples[..filled.clamp(0, 3) as usize])
-}
-
-/// The process table is `/proc`, not `/bin/ps` (PRD § Two platforms). A
-/// `/proc` that is not mounted answers `None`: without it this layer cannot
-/// tell a gone process from a filesystem it cannot see.
+/// The process table is `/proc`, not `/bin/ps`. A `/proc` that is not mounted
+/// answers `None`: without it this layer cannot tell a gone process from a
+/// filesystem it cannot see.
 pub fn process_alive(pid: u32) -> Option<bool> {
     if pid == 0 || !Path::new("/proc/self").is_dir() {
         return None;
@@ -67,27 +47,24 @@ pub const SERVICE_BIN: &str = "systemctl";
 /// the gate reads `ok` without probing (lessons claude-code D4).
 pub const GRANT_IS_GATED: bool = false;
 
-/// How long the after-write reading is given.
-const ASIDE_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// The unit file under the user's own unit directory.
-///
-/// `FLEET_DIR` is carried into the service's environment ONLY when the caller
-/// has one — a scratch machine directory has to reach the service — and no
-/// `PATH` is written: the controller constructs its children's search path, and
-/// one frozen here at install time is what every later session inherits
-/// (lessons claude-code D1).
+/// The unit file under the user's own unit directory, which follows
+/// `XDG_CONFIG_HOME` where it is set. It always tells the
+/// service the machine directory (`FLEET_DIR`), and no `PATH` is written: the
+/// controller constructs its children's search path, and one frozen here at
+/// install time is what every later session inherits (lessons claude-code D1).
 pub fn service_file(
     home: &Path,
+    config_home: Option<&Path>,
     label: &str,
     exe: &Path,
     machine_dir: &Path,
-    fleet_dir: Option<&Path>,
 ) -> ServiceFile {
-    let environment = match fleet_dir {
-        Some(dir) => format!("Environment=FLEET_DIR={}\n", dir.display()),
-        None => String::new(),
-    };
+    // Always, and quoted: see the macOS writer for why the directory is told,
+    // and `assignment_value` for why it is quoted.
+    let environment = format!(
+        "Environment=\"FLEET_DIR={}\"\n",
+        assignment_value(machine_dir)
+    );
     let text = format!(
         "[Unit]\n\
          Description=the fleet controller\n\
@@ -105,13 +82,31 @@ pub fn service_file(
         machine = machine_dir.display(),
     );
     ServiceFile {
-        path: home
-            .join(".config")
-            .join("systemd")
-            .join("user")
-            .join(format!("{label}.service")),
+        path: unit_dir(home, config_home).join(format!("{label}.service")),
         text,
     }
+}
+
+/// Where the user's own service manager reads a user's units: under
+/// `XDG_CONFIG_HOME` where it is set, under the home's `.config` where it is
+/// not (shared.locations R19).
+fn unit_dir(home: &Path, config_home: Option<&Path>) -> PathBuf {
+    config_home
+        .map_or_else(|| home.join(".config"), Path::to_path_buf)
+        .join("systemd")
+        .join("user")
+}
+
+/// A path inside a double-quoted `Environment=` assignment: a backslash and a
+/// quote escaped, and a `%` doubled, because the manager reads a lone one as
+/// the start of a specifier. Quoted at all because a space would otherwise end
+/// the assignment.
+fn assignment_value(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
 }
 
 /// This platform's manager collects what the service printed into the user's
@@ -171,7 +166,7 @@ pub fn pid_in(stdout: &str) -> Option<u32> {
 /// of that user ends unless lingering is enabled, and enabling it is a change to
 /// the machine's own login policy — so the command is printed for the person and
 /// this layer runs nothing.
-pub fn after_write(child_path: &str, _label: &str, _file: &Path) -> Vec<String> {
+pub fn after_write(child_path: &str, _file: &Path) -> Vec<String> {
     let Some(bin) = resolve_on_path(child_path, "loginctl") else {
         return vec![format!(
             "lingering was not read: `loginctl` is not on the constructed search path {child_path}"
@@ -179,18 +174,21 @@ pub fn after_write(child_path: &str, _label: &str, _file: &Path) -> Vec<String> 
     };
     let mut command = Command::new(&bin);
     command.args(["show-user", "--property=Linger"]);
-    match run_bounded(command, ASIDE_TIMEOUT) {
-        Ok(run) if run.ok && run.stdout.contains("Linger=yes") => {
+    match run_bounded(command, super::ASIDE_TIMEOUT) {
+        Ok(run)
+            if run.status.success()
+                && String::from_utf8_lossy(&run.stdout).contains("Linger=yes") =>
+        {
             vec!["lingering is on: the controller survives a logout".to_string()]
         }
-        Ok(run) if run.ok => vec![format!(
+        Ok(run) if run.status.success() => vec![format!(
             "lingering is off, so the controller stops at logout — run this yourself: {} \
              enable-linger",
             bin.display()
         )],
         Ok(run) => vec![format!(
             "lingering could not be read: {}",
-            run.stderr
+            String::from_utf8_lossy(&run.stderr)
                 .trim()
                 .lines()
                 .next()

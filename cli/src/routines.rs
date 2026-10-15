@@ -1,4 +1,4 @@
-//! `fleet routine list | check | run | history` (PRD R24).
+//! `fleet routine list | check | run | history`.
 //!
 //! One family module and one arm in the dispatch, so a second family's landing
 //! and this one's meet in one place. The four verbs are one clap enum here and
@@ -9,16 +9,17 @@
 //! stdout: a caller piping this verb wants the row it produced, and a note
 //! about a lock it took over is not that row.
 
-use fleet_controller::adapter::claude_code::ClaudeCode;
-use fleet_controller::adapter::{dir_key, Agent};
 use fleet_controller::policy::Policy;
+use fleet_controller::projection::dir_key;
 use fleet_controller::routines::action::Machine;
 use fleet_controller::routines::file::Routine;
-use fleet_controller::routines::gate::Due;
 use fleet_controller::routines::load::Registry;
-use fleet_controller::routines::{self, action, gate, load, state, Outcome, SeatView};
+use fleet_controller::routines::trigger::Due;
+use fleet_controller::routines::{self, action, load, state, trigger, Outcome, SeatView};
 use fleet_controller::{clock, config, events, observe, platform, policy, sessions};
-use std::path::{Path, PathBuf};
+use fleet_core::agent::{self, Agent};
+use fleet_core::seat::identity::SeatId;
+use std::path::PathBuf;
 
 use crate::exit::Exit;
 
@@ -33,10 +34,10 @@ pub enum Verb {
     /// every routine loaded, with its next due and its last outcome
     List,
 
-    /// evaluate one routine's gate now, without firing it
+    /// evaluate one routine's trigger now, without firing it
     #[command(long_about = "\
-evaluate one routine's gate now and print the three-valued answer: 0 due, 1 not
-due, 3 could not tell. Writes nothing.")]
+evaluate one routine's trigger now and print the three-valued answer: 0 due, 1
+not due, 3 could not tell. Writes nothing.")]
     Check {
         /// the routine's name
         name: String,
@@ -51,11 +52,11 @@ due, 3 could not tell. Writes nothing.")]
     /// fire one routine now and print the event row it produced
     #[command(long_about = "\
 fire one routine now, outside its schedule, and print the event row.
---force bypasses the gate and never the lock; --dry-run writes nothing at all.")]
+--force overrides the trigger, never the lock; --dry-run writes nothing at all.")]
     Run {
         /// the routine's name
         name: String,
-        /// fire it whether or not the gate says it is due
+        /// fire it whether or not its trigger is due
         #[arg(long)]
         force: bool,
         /// say what would happen and write nothing
@@ -99,135 +100,135 @@ fn usage(why: &str) -> Exit {
     Exit::Usage
 }
 
-/// A status the gate and the action layers state as a number, read back into
-/// the table. A number outside it is those layers' own defect and reads as
-/// could-not-tell rather than as a status this module invented.
-fn exit_of(code: u8) -> Exit {
-    Exit::from_status(code).unwrap_or(Exit::CouldNotTell)
-}
-
 /// Everything the four verbs read off the machine, resolved once.
 struct Fleet {
     machine_dir: PathBuf,
     child_path: String,
+    /// The host the seats' sessions run on, which a ring types into.
+    host: Box<dyn fleet_controller::host::Host>,
     policy: Policy,
+    /// `[agent] adapter` out of the fleet's own file, and this machine's
+    /// packs to resolve it through.
+    setting: agent::Setting,
     seats: Vec<config::Seat>,
     registry: Registry,
 }
 
-/// Resolve the machine and load every routine on it. `Err` is a fleet root
-/// nothing on this box names, which is could-not-tell and never an empty
-/// registry.
-fn resolve() -> Result<Fleet, String> {
+/// Resolve the machine and load every routine on it. `Err` is the exit and the
+/// line, never an empty registry: a fleet nothing on this box names is a
+/// refusal (shared.exit-codes.R23); a declared project the machine does not
+/// run is the gate's refusal (shared.locations.R26, R35); a policy that will
+/// not read is could-not-tell.
+fn resolve() -> Result<Fleet, (Exit, String)> {
     let machine_dir = platform::machine_dir();
-    let Some(fleet_root) = load::fleet_root(None, &machine_dir) else {
-        return Err(format!(
-            "no `fleet.toml` above this directory and none named by {}",
-            machine_dir.join("config.json").display()
-        ));
+    let fleet_root = match load::fleet_root(None, &machine_dir) {
+        Ok(root) => root,
+        Err(load::NoFleet::Nothing) => {
+            return Err((
+                Exit::Refused,
+                format!(
+                    "no `fleet.toml` above this directory and none named by {}",
+                    config::path_in(&machine_dir).display()
+                ),
+            ))
+        }
+        Err(load::NoFleet::Refused(code, why)) => return Err((Exit::of(code), why)),
     };
-    let seats = config::read(&machine_dir.join("config.json"))
+    let seats = config::read(&config::path_in(&machine_dir))
         .map(|machine| machine.seats)
         .unwrap_or_default();
-    let names: Vec<String> = seats.iter().map(|seat| seat.name.clone()).collect();
-    let registry = load::load(
-        &load::roots(&fleet_root, &machine_dir, &projects_of(&fleet_root)),
-        &names,
-    );
+    let fleet_toml = fleet_root.join("fleet.toml");
+    let table = fleet_core::item::table_at(&fleet_toml);
+    // A nudge names a row this machine runs; an item's assignee names any seat
+    // the fleet lists besides.
+    let registry = load::registry_for(&fleet_root, &machine_dir, &seats, &table);
     // A policy that will not read is the defaults: the four verbs below need
-    // the nudge model and its bound, and refusing to LIST routines over a policy
-    // file is a refusal nobody asked for.
-    let policy = policy::load(&fleet_root.join("fleet.toml"))
+    // the bound a ring is typed under, and refusing to LIST routines over a
+    // policy file is a refusal nobody asked for.
+    let policy = policy::load(&fleet_toml)
         .or_else(|_| policy::parse(""))
-        .map_err(|why| format!("the policy could not be read: {why}"))?;
+        .map_err(|why| {
+            (
+                Exit::CouldNotTell,
+                format!("the policy could not be read: {why}"),
+            )
+        })?;
+    // A file that will not read names no adapter, as it names no policy
+    // above: the agent's default opens.
+    let setting = agent::Setting::of(table, &fleet_toml, &machine_dir);
+    let child_path = platform::child_path(&platform::home_dir());
     Ok(Fleet {
-        child_path: platform::child_path(&platform::home_dir()),
+        host: fleet_controller::host::resolve(&child_path),
+        child_path,
         machine_dir,
         policy,
+        setting,
         seats,
         registry,
     })
-}
-
-/// The projects routines are read from: in this slice the one embedded project,
-/// which is the fleet root itself.
-fn projects_of(fleet_root: &std::path::Path) -> Vec<(String, PathBuf)> {
-    let name = fleet_root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
-    vec![(name, fleet_root.to_path_buf())]
 }
 
 /// The seat rows a ring reads. The roster is asked for ONLY when a routine's
 /// action carries a nudge: a verb that listed sessions to run an exec routine
 /// would refuse on a machine with no agent installed.
 fn seat_views(fleet: &Fleet, needs_roster: bool) -> Vec<SeatView> {
-    // The table read ONCE for the whole pass: the directory a spawned seat's
-    // session is held under is what a read and a ring both have to go through
-    // (flights PRD R13), and it lives on that seat's own row.
+    // The table read ONCE for the whole pass: every spawned seat's session is
+    // held under a configuration directory of its own, which a read and a ring
+    // both have to go through, and it lives on that seat's own row — as does the
+    // name the ring addresses its session by.
     let recorded = sessions::read(&sessions::path_in(&fleet.machine_dir)).0;
-    let config_dir_of = |seat: &str| {
+    let config_dir_of = |seat: &SeatId| {
         recorded
             .as_ref()
-            .and_then(|table| table.newest_for(seat))
+            .and_then(|table| table.newest_for(&seat.to_string()))
             .and_then(|row| row.config_dir.clone())
     };
-    let read = if needs_roster {
+    let states: Vec<observe::RosterState> = if needs_roster {
         let home = platform::home_dir();
-        let mut agent = ClaudeCode::new(&home, &fleet.machine_dir);
-        if let Ok(bin) = ClaudeCode::resolve_effect_bin(
-            fleet_controller::adapter::claude_code::configured_bin().as_deref(),
-            &agent.child_path,
-        ) {
-            agent = agent.with_effect_bin(bin);
+        // The host, read once, as the loop reads it: presence is the host's,
+        // so a seat is only ever rung in a session it holds. And the agent,
+        // opened the one way every caller opens it and asked ONCE about every
+        // seat whose pane is alive, each under its own directory — the same
+        // read the loop makes, so a spawned seat is not rung as nobody.
+        let host = fleet_controller::project::wiring::verb_host(&home).list();
+        match agent::open(&fleet.setting.opening(&fleet.child_path)) {
+            Ok(opened) => observe::observe_fleet(
+                &opened.agent,
+                &host,
+                &fleet.seats,
+                &|seat: &SeatId| observe::Held {
+                    session_id: recorded
+                        .as_ref()
+                        .and_then(|table| table.newest_for(&seat.to_string()))
+                        .and_then(|row| row.session_id.clone()),
+                    config_dir: config_dir_of(seat),
+                },
+                clock::now_ms(),
+            )
+            .into_iter()
+            .map(|observation| observation.state)
+            .collect(),
+            Err(_) => vec![observe::RosterState::Unknown; fleet.seats.len()],
         }
-        // One listing per distinct directory, the same fold the loop makes: a
-        // spawned seat is named by its own daemon's listing alone, so a pass that
-        // read once would rank every such seat absent and ring nobody.
-        let rosters =
-            observe::Rosters::gather(&fleet.seats, &config_dir_of, &|dir| agent.status(dir));
-        Some((rosters, agent))
     } else {
-        None
+        vec![observe::RosterState::Absent; fleet.seats.len()]
     };
     fleet
         .seats
         .iter()
-        .filter_map(|seat| {
+        .zip(states)
+        .filter_map(|(seat, state)| {
             let (_, worktree) = seat.worktrees.first()?;
-            let state = match &read {
-                Some((rosters, agent)) => {
-                    let under = config_dir_of(&seat.name);
-                    let recency = observe::Recency {
-                        window_ms: fleet.policy.stopped_recency_hours * 60 * 60 * 1000,
-                        ended_at: &|worktree: &str, session: &str| {
-                            agent.ended_at(
-                                under.as_deref().map(Path::new),
-                                dir_key(worktree),
-                                session,
-                            )
-                        },
-                    };
-                    observe::observe_seat(
-                        rosters.for_seat(&seat.name),
-                        seat,
-                        clock::now_ms(),
-                        &recency,
-                    )
-                    .state
-                }
-                None => observe::RosterState::Absent,
+            let session_name = match &recorded {
+                Some(table) => table.session_name(&seat.as_ref()),
+                None => seat.machine_name(),
             };
             Some(SeatView {
-                seat_dir: seat.name.clone(),
-                display_name: fleet_controller::effect::display_name(
-                    seat.chosen_name.as_deref(),
-                    &seat.name,
-                ),
+                id: seat.id,
+                session_name,
                 worktree: dir_key(worktree).to_string(),
                 state,
-                config_dir: config_dir_of(&seat.name),
+                config_dir: config_dir_of(&seat.id),
             })
         })
         .collect()
@@ -245,6 +246,7 @@ fn machine_of<'a>(
         policy: &fleet.policy,
         seats,
         agent,
+        host: fleet.host.as_ref(),
         effects_off,
     }
 }
@@ -254,9 +256,9 @@ fn machine_of<'a>(
 fn list() -> Exit {
     let fleet = match resolve() {
         Ok(fleet) => fleet,
-        Err(why) => {
+        Err((exit, why)) => {
             eprintln!("fleet routine list: {why}");
-            return Exit::CouldNotTell;
+            return exit;
         }
     };
     let (state, why) = state::read(&fleet.machine_dir);
@@ -304,9 +306,9 @@ fn check(name: &str, now_at: Option<&str>, last_fired: Option<&str>) -> Exit {
 
     let fleet = match resolve() {
         Ok(fleet) => fleet,
-        Err(why) => {
+        Err((exit, why)) => {
             eprintln!("fleet routine check: {why}");
-            return Exit::CouldNotTell;
+            return exit;
         }
     };
     let Some(routine) = known(&fleet, name, "check") else {
@@ -323,7 +325,7 @@ fn check(name: &str, now_at: Option<&str>, last_fired: Option<&str>) -> Exit {
 
     let seats = seat_views(&fleet, false);
     let machine = machine_of(&fleet, &seats, None, None);
-    let answer = gate::gate(routine, now, fired, &|routine| {
+    let answer = trigger::evaluate(routine, now, fired, &|routine| {
         action::run_check(routine, &machine)
     });
     println!("{} — {}", answer.word(), answer.reason());
@@ -365,16 +367,16 @@ fn stamp_or(text: Option<&str>, fallback: u64) -> Result<u64, String> {
 fn run(name: &str, force: bool, dry_run: bool) -> Exit {
     let fleet = match resolve() {
         Ok(fleet) => fleet,
-        Err(why) => {
+        Err((exit, why)) => {
             eprintln!("fleet routine run: {why}");
-            return Exit::CouldNotTell;
+            return exit;
         }
     };
     let Some(routine) = known(&fleet, name, "run") else {
         return Exit::Refused;
     };
 
-    // The lock, before anything else. `--force` bypasses the gate and never
+    // The lock, before anything else. `--force` overrides the trigger and never
     // this: two processes running one duty at once is what it is here for.
     match state::read_lock(&fleet.machine_dir, name) {
         state::Lock::Held(pid) => {
@@ -399,20 +401,15 @@ fn run(name: &str, force: bool, dry_run: bool) -> Exit {
 
     let needs_roster = routine.action.nudge.is_some();
     let seats = seat_views(&fleet, needs_roster);
-    let home = platform::home_dir();
-    let mut agent = ClaudeCode::new(&home, &fleet.machine_dir);
-    let resolved = ClaudeCode::resolve_effect_bin(
-        fleet_controller::adapter::claude_code::configured_bin().as_deref(),
-        &agent.child_path,
-    );
-    let effects_off = match &resolved {
-        Ok(bin) => {
-            agent = agent.with_effect_bin(bin.clone());
-            None
-        }
+    let opened = agent::open(&fleet.setting.opening(&fleet.child_path));
+    let effects_off = match &opened {
+        Ok(opened) => opened.effects_off.clone(),
         Err(why) => Some(why.clone()),
     };
-    let carrier: Option<&dyn Agent> = resolved.is_ok().then_some(&agent);
+    let carrier: Option<&dyn Agent> = match (&opened, &effects_off) {
+        (Ok(opened), None) => Some(&opened.agent),
+        _ => None,
+    };
 
     let now = routines::now_secs();
     let (mut routine_state, why) = state::read(&fleet.machine_dir);
@@ -430,7 +427,7 @@ fn run(name: &str, force: bool, dry_run: bool) -> Exit {
         let answer = if force {
             Due::Due("--force".to_string())
         } else {
-            gate::gate(routine, now, fired, &|routine| {
+            trigger::evaluate(routine, now, fired, &|routine| {
                 action::run_check(routine, &machine)
             })
         };
@@ -453,8 +450,7 @@ fn run(name: &str, force: bool, dry_run: bool) -> Exit {
                     Exit::Refused
                 }
                 Due::CouldNotTell(why) => {
-                    let mut events =
-                        events::EventLog::open(&fleet.machine_dir.join("events.jsonl"));
+                    let mut events = events::EventLog::open(&events::path_in(&fleet.machine_dir));
                     let mut pass = routines::Pass {
                         machine: machine_of(&fleet, &seats, carrier, None),
                         events: &mut events,
@@ -463,11 +459,10 @@ fn run(name: &str, force: bool, dry_run: bool) -> Exit {
                     let outcome =
                         routines::record_could_not_tell(routine, &mut pass, now, &why, Some("run"));
                     print_last_row(&fleet.machine_dir, name);
-                    exit_of(outcome.exit_code())
+                    Exit::of(outcome.exit_code())
                 }
                 Due::Due(reason) => {
-                    let mut events =
-                        events::EventLog::open(&fleet.machine_dir.join("events.jsonl"));
+                    let mut events = events::EventLog::open(&events::path_in(&fleet.machine_dir));
                     let mut pass = routines::Pass {
                         machine,
                         events: &mut events,
@@ -477,7 +472,7 @@ fn run(name: &str, force: bool, dry_run: bool) -> Exit {
                     print_last_row(&fleet.machine_dir, name);
                     // An absent ring that a fallback item answered is that
                     // item's outcome, so only a bare absent carries exit 4.
-                    exit_of(outcome_exit(outcome))
+                    Exit::of(outcome_exit(outcome))
                 }
             }
         }
@@ -505,7 +500,7 @@ fn print_last_row(machine_dir: &std::path::Path, name: &str) {
 
 fn history(name: Option<&str>, since: u64, count: usize) -> Exit {
     let machine_dir = platform::machine_dir();
-    let stream = machine_dir.join("events.jsonl");
+    let stream = events::path_in(&machine_dir);
     if !stream.is_file() {
         eprintln!(
             "fleet routine history: no event stream at {}, so no routine has a history yet",
@@ -523,7 +518,7 @@ fn history(name: Option<&str>, since: u64, count: usize) -> Exit {
 
 /// Every routine event on the stream, in file order, as the line a person reads.
 fn routine_rows(machine_dir: &std::path::Path, name: Option<&str>, since: u64) -> Vec<String> {
-    events::read_after(&machine_dir.join("events.jsonl"), since)
+    events::read_after(&events::path_in(machine_dir), since)
         .into_iter()
         .filter(|record| events::ROUTINE_TYPES.contains(&record.kind.as_str()))
         .filter(|record| {
@@ -536,7 +531,7 @@ fn routine_rows(machine_dir: &std::path::Path, name: Option<&str>, since: u64) -
                 .payload
                 .get("order")
                 .and_then(|o| o.as_str())
-                .unwrap_or(&record.actor)
+                .unwrap_or(&record.actor.id)
                 .to_string();
             format!(
                 "{}  {}  {}  {}  {}",
@@ -567,13 +562,4 @@ fn tail_of(record: &events::Record) -> String {
         },
         None => field("reason").unwrap_or_default(),
     }
-}
-
-// ---- the retired spelling --------------------------------------------------
-
-/// `fleet order …`: the family's name for one release before this one. Usage,
-/// with the one rewrite that helps, and nothing read off the words after it.
-pub fn old_name() -> Exit {
-    eprintln!("fleet order: the family is `fleet routine` now — use `fleet routine list | check | run | history`");
-    Exit::Usage
 }

@@ -2,19 +2,30 @@
 
 One binary, three crates.
 
+How fleet is built, and what it must do, are written down rather than read
+out of the code: `CONTRIBUTING.md` is the method, `brain/specs/seed.md` the
+one-page PRD, and `brain/specs/mod.md` the map of where each piece lives.
+
 ## Layout
 
 | Crate | Package | Import path | What it is |
 | --- | --- | --- | --- |
 | `controller/` | `fleet-controller` | `fleet_controller` | The process table and the platform layer: observe, the projection, the event stream. A library. |
 | `core/` | `fleet-core` | `fleet_core` | Pack-and-project work: the verbs that never read the process table. A library. |
-| `cli/` | `fleet-cli` | — | The one binary, named `fleet`. Its `[[bin]]` is the only one in the workspace, so the package name carries the `-cli` suffix and no crate shares a name with the binary a user installs. |
+| `cli/` | `fleet-cli` | — | The one binary, named `fleet`. Its `[[bin]]` is the only one a release build makes — core's `fleet-store-stub` is built only under `test-support` — so the package name carries the `-cli` suffix and no crate shares a name with the binary a user installs. |
 
 **Core never depends on the controller.** The boundary between pack-and-project
 work and the process table is kept in the type system rather than in discipline:
 `cli/tests/workspace.rs` reads `cargo metadata --no-deps` and refuses the edge.
-The dependency that is allowed runs the other way, and the cli crate is where
-both meet.
+Core depends on neither of the other members. The dependency that is allowed
+runs the other way: the controller depends on core, for the bounded runner
+(`fleet_core::process`), the fleet-packs source and tag its refusal of a
+missing agent pack names (`fleet_core::supported`), a seat's identity (`fleet_core::seat::identity`:
+the id, the fleet.toml roster and the resolver), the typed actor
+(`fleet_core::seat::actor::Actor`, `<kind>:<id>`) and the policy-file reader
+(`fleet_core::item::table_at`), and also for the atomic write, the store, the
+agent contract and its opener, and the item layer's run vocabulary; the cli
+crate depends on both.
 
 The root manifest lists its members explicitly and never by glob, so a crate
 under this directory cannot be absorbed by a manifest that did not name it. That
@@ -23,17 +34,24 @@ empty `[workspace]` table.
 
 ## Working here
 
-    make fleet-fmt     # cargo fmt --all --check at the workspace root
-    make fleet-check   # clippy over every target and the boundary checks; no arm runs
-    make fleet-test    # fleet-check, then cargo nextest run --workspace, then the budget verdict
-    make fleet-ring    # the ring_ binaries, serial, outside the budget and judged by nothing
+    cargo fmt --all --check                                # formatting, at the workspace root
+    cargo clippy --workspace --all-targets -- -D warnings  # every target, warnings as errors; no arm runs
+    cargo nextest run --workspace                          # every suite but the ring lane
+    cargo nextest run --profile ring                       # the ring_ binaries, serial, judged by nothing
 
-`fleet-test` is the gate a landing runs. Its test phase is held to the budget in
-the surrounding project's own policy file, judged only when the box's 1-minute
-load before the run is under that file's ceiling — over it the run prints NOT
-JUDGED and exits 0, because contention can only lengthen a run and so neither
-side of the budget says anything about the code. The ring lane is a separate
-population by binary name and no ring second is inside the budgeted number.
+There is no wrapper around these and no time budget: the four commands are the
+whole of it, and the third is the suite a landing runs. The ring lane — the
+`ring_*` binaries, which spawn the shipped binary against real repositories — is
+left out of the default profile by binary name in `.config/nextest.toml` and
+runs only under its own profile. That file's per-arm `slow-timeout` is the one
+bound on a run's time.
+
+No suite needs a store installed: a rig keeps its project on the store stub,
+the example a test build of `fleet-cli` makes (`cargo build -p fleet-cli
+--examples` makes it alone). A real store's adapter is tested in the
+fleet-packs repository, where its pack lives.
+`tools/suite-profile` ranks where a run's seconds went, read from the junit
+report the default profile writes.
 
 Tests that drive the built binary live in the crate that builds it — `cli/tests`
 — because `CARGO_BIN_EXE_fleet` is defined only for the package whose manifest
@@ -42,12 +60,11 @@ exercise.
 
 ## Flying unattended
 
-Core ships **no routine that composes or flies** (flights PRD R26).
-Composition is a workflow's — tiny's `preboard` writes a flight's list and its
-`takeoff` opens and flies it, both over core's `fleet run`
-(`brain/fleet-layers.md` § What moves). A fleet with nobody composing flights
-is one file a person writes into their fleet's `orders/` directory, in the
-controller's own routine format:
+Core ships **no routine that composes or flies**. Composition is a workflow's —
+tiny's `preboard` writes a flight's list and its `takeoff` opens and flies it,
+both over core's `fleet run` (`docs/runs.md`). A fleet with nobody
+composing flights is one file a person writes into their fleet's `orders/`
+directory, in the controller's own routine format:
 
 ```toml
 [order]
@@ -63,94 +80,168 @@ ready = "10"
 ```
 
 Three lines say when and the rest say what: firing it calls `fleet run takeoff
---input ready=10 --by <routine>` in the routine's project root, so
-`run.started` names the routine as its actor and the run's `started` and
+--input ready=10 --by routine:<name>` in the routine's project root, so
+`run.started` names the routine as its actor, typed, and the run's `started` and
 `closed` sit inside the routine's `fired` and `completed` on the one stream.
 The input names are the workflow's own. `controller/tests/routines.rs` parses
 this exact block out of this file through the routine loader, so the example
 cannot drift from the format it claims to be in.
 
 The autopilot switch is a machine setting the takeoff routine reads — to be
-filed after the MVP — not a verb: on, the routine opens the oldest plan while the open runs are under the
-cap; off, nothing opens (`brain/fleet-layers.md` § tiny). The three verbs
-`fleet plan`, `fleet fly` and `fleet autopilot on|off` were core's until
-2026-09-17 (workflows-formula-fate).
+filed after the MVP — not a verb: on, the routine opens the oldest plan while
+the open runs are under the cap; off, nothing opens.
+The three verbs `fleet plan`, `fleet fly` and `fleet autopilot on|off` were
+core's until 2026-09-17 (workflows-formula-fate).
 
-## The plugin shape
+## The plugin
 
-This directory is also a Claude Code plugin root: `.claude-plugin/plugin.json`
-is the manifest, `.claude-plugin/marketplace.json` publishes this directory as a
-one-plugin marketplace, `hooks/hooks.json` wires the guards and `fleet prime`
-into a session, `bin/fleet` is the shim those hooks address, and `skills/` holds
-the plugin's skills. The hooks reach the shim through `${CLAUDE_PLUGIN_ROOT}`
-because a hook's `PATH` does not carry `bin/` and the Bash tool's does
-(`brain/lessons/claude-code.md` D5).
+This directory is not a plugin root, and the binary spells its default
+agent's name once, `agent::DEFAULT_AGENT_ADAPTER`; `cli/tests/workspace.rs`
+refuses any other mention of that agent in core, cli, controller and docs
+but prose naming the claude-code pack. The plugin a seat's session loads is its agent pack's: the claude-code pack,
+in the fleet-packs repository, carries fleet's Claude Code plugin — a
+pre-tool hook on Bash that runs `fleet guard --adapter claude-code`, a
+session-start hook that runs `fleet prime`, the `bin/fleet` shim both
+address, the `version` probe and copies of tiny's skills — and its adapter's
+`launch` and `resume` name it with `--plugin-dir` on every seat. The shim
+runs `$FLEET_BIN` and nothing else, and fails closed without it: a guard
+hook exits 2, which blocks the Bash command. The controller sets `$FLEET_BIN`
+to its own binary on every session it starts, so a seat's hooks run the
+binary that started it.
 
-`bin/fleet` resolves the real binary by explicit path: `$FLEET_BIN` when it
-names an absolute executable, else `target/release/fleet`, else
-`target/debug/fleet` under this directory. An installed copy carries no
-`target/`, so `$FLEET_BIN` is the seam the install sets.
-
-### The rituals a session gets
-
-`skills/version` is the plugin's own probe. Every other entry under `skills/`
-is a **symbolic link** into `packs/tiny/skills/`, so the pack keeps the only
-copy of its own opinion and the loader still finds a `SKILL.md` at the path it
-reads. The loader follows such a link — measured, with its controls, at
-`brain/lessons/claude-code.md` D6 — which is why nothing here is a pinned
-duplicate.
-
-The rituals, each resolving under the `fleet:` namespace: **wake**, a seat
-coming up for a session; **handoff**, the seat's day ending; **rest**, a
-mid-day handoff that asks the controller for a woken successor; **clock-out**,
-a spawned seat's last acts; **morning**, the first read of the open gates;
-**corrections-review**, a landing judged a second time for whether every line
-earns its place; **praise**, a laurel written into another seat's file; and
-**report** and **runbook**, the two published-page house styles, each carrying
-its own `template.html`.
+The pack's README — `adapters/agent/claude-code/adapters/agent/claude-code/README.md`
+in fleet-packs — carries the plugin's story: the hooks, the shim, setting
+`FLEET_BIN` once for a session of your own, and the lines that install it.
 
 ### The defaults and the packs
 
-`core/defaults/` is what every fleet gets: the record templates, the guards'
-wiring and their health checks, with no opinion about the work. It is not a
-pack — `core/build.rs` walks it into the executable, and `fleet create` and
-every `fleet start` materialize it into the machine directory's `defaults/`,
+`core/defaults/` is what every fleet gets: the brief, the every-turn rules,
+the JSON schemas of a delivery, a question and a return's findings, and the
+health checks, with no opinion about the work. It is
+not a pack — `core/build.rs` walks it into the executable, and `fleet create`
+and every `fleet start` materialize it into the machine directory's `defaults/`,
 a sibling of `packs/`, pinned by content hash. Every verb reads those files
-by path unless an installed pack shadows the path. `packs/tiny` is the
-opinion — the role documents, the builder manual, the values and the
+by path unless an installed pack shadows the path. tiny, in the fleet-packs
+repository (`https://github.com/bembot90/fleet-packs`), is the opinion — the role documents, the builder manual, the values and the
 every-turn rules — and it shadows
 `assets/rules.md` to add its own. The tiny pack and this binary together are
 the bundle **tinyfleet**; the binary on its own stays usable with anyone's
 packs, which is why the pack is not named after the bundle.
 
-Tiny installs from a checkout with the subdirectory form, which takes the
+Tiny installs from fleet-packs with the subdirectory form, which takes the
 repository and the path to the pack inside it:
 
-    fleet pack add <checkout>//fleet/packs/tiny --version <tag, branch or sha:…>
+    fleet pack add <fleet-packs>//tiny --version <tag, branch or sha:…>
+
+Tiny imports `ts`, the pack that pins Deno as the workflow runtime, and the
+same repository holds it at `runtimes/ts`, so that one line installs both: ts
+comes out of the same clone, pinned at the same commit and keyed in
+`packs.lock` on `<fleet-packs>//runtimes/ts`. An import that lives in another repository is not
+fetched. `pack add` names it on stderr with the `fleet pack add` line that
+installs it, and still exits 0. Until it is added, `fleet prime`'s first line
+and `fleet run`'s refusal for a workflow with no runtime both name it with
+that same line.
 
 `fleet prime` then names the installed packs on its first line, top first —
 `none installed` until one is added, and never the defaults, which are the
 binary's — and prints the resolved rules file beneath it.
 
+The store is a pack's too. This binary owns the store contract
+(`docs/store.md`, printed by `fleet store schema`, checked by `fleet store
+check`) and carries no store of its own: `[store] adapter` names a store
+adapter an installed pack carries, and a project that names none opens `bd`,
+the one the bd pack carries. fleet-packs holds one pack per store under
+`adapters/store/<name>`. `fleet create` asks which store the fleet uses and
+installs its pack from `supported::PINNED_PACKS_SOURCE` at
+`supported::PINNED_PACKS`; the default, `bd`, is the same install as
+
+    fleet pack add https://github.com/bembot90/fleet-packs//adapters/store/bd --version v0.2.0
+
+`--store none` installs no store pack and prints that line, and
+`--packs-from <dir>` installs from a checkout of fleet-packs instead. It
+installs the agent's pack the same way, `adapters/agent/claude-code` (the
+one agent, `agent::DEFAULT_AGENT_ADAPTER`), and writes `[agent] adapter`.
+The bd and claude-code packs import ts, as tiny does, and all three install
+beside the one ts: packs layer in two tiers, every pack nothing imports
+above every pack one of them imports, and only an imported pack is refused
+an import of its own.
+
+A pack's settings are set in `fleet.toml`, under the pack's name, and only the
+keys the pack declares. A pack declares each one in its `pack.toml` with a
+one-line description, and optionally a type and a default:
+
+```toml
+# pack.toml
+[config."takeoff.test"]
+description = "The command takeoff hands fleet land to run on the rebased tree before each landing."
+type = "string"
+
+# fleet.toml
+[packs.tiny]
+takeoff.test = "cargo nextest run --workspace"
+```
+
+`fleet run` refuses a key the installed pack does not declare, a value of the
+wrong type, and a section for a pack that is not installed, naming the key and
+the pack. A workflow reads a setting with `run.config("takeoff.test")`: the value
+set here, else the declared default, else `undefined`, as pinned when the run
+was opened. tiny declares `takeoff.test` and `takeoff.touched`, and `fleet pack
+check` refuses a malformed declaration by name.
+
+### Where the test commands live
+
+A test command is the workflow's, not the project's. There is no `[gates]
+suite` and no `[gates] touched`: a `fleet.toml` or `.fleet/project.toml` that
+still sets either is refused by name — by `land`, `dispatch`, `brief`, `seat
+spawn` and `run` — with the setting that replaces it. The `[gates]` table
+itself is refused the same way, naming where its keys live now: the landing's
+marker is `[landing] ci_marker`, a seat's command words are `[permissions]
+tool_commands`, and the guard targets (`release_ref_glob` and the `prod_*`
+lists) sit under `[guards.targets]`.
+
+- **The landing's suite** is what `fleet land <item> <commit> --test
+  <command>` is handed. The landing runs it on the rebased land branch, under
+  the lane's lock and before the push, so what is tested is what lands; a red
+  reading is rerun once and a second red refuses with nothing pushed. Without
+  `--test` the landing runs nothing, and says so: its suite row and the `test`
+  of its `landed` entry read `NOT TESTED`, and its one `check.read` line
+  carries `suite: null` and `verdict: "none"`.
+- **The builder's checks** are what `fleet dispatch <item> --touched
+  <command>` is handed; the brief names them under "Your checks", or names
+  the absence where none was handed.
+- **takeoff** hands both: `test` from `--input test=<command>`, else
+  `takeoff.test` under `[packs.tiny]`; `touched` the same way from
+  `--input touched=` or `takeoff.touched`. The input wins. With neither test
+  command the flight still flies, and its report's first line says
+  `NOT TESTED`.
+
+```toml
+# fleet.toml
+[packs.tiny]
+takeoff.test = "cargo nextest run --workspace"
+takeoff.touched = "make test-touched"
+```
+
 ### Driving it from a checkout
 
-    cargo build                       # in this directory, so target/debug/fleet exists
-    claude --plugin-dir <checkout>/fleet
+    cargo build                                    # in this directory, so target/debug/fleet exists
+    export FLEET_BIN="$PWD/target/debug/fleet"     # the plugin runs this binary and no other
+    claude --plugin-dir <fleet-packs>/adapters/agent/claude-code/adapters/agent/claude-code/plugin
 
-`--plugin-dir` loads the plugin for that session only and shadows an installed
+`<fleet-packs>` is a checkout of the fleet-packs repository, where the plugin
+lives. `--plugin-dir` loads it for that session only and shadows an installed
 plugin of the same name. Four probes say it worked:
 
 1. the session's `SessionStart` hook output carries `fleet prime`'s first line;
 2. a `Bash` call on `git show "$S:tools/land"` is denied, and the reason names
    `fleet guard shell-trap` and prints the rewrite;
-3. a `Bash` call on `fleet --version` answers this crate's version — the bare
-   name resolved to `bin/`, which nothing outside the session resolves;
+3. a `Bash` call on `fleet --version` answers this crate's version, where no
+   other `fleet` is earlier on the session's `PATH` — the plugin's `bin/` is
+   appended last;
 4. `claude -p '/fleet:version'` answers with the version, which is the skill
    namespace.
 
-`claude plugin validate <checkout>/fleet` checks the manifests.
-
-A project INSTALLS the plugin instead, with
-`claude plugin marketplace add <path to this directory>` followed by
-`claude plugin install fleet@fleet --scope project`. That is a decision about a
-project's settings and is not run from here.
+A project INSTALLS the plugin instead, from fleet-packs' marketplace, with
+`claude plugin marketplace add https://github.com/bembot90/fleet-packs`
+followed by `claude plugin install fleet@fleet`, as the pack's README says.
+That is a decision about a project's settings and is not run from here.

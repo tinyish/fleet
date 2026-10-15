@@ -1,39 +1,15 @@
 //! One routine file: `orders/<name>.toml`, read into a [`Routine`] or into the
-//! [`Defect`] that says why it is not one (PRD R22).
+//! [`Defect`] that says why it is not one.
 //!
 //! Every refusal names the file and the key. A value this reader does not
 //! understand is a defect and never an ignored line: a `schedule` on a cooldown
 //! routine is a plan its author believes in and nothing reads, and a misspelled
 //! key is a duty that silently never runs.
 
+use super::trigger::Trigger;
+use fleet_core::seat::identity::{resolve, Directory, SeatId, SeatRef};
+use fleet_core::store::types::PRIORITY_MAX;
 use std::path::{Path, PathBuf};
-
-/// The three clocks a routine can be on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Trigger {
-    Cron,
-    Cooldown,
-    Condition,
-}
-
-impl Trigger {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Trigger::Cron => "cron",
-            Trigger::Cooldown => "cooldown",
-            Trigger::Condition => "condition",
-        }
-    }
-
-    fn parse(word: &str) -> Option<Trigger> {
-        match word {
-            "cron" => Some(Trigger::Cron),
-            "cooldown" => Some(Trigger::Cooldown),
-            "condition" => Some(Trigger::Condition),
-            _ => None,
-        }
-    }
-}
 
 /// Where a routine was loaded from, as it is published and printed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +32,12 @@ impl Source {
 /// Ring a seat with one sentence and the authority behind it.
 #[derive(Clone, Debug)]
 pub struct Nudge {
+    /// The seat as the file names it, which is how every line about the ring
+    /// names it back.
     pub seat: String,
+    /// The one seat that name resolved to at load. `None` only on a file the
+    /// load refused, which is never run.
+    pub seat_id: Option<SeatId>,
     pub text: String,
     pub authority: String,
 }
@@ -74,7 +55,13 @@ pub struct Item {
     pub title: String,
     pub description: Option<String>,
     pub labels: Vec<String>,
+    /// The assignee as the file names it, which is how a line about the
+    /// filing names it back.
     pub assignee: Option<String>,
+    /// The one seat that name resolved to at load, which is what the item is
+    /// filed assigned to. `None` where the file names no assignee, or on a
+    /// file the load refused, which is never run.
+    pub assignee_id: Option<SeatId>,
     pub priority: Option<i64>,
     pub kind: Option<String>,
     pub when: When,
@@ -173,12 +160,9 @@ pub const DEFAULT_CHECK_TIMEOUT_SECONDS: u64 = 60;
 /// How often a condition's check runs when the file names no `poll`.
 pub const DEFAULT_POLL_SECONDS: u64 = 600;
 
-/// The item types the work graph takes.
-pub const ITEM_TYPES: [&str; 6] = ["bug", "feature", "task", "epic", "chore", "decision"];
-
-/// The keys `[order]` carries, and the trigger each gate key belongs to. A key
-/// outside this table is a defect; a key under the wrong trigger is a defect
-/// too, and this is the one place either question is answered.
+/// The keys `[order]` carries, and the trigger each trigger parameter belongs
+/// to. A key outside this table is a defect; a key under the wrong trigger is
+/// a defect too, and this is the one place either question is answered.
 const ROUTINE_KEYS: [(&str, Option<Trigger>); 10] = [
     ("description", None),
     ("trigger", None),
@@ -251,9 +235,10 @@ pub fn routine_name_of(path: &Path) -> Result<String, String> {
 
 /// Read one file into a routine or a defect.
 ///
-/// `seats` is the machine's seat list, because a nudge action names a row of it
-/// and a seat this machine does not carry is a ring nobody would ever answer.
-pub fn read(path: &Path, source: &Source, project_root: &Path, seats: &[String]) -> Loaded {
+/// `seats` is the machine's seat directory: a nudge action names a row this
+/// machine runs, because a seat it does not carry is a ring nobody would ever
+/// answer, and an item's assignee names any seat the fleet knows.
+pub fn read(path: &Path, source: &Source, project_root: &Path, seats: &Directory) -> Loaded {
     let name = match routine_name_of(path) {
         Ok(name) => name,
         Err(reason) => {
@@ -295,7 +280,7 @@ pub fn parse(
     source: &Source,
     project_root: &Path,
     body: &str,
-    seats: &[String],
+    seats: &Directory,
 ) -> Loaded {
     let mut reasons: Vec<String> = Vec::new();
     let defective = |reasons: Vec<String>| {
@@ -323,8 +308,8 @@ pub fn parse(
         return defective(reasons);
     };
 
-    // The trigger first: every gate key below is read against it, so a file
-    // that does not name one cannot be judged at all.
+    // The trigger first: every trigger parameter below is read against it, so
+    // a file that does not name one cannot be judged at all.
     let trigger = match routine.get("trigger") {
         Some(toml::Value::String(word)) => match Trigger::parse(word) {
             Some(trigger) => Some(trigger),
@@ -408,7 +393,7 @@ pub fn parse(
     match trigger {
         Some(Trigger::Cron) => match routine.get("schedule") {
             Some(toml::Value::String(text)) => {
-                if let Err(why) = crate::routines::gate::validate_cron(text) {
+                if let Err(why) = crate::routines::trigger::validate_cron(text) {
                     reasons.push(format!("[order] schedule {why}"));
                 }
                 schedule = Some(text.clone());
@@ -482,7 +467,7 @@ pub fn parse(
 }
 
 /// `[action.<kind>]`: exactly one, or the fallback pair.
-fn read_action(reasons: &mut Vec<String>, document: &toml::Table, seats: &[String]) -> Action {
+fn read_action(reasons: &mut Vec<String>, document: &toml::Table, seats: &Directory) -> Action {
     let Some(action) = table_at(document, "action") else {
         reasons.push("carries no [action.<kind>] table".to_string());
         return Action::default();
@@ -498,20 +483,30 @@ fn read_action(reasons: &mut Vec<String>, document: &toml::Table, seats: &[Strin
     if let Some(table) = table_at(action, "nudge") {
         unknown_keys(reasons, table, "action.nudge", &NUDGE_KEYS);
         let seat = required_line(reasons, table, "action.nudge", "seat");
-        if !seat.is_empty() && !seats.iter().any(|row| row == &seat) {
-            reasons.push(format!(
-                "[action.nudge] seat is `{seat}`, which names no row of this machine's seat list"
-            ));
-        }
+        // RESOLVED HERE, at load, through the resolver every seat argument
+        // takes: the ring then goes to the row this found, by its id, and a
+        // seat nobody holds — or two that both answer — refuses the file.
+        let seat_id = if seat.is_empty() {
+            None
+        } else {
+            match seats.resolve_running(&seat) {
+                Ok(found) => Some(found.id),
+                Err(unresolved) => {
+                    reasons.push(format!("[action.nudge] seat is {seat}, which {unresolved}"));
+                    None
+                }
+            }
+        };
         built.nudge = Some(Nudge {
             text: required_line(reasons, table, "action.nudge", "text"),
             authority: required_line(reasons, table, "action.nudge", "authority"),
             seat,
+            seat_id,
         });
     }
     if let Some(table) = table_at(action, "item") {
         unknown_keys(reasons, table, "action.item", &ITEM_KEYS);
-        built.item = Some(read_item(reasons, table));
+        built.item = Some(read_item(reasons, table, seats));
     }
     if let Some(table) = table_at(action, "exec") {
         unknown_keys(reasons, table, "action.exec", &EXEC_KEYS);
@@ -582,7 +577,7 @@ fn read_inputs(reasons: &mut Vec<String>, table: &toml::Table) -> Vec<(String, S
     inputs
 }
 
-fn read_item(reasons: &mut Vec<String>, table: &toml::Table) -> Item {
+fn read_item(reasons: &mut Vec<String>, table: &toml::Table, seats: &Directory) -> Item {
     let when = match table.get("when") {
         Some(toml::Value::String(word)) if word == "always" => When::Always,
         Some(toml::Value::String(word)) if word == "absent" => When::Absent,
@@ -606,11 +601,14 @@ fn read_item(reasons: &mut Vec<String>, table: &toml::Table) -> Item {
         }
         None => None,
     };
+    // The contract's range and a word, and no more, at load: the types and
+    // the range inside this one that the project's store takes are its own
+    // declaration, read where the item is filed.
     let priority = match table.get("priority") {
-        Some(toml::Value::Integer(n)) if (0..=4).contains(n) => Some(*n),
+        Some(toml::Value::Integer(n)) if (0..=i64::from(PRIORITY_MAX)).contains(n) => Some(*n),
         Some(other) => {
             reasons.push(format!(
-                "[action.item] priority is {}; the range is 0 to 4",
+                "[action.item] priority is {}; the range is 0 to {PRIORITY_MAX}",
                 shown(other)
             ));
             None
@@ -618,14 +616,11 @@ fn read_item(reasons: &mut Vec<String>, table: &toml::Table) -> Item {
         None => None,
     };
     let kind = match table.get("type") {
-        Some(toml::Value::String(word)) if ITEM_TYPES.contains(&word.as_str()) => {
-            Some(word.clone())
-        }
+        Some(toml::Value::String(word)) if !word.is_empty() => Some(word.clone()),
         Some(other) => {
             reasons.push(format!(
-                "[action.item] type is {}; the six are {}",
-                shown(other),
-                ITEM_TYPES.join(", ")
+                "[action.item] type is {}; a type is a word the project's store declares",
+                shown(other)
             ));
             None
         }
@@ -654,16 +649,46 @@ fn read_item(reasons: &mut Vec<String>, table: &toml::Table) -> Item {
         }
         None => Vec::new(),
     };
+    // [ASSUMES D14] RESOLVED HERE, at load, among every seat the fleet knows
+    // and every seat this machine runs: the item is filed assigned to the id
+    // this found, which is what a holder check compares, and a name nobody
+    // holds — or two seats both answer to — refuses the file.
+    let assignee = optional_string(reasons, table, "action.item", "assignee");
+    let assignee_id = assignee.as_deref().and_then(|said| {
+        let known = known_seats(seats);
+        match resolve(&known, said) {
+            Ok(index) => Some(known[index].id),
+            Err(unresolved) => {
+                reasons.push(format!(
+                    "[action.item] assignee is {said}, which {unresolved}"
+                ));
+                None
+            }
+        }
+    });
     Item {
         title: required_line(reasons, table, "action.item", "title"),
         description: optional_string(reasons, table, "action.item", "description"),
         labels,
-        assignee: optional_string(reasons, table, "action.item", "assignee"),
+        assignee,
+        assignee_id,
         priority,
         kind,
         when,
         dedupe,
     }
+}
+
+/// The listed seats and the running ones, each once: the seats an item may be
+/// filed to.
+fn known_seats(seats: &Directory) -> Vec<SeatRef> {
+    let mut known: Vec<SeatRef> = Vec::new();
+    for seat in seats.listed.iter().chain(&seats.running) {
+        if !known.iter().any(|kept| kept.id == seat.id) {
+            known.push(seat.clone());
+        }
+    }
+    known
 }
 
 fn unknown_keys(reasons: &mut Vec<String>, table: &toml::Table, where_: &str, known: &[&str]) {

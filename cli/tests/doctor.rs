@@ -1,0 +1,1478 @@
+//! `fleet doctor` through the shipped binary: every check the pack layers
+//! carry, run from inside a scratch project, over the binary's own defaults
+//! and a scratch pack each arm writes.
+//!
+//! THE DEFAULTS ARE THE BINARY'S OWN, written by the function `fleet start`
+//! writes them with, so the rows an arm reads are the ones a person's first
+//! `fleet doctor` prints. Every tool those checks ask is a stub this rig puts
+//! first on `PATH`: the pinned runtime prints one line; tmux is the
+//! fleet-tmux-stub, which answers the release fleet measured and holds no
+//! server. The project keeps its store on the stub
+//! adapter, empty, which the adopt-board check's `fleet item list` reads.
+//! Nothing here starts a session or asks a real tool anything; the
+//! adopt-board check over a board with foreign keys is `adopt.rs`'s.
+//!
+//! THE TWO BUILT-IN ROWS ask the adapters the rig configures: the store stub,
+//! and an agent adapter executable — the one script this suite writes
+//! ([`adapter`]), which answers each verb from a file the arm leaves for it.
+//! No check the defaults carry is an agent's: an agent's own checks are its
+//! pack's.
+//!
+//! THE PINS ARE READ FROM CORE and not spelled here, so a supported-version
+//! move leaves this suite green and the doctor's own copies are core's suite
+//! to hold in step.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use common::hermetic::Hermetic;
+
+static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// The runtime the scratch pack pins, and the version its stub prints.
+const RUNTIME: &str = "fx-runtime";
+const VERSION: &str = "1.2.3";
+
+/// A project whose record guard has its prefix: every default check passes.
+const CONFIGURED: &str = "[project]\nitem_prefix = \"fx\"\n";
+/// A project whose record guard has none: guards-installed is a finding.
+const UNCONFIGURED: &str = "[project]\n";
+
+/// Every check the binary's defaults carry, in the order the verb runs them.
+const DEFAULTS: [&str; 5] = [
+    "adopt-board",
+    "fleet-packs-version",
+    "guards-installed",
+    "runtime-version",
+    "tmux-version",
+];
+
+/// The rows the verb computes itself, after the scripted checks, in the order
+/// it computes them.
+const BUILT_IN: [&str; 2] = ["store-adapter", "agent-adapter"];
+
+/// The row `runtime-version` gives when no installed pack pins a runtime.
+const NOTHING_PINNED: &str = "pass runtime-version (defaults) — nothing pinned: no installed \
+                              pack declares a [runtime] table";
+
+fn defaults_into(machine: &Path) -> PathBuf {
+    let root = machine.join(fleet_core::defaults::DIR);
+    std::fs::create_dir_all(&root).expect("the defaults dir is created");
+    fleet_core::embedded::write_all(&root).expect("the embedded defaults are written");
+    root
+}
+
+fn write(path: &Path, body: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("the parent directory is made");
+    }
+    std::fs::write(path, body).expect("the file is written");
+}
+
+fn executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub is made executable");
+}
+
+struct Rig {
+    root: PathBuf,
+    project: PathBuf,
+    machine: PathBuf,
+    stubs: PathBuf,
+    /// The fleet-tmux-stub, which `tmux-version` asks through the seam.
+    tmux: PathBuf,
+    /// Where [`adapter`]'s script reads this rig's answers: one directory per
+    /// adapter, one file per verb.
+    answers: PathBuf,
+    /// `FLEET_AGENT_TIMEOUT_MS` on every run: long, so no first exec is read
+    /// as an adapter that did not answer, unless an arm about the bound sets
+    /// its own.
+    agent_bound_ms: u64,
+}
+
+impl Rig {
+    /// A project holding `policy` as its `fleet.toml`, the defaults and no
+    /// pack installed, the stubs every default check asks, and [`adapter`]'s
+    /// script as its agent, answering `quill` at 2.4.0, measured against it.
+    fn new(label: &str, policy: &str) -> Rig {
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "fleet-cli-doctor-{label}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let rig = Rig {
+            project: root.join("project"),
+            machine: root.join("machine"),
+            stubs: root.join("stubs"),
+            tmux: common::stub_tmux(&root.join("tmux")),
+            answers: root.join("answers"),
+            agent_bound_ms: 120_000,
+            root,
+        };
+        std::fs::create_dir_all(rig.machine.join("packs")).expect("the packs dir is made");
+        defaults_into(&rig.machine);
+        write(&rig.project.join("fleet.toml"), policy);
+        common::take_a_store(&rig.project);
+        rig.agent(&quill(Some("2.4.0")), &declared("2.4.0"));
+        rig.stub(RUNTIME, &format!("echo \"{RUNTIME} {VERSION}\""));
+        rig
+    }
+
+    fn stub(&self, name: &str, body: &str) {
+        let path = self.stubs.join(name);
+        write(&path, &format!("#!/bin/sh\n{body}\n"));
+        executable(&path);
+    }
+
+    /// Install pack `name`, pinning the runtime at `version` or pinning none.
+    fn pack(&self, name: &str, version: Option<&str>) {
+        let mut manifest = format!(
+            "[pack]\nname = \"{name}\"\nversion = \"0.1.0\"\nschema = 3\n\
+             description = \"a scratch pack\"\n"
+        );
+        if let Some(version) = version {
+            manifest.push_str(&format!(
+                "\n[runtime]\nname = \"{RUNTIME}\"\nversion = \"{version}\"\n\
+                 bundle = \"cp {{entry}} {{bundle}}\"\nrun = \"sh {{bundle}}\"\n"
+            ));
+        }
+        write(&self.pack_dir(name).join("pack.toml"), &manifest);
+    }
+
+    fn pack_dir(&self, name: &str) -> PathBuf {
+        self.machine.join("packs").join(name)
+    }
+
+    /// A check `name` in pack `pack`, whose script is `body`.
+    fn check(&self, pack: &str, name: &str, body: &str) {
+        let entry = self.pack_dir(pack).join("doctor").join(name);
+        write(
+            &entry.join("doctor.toml"),
+            &format!("description = \"the {name} check\"\nrun = \"run.sh\"\n"),
+        );
+        write(&entry.join("run.sh"), &format!("#!/bin/sh\n{body}\n"));
+    }
+
+    fn uncheck(&self, pack: &str, name: &str) {
+        std::fs::remove_dir_all(self.pack_dir(pack).join("doctor").join(name))
+            .expect("the check is removed");
+    }
+
+    /// Move the runtime stub out of the rig's own bin and into the installer's
+    /// bin under this rig's `HOME`, where no caller's `PATH` reaches.
+    fn runtime_only_in_the_installers_bin(&self) {
+        let moved = self
+            .root
+            .join("home")
+            .join(format!(".{RUNTIME}"))
+            .join("bin")
+            .join(RUNTIME);
+        write(
+            &moved,
+            &format!("#!/bin/sh\necho \"{RUNTIME} {VERSION}\"\n"),
+        );
+        executable(&moved);
+        std::fs::remove_file(self.stubs.join(RUNTIME)).expect("the rig's own bin gives it up");
+    }
+
+    /// The fleet's own file names [`adapter`]'s script as its `[agent]
+    /// adapter`, which answers `version` and `capabilities` as given.
+    fn agent(&self, version: &str, capabilities: &str) {
+        self.adapter_in_policy("agent");
+        self.answer("agent", "version", version);
+        self.answer("agent", "capabilities", capabilities);
+    }
+
+    /// `[<table>] adapter` in the project's file names [`adapter`]'s script,
+    /// called as `table`.
+    fn adapter_in_policy(&self, table: &str) {
+        let named = serde_json::to_string(&adapter(table).display().to_string())
+            .expect("a path is JSON text");
+        self.set_adapter(table, &named);
+    }
+
+    /// `[<table>] adapter` in the project's file set to `value`, written as
+    /// TOML: the line under the table replaced where the file has the table,
+    /// and the table appended where it has none.
+    fn set_adapter(&self, table: &str, value: &str) {
+        let file = self.project.join("fleet.toml");
+        let text = std::fs::read_to_string(&file).expect("the project's file reads");
+        let header = format!("[{table}]");
+        let setting = format!("adapter = {value}");
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        match lines.iter().position(|line| *line == header) {
+            Some(at) if lines.get(at + 1).is_some_and(|l| l.starts_with("adapter")) => {
+                lines[at + 1] = setting;
+            }
+            Some(at) => lines.insert(at + 1, setting),
+            None => lines.extend([String::new(), header, setting]),
+        }
+        write(&file, &format!("{}\n", lines.join("\n")));
+    }
+
+    /// What [`adapter`]'s script answers `verb` with where it is called as
+    /// `kind`.
+    fn answer(&self, kind: &str, verb: &str, body: &str) {
+        write(&self.answers.join(kind).join(format!("{verb}.json")), body);
+    }
+
+    fn doctor(&self, args: &[&str]) -> Output {
+        self.doctor_in(&self.project, args)
+    }
+
+    fn doctor_in(&self, cwd: &Path, args: &[&str]) -> Output {
+        let fleet = PathBuf::from(env!("CARGO_BIN_EXE_fleet"));
+        let fleet_dir = fleet.parent().expect("the binary sits in a directory");
+        let mut path = format!("{}:{}", self.stubs.display(), fleet_dir.display());
+        if let Ok(held) = std::env::var("PATH") {
+            path = format!("{path}:{held}");
+        }
+        Command::new(&fleet)
+            .arg("doctor")
+            .args(args)
+            .arg("--packs-dir")
+            .arg(self.machine.join("packs"))
+            .current_dir(cwd)
+            .hermetic(&self.root.join("home"), &self.machine)
+            .env(common::hermetic::TMUX_BIN, &self.tmux)
+            .env(ANSWERS, &self.answers)
+            .env(AGENT_BOUND, self.agent_bound_ms.to_string())
+            .env("NO_COLOR", "1")
+            .env("PATH", path)
+            .output()
+            .expect("the built binary runs")
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// The variable [`adapter`]'s script reads its answers' directory from.
+const ANSWERS: &str = "FX_ADAPTER_ANSWERS";
+
+/// The agent's bound, as fleet reads it.
+const AGENT_BOUND: &str = "FLEET_AGENT_TIMEOUT_MS";
+
+/// An adapter executable called `kind`: a link to the one script this run of
+/// the suite writes, which is run once before any arm names it — macOS spends
+/// 15 s or more assessing a newly written script's first exec, which an arm
+/// about the bound would read as an adapter past it.
+///
+/// The script answers `<verb>` with `$FX_ADAPTER_ANSWERS/<kind>/<verb>.json`,
+/// and could not tell where there is no such file. Where `sleep` is in that
+/// directory it first sleeps, in a child whose pid it leaves in `sleeper`.
+fn adapter(kind: &str) -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("fleet-cli-doctor-adapter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let script = dir.join("adapter.sh");
+        write(
+            &script,
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"${{1:-}}\" = warm ] && exit 0\n\
+                 cat > /dev/null\n\
+                 here=\"${ANSWERS}/${{0##*/}}\"\n\
+                 if [ -f \"$here/sleep\" ]; then\n\
+                 sleep 30 &\n\
+                 echo $! > \"$here/sleeper\"\n\
+                 wait\n\
+                 fi\n\
+                 if [ -f \"$here/$1.json\" ]; then cat \"$here/$1.json\"; exit 0; fi\n\
+                 echo '{{\"schema_version\":1,\"error\":\"no answer\"}}'\n\
+                 exit 3\n"
+            ),
+        );
+        executable(&script);
+        for kind in ["agent", "store"] {
+            std::os::unix::fs::symlink(&script, dir.join(kind)).expect("the link is made");
+        }
+        let warmed = Command::new(&script)
+            .arg("warm")
+            .output()
+            .expect("the adapter script runs");
+        assert!(warmed.status.success(), "the adapter script warms");
+        dir
+    });
+    dir.join(kind)
+}
+
+/// An agent adapter's declaration that keeps the contract, measured against
+/// `measured`.
+fn declared(measured: &str) -> String {
+    format!(
+        r#"{{"schema_version":1,"postures":["ask","auto"],"default_model":"quill-large-2","first_turn":"/wake {{seat}}","measured":["{measured}"]}}"#
+    )
+}
+
+/// An agent adapter's `version`: `quill`, at `version` or at none.
+fn quill(version: Option<&str>) -> String {
+    format!(
+        r#"{{"schema_version":1,"name":"quill","version":{}}}"#,
+        serde_json::to_string(&version).expect("a version is JSON")
+    )
+}
+
+/// Every file under `dir` and its bytes, for an arm that holds nothing was
+/// written.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut open = vec![dir.to_path_buf()];
+    while let Some(here) = open.pop() {
+        for entry in std::fs::read_dir(&here).expect("the directory reads") {
+            let path = entry.expect("the entry reads").path();
+            if path.is_dir() {
+                open.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("the file reads");
+                found.push((path, bytes));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The row lines: every line that is not a follow-on two-space line.
+fn rows(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| !line.starts_with("  "))
+        .collect()
+}
+
+/// The one row whose subject is `subject`: `<name> (<layer>)`, or
+/// `<name> for <pack> (<layer>)` on a runtime-version row.
+fn row<'a>(text: &'a str, subject: &str) -> &'a str {
+    let found: Vec<&str> = rows(text)
+        .into_iter()
+        .filter(|line| {
+            line.split_once(" — ")
+                .map(|(head, _)| head.ends_with(&format!(" {subject}")))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "one row for {subject}: {text}");
+    found[0]
+}
+
+/// The two-space lines that follow the row for `subject`.
+fn followed_by<'a>(text: &'a str, subject: &str) -> Vec<&'a str> {
+    let head = row(text, subject);
+    text.lines()
+        .skip_while(|line| *line != head)
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .collect()
+}
+
+fn last_line(text: &str) -> &str {
+    text.lines().last().unwrap_or("")
+}
+
+// ---- 1. the defaults, all green ---------------------------------------------
+
+/// The control every other arm is read against: the defaults alone, over a
+/// project whose guards are configured, every check passing.
+#[test]
+fn the_defaults_pass_on_a_configured_project() {
+    let rig = Rig::new("green", CONFIGURED);
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+
+    let rows = rows(&said);
+    assert_eq!(
+        rows.len(),
+        DEFAULTS.len() + BUILT_IN.len() + 1,
+        "a row per check and the summary: {said}"
+    );
+    let subjects = DEFAULTS
+        .iter()
+        .map(|name| format!("{name} (defaults)"))
+        .chain(BUILT_IN.iter().map(|name| format!("{name} (built-in)")));
+    for (line, subject) in rows.iter().zip(subjects) {
+        assert!(
+            line.starts_with(&format!("pass {subject} — ")),
+            "{subject} passes, the scripted checks in name order and the built-in rows after \
+             them: {said}"
+        );
+    }
+    assert_eq!(
+        row(&said, "store-adapter (built-in)"),
+        "pass store-adapter (built-in) — stub 0 via fleet-store-stub — schema 1, capabilities \
+         valid"
+    );
+    assert_eq!(
+        row(&said, "agent-adapter (built-in)"),
+        format!(
+            "pass agent-adapter (built-in) — quill 2.4.0 via {} — measured 2.4.0",
+            adapter("agent").display()
+        )
+    );
+    assert_eq!(
+        row(&said, "guards-installed (defaults)"),
+        "pass guards-installed (defaults) — record bare-id: configured — [project] item_prefix"
+    );
+    assert_eq!(row(&said, "runtime-version (defaults)"), NOTHING_PINNED);
+    assert_eq!(
+        row(&said, "tmux-version (defaults)"),
+        "pass tmux-version (defaults) — tmux-version: holds — no server is running on socket fleet"
+    );
+    assert_eq!(
+        row(&said, "adopt-board (defaults)"),
+        "pass adopt-board (defaults) — adopt-board: nothing to adopt — no items read"
+    );
+    assert_eq!(
+        row(&said, "fleet-packs-version (defaults)"),
+        format!(
+            "pass fleet-packs-version (defaults) — fleet-packs-version: nothing installed from \
+             fleet-packs — no line of the lock names {}",
+            fleet_core::supported::PINNED_PACKS_SOURCE
+        )
+    );
+    assert_eq!(
+        last_line(&said),
+        "doctor 7 checks — 7 pass, 0 finding, 0 could not tell"
+    );
+    assert!(
+        !said.lines().any(|line| line.starts_with("  ")),
+        "a passing row is followed by nothing: {said}"
+    );
+}
+
+// ---- 2. a finding -----------------------------------------------------------
+
+/// The record guard with no prefix: guards-installed reports it, the lines the
+/// person acts on follow its row, and the rest still pass.
+#[test]
+fn an_unconfigured_guard_is_a_finding_with_its_lines_below_the_row() {
+    let rig = Rig::new("finding", UNCONFIGURED);
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+
+    assert!(
+        row(&said, "guards-installed (defaults)")
+            .starts_with("finding guards-installed (defaults) — "),
+        "{said}"
+    );
+    assert!(
+        followed_by(&said, "guards-installed (defaults)")
+            .iter()
+            .any(|line| line.contains("record bare-id: not configured")),
+        "the --check lines follow the row: {said}"
+    );
+    for name in DEFAULTS.iter().filter(|name| **name != "guards-installed") {
+        assert!(
+            row(&said, &format!("{name} (defaults)")).starts_with("pass "),
+            "{name} still passes: {said}"
+        );
+    }
+    assert_eq!(
+        last_line(&said),
+        "doctor 7 checks — 6 pass, 1 finding, 0 could not tell"
+    );
+}
+
+/// fleet-3krx.1 — the fleet-packs pin through the shipped binary: the check
+/// reads the machine's lock through `fleet pack list`, so a line from the
+/// pinned source at another tag is a finding naming the lines that replace it,
+/// and the same line at the pin holds. The lock is written by hand, in the
+/// shape `fleet pack add` writes it, so no pack is fetched.
+#[test]
+fn a_pack_from_fleet_packs_at_another_tag_is_a_finding() {
+    let source = fleet_core::supported::PINNED_PACKS_SOURCE;
+    let pin = fleet_core::supported::PINNED_PACKS;
+    let rig = Rig::new("packs-pin", CONFIGURED);
+    let lock = |version: &str| {
+        write(
+            &rig.machine.join("packs.lock"),
+            &format!(
+                "schema = 1\n\n[packs.\"{source}//adapters/store/tk\"]\nname = \"tk\"\n\
+                 version = \"{version}\"\ncommit = \"{commit}\"\nfetched = \"2026-09-25T00:00:00Z\"\n",
+                commit = "0".repeat(40)
+            ),
+        )
+    };
+
+    lock("v0.0.9");
+    let out = rig.doctor(&["fleet-packs-version"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+    assert!(
+        row(&said, "fleet-packs-version (defaults)").starts_with(
+            "finding fleet-packs-version (defaults) — fleet-packs-version: broken — 1 pack(s)"
+        ),
+        "{said}"
+    );
+    assert!(
+        followed_by(&said, "fleet-packs-version (defaults)")
+            .iter()
+            .any(|line| line.contains(&format!(
+                "tk is pinned at v0.0.9, not the supported {pin} — `fleet pack remove \
+                 {source}//adapters/store/tk`"
+            ))),
+        "the pack that moved is named below the row: {said}"
+    );
+
+    lock(pin);
+    let out = rig.doctor(&["fleet-packs-version"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        row(&said, "fleet-packs-version (defaults)"),
+        format!("pass fleet-packs-version (defaults) — fleet-packs-version: holds — tk at {pin}")
+    );
+}
+
+// ---- 3. could-not-tell wins -------------------------------------------------
+
+/// A check that could not tell outweighs one that found something, and a check
+/// that exits anything past 1 could not tell. The red proof is the same rig
+/// with the two could-not-tells taken out: the finding is then the answer.
+#[test]
+fn a_check_that_could_not_tell_wins_over_a_finding() {
+    let rig = Rig::new("unknown", CONFIGURED);
+    rig.pack("scratch", None);
+    rig.check("scratch", "fx-unread", "echo unreadable >&2\nexit 3");
+    rig.check("scratch", "fx-found", "echo found\nexit 1");
+    rig.check("scratch", "fx-seven", "exit 7");
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
+    assert_eq!(
+        row(&said, "fx-unread (scratch)"),
+        "could not tell fx-unread (scratch) — unreadable"
+    );
+    assert_eq!(followed_by(&said, "fx-unread (scratch)"), ["  unreadable"]);
+    assert_eq!(
+        row(&said, "fx-found (scratch)"),
+        "finding fx-found (scratch) — found"
+    );
+    assert_eq!(
+        row(&said, "fx-seven (scratch)"),
+        "could not tell fx-seven (scratch) — said nothing and exited 7"
+    );
+    assert_eq!(
+        last_line(&said),
+        "doctor 10 checks — 7 pass, 1 finding, 2 could not tell"
+    );
+
+    rig.uncheck("scratch", "fx-unread");
+    rig.uncheck("scratch", "fx-seven");
+    let out = rig.doctor(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+}
+
+// ---- 4. shadowing -----------------------------------------------------------
+
+/// A pack's entry replaces the defaults' of the same name, and the row names
+/// the pack. The red proof is the entry taken out: the defaults' check runs,
+/// and on this project it is a finding.
+#[test]
+fn a_packs_entry_shadows_the_defaults_of_the_same_name() {
+    let rig = Rig::new("shadow", UNCONFIGURED);
+    rig.pack("scratch", None);
+    rig.check("scratch", "guards-installed", "echo shadowed-by-scratch");
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        row(&said, "guards-installed (scratch)"),
+        "pass guards-installed (scratch) — shadowed-by-scratch"
+    );
+    assert!(
+        !said.contains("shell-trap"),
+        "the defaults' check did not run: {said}"
+    );
+
+    rig.uncheck("scratch", "guards-installed");
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        row(&said, "guards-installed (defaults)").starts_with("finding "),
+        "{said}"
+    );
+}
+
+// ---- 5. runtime-version, per pinned pack ------------------------------------
+
+/// runtime-version runs once for the pack that pins a runtime, measuring that
+/// pack's pin, and a pack that pins none gets no row of its own.
+#[test]
+fn runtime_version_runs_once_for_each_pinned_pack() {
+    let rig = Rig::new("pinned", CONFIGURED);
+    rig.pack("scratch", Some(VERSION));
+    rig.pack("plain", None);
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        row(&said, "runtime-version for scratch (defaults)"),
+        "pass runtime-version for scratch (defaults) — runtime-version: holds"
+    );
+    assert!(
+        !said.contains("for plain"),
+        "a pack pinning nothing: {said}"
+    );
+    assert!(!said.contains("nothing pinned"), "{said}");
+    assert_eq!(
+        rows(&said)
+            .iter()
+            .filter(|line| line.contains(" runtime-version "))
+            .count(),
+        1,
+        "{said}"
+    );
+}
+
+/// The same pack pinned at a version the runtime does not print.
+#[test]
+fn a_runtime_off_its_pin_is_a_finding() {
+    let rig = Rig::new("repinned", CONFIGURED);
+    rig.pack("scratch", Some("9.9.9"));
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+    assert!(
+        row(&said, "runtime-version for scratch (defaults)").starts_with(
+            "finding runtime-version for scratch (defaults) — runtime-version: broken"
+        ),
+        "{said}"
+    );
+}
+
+/// The runtime only in the installer's bin, which the caller's `PATH` does not
+/// reach: the row passes because it runs on the `PATH` a run gives the pack's
+/// lines, which puts that bin in front.
+#[test]
+fn runtime_version_runs_on_the_path_a_run_gives_the_pack() {
+    let rig = Rig::new("installer", CONFIGURED);
+    rig.pack("scratch", Some(VERSION));
+    rig.runtime_only_in_the_installers_bin();
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        row(&said, "runtime-version for scratch (defaults)"),
+        "pass runtime-version for scratch (defaults) — runtime-version: holds"
+    );
+}
+
+// ---- 6. selection -----------------------------------------------------------
+
+/// A named check runs alone.
+#[test]
+fn a_named_check_runs_alone() {
+    let rig = Rig::new("one", CONFIGURED);
+    let out = rig.doctor(&["tmux-version"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        rows(&said),
+        [
+            "pass tmux-version (defaults) — tmux-version: holds — no server is running on socket \
+             fleet",
+            "doctor 1 check — 1 pass, 0 finding, 0 could not tell",
+        ]
+    );
+}
+
+/// A name given twice runs once.
+#[test]
+fn a_check_named_twice_runs_once() {
+    let rig = Rig::new("twice", CONFIGURED);
+    let out = rig.doctor(&["runtime-version", "runtime-version"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        rows(&said),
+        [
+            NOTHING_PINNED,
+            "doctor 1 check — 1 pass, 0 finding, 0 could not tell",
+        ]
+    );
+}
+
+/// A name no layer carries is usage, said before anything runs: the check
+/// that would leave a marker has not left it. Its control is the same check
+/// named alone, which does.
+#[test]
+fn a_name_no_layer_carries_is_usage_and_nothing_runs() {
+    let rig = Rig::new("nosuch", CONFIGURED);
+    let marker = rig.root.join("marker");
+    rig.pack("scratch", None);
+    rig.check(
+        "scratch",
+        "fx-marker",
+        &format!("touch '{}'", marker.display()),
+    );
+
+    let out = rig.doctor(&["nosuch"]);
+    let said = stderr(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(said.contains("nosuch"), "{said}");
+    let carried = said
+        .split_once("the layers carry: ")
+        .map(|(_, list)| list.trim())
+        .unwrap_or_else(|| panic!("the refusal lists the checks: {said}"));
+    for name in DEFAULTS.iter().chain(&BUILT_IN) {
+        assert!(carried.contains(name), "{name} is listed: {said}");
+    }
+    assert!(stdout(&out).is_empty(), "no row printed: {}", stdout(&out));
+    assert!(!marker.exists(), "no check ran");
+
+    let out = rig.doctor(&["fx-marker"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(marker.exists(), "the control: the check leaves its marker");
+}
+
+// ---- 7. --json --------------------------------------------------------------
+
+/// The finding under --json: one document on stdout, `ok` false with the exit's
+/// row as its refusal and every row still in `data`, the aggregate in
+/// `data.verdict` and on the exit, and the human rows moved to stderr.
+#[test]
+fn json_carries_every_row_and_the_exit_carries_the_aggregate() {
+    let rig = Rig::new("json", UNCONFIGURED);
+    let out = rig.doctor(&["--json"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+    assert_eq!(said.lines().count(), 1, "one line: {said}");
+    let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
+
+    assert_eq!(document["ok"], false);
+    assert_eq!(
+        document["refusal"]["code"], "refused",
+        "the exit's row, not the verdict"
+    );
+    assert_eq!(
+        document["refusal"]["why"],
+        "7 checks — 6 pass, 1 finding, 0 could not tell"
+    );
+    assert!(
+        said.starts_with(
+            r#"{"ok":false,"verb":"doctor","refusal":{"code":"refused","why":"7 checks"#
+        ),
+        "the refusal comes before the rows: {said}"
+    );
+    assert_eq!(document["verb"], "doctor");
+    assert_eq!(document["data"]["verdict"], "finding");
+    assert_eq!(
+        document["data"]["counts"],
+        serde_json::json!({ "pass": 6, "finding": 1, "could_not_tell": 0 })
+    );
+    let checks = document["data"]["checks"]
+        .as_array()
+        .expect("checks is an array");
+    assert_eq!(checks.len(), DEFAULTS.len() + BUILT_IN.len(), "{said}");
+    let keys = [
+        "description",
+        "exit",
+        "layer",
+        "line",
+        "measures",
+        "name",
+        "stderr",
+        "stdout",
+        "verdict",
+    ];
+    for check in checks {
+        let object = check.as_object().expect("a check is an object");
+        let mut held: Vec<&str> = object.keys().map(String::as_str).collect();
+        held.sort_unstable();
+        assert_eq!(held, keys, "{check}");
+    }
+    let guards = checks
+        .iter()
+        .find(|check| check["name"] == "guards-installed")
+        .expect("guards-installed is a row");
+    assert_eq!(guards["exit"], 1);
+    assert_eq!(guards["verdict"], "finding");
+    assert_eq!(guards["layer"], "defaults");
+    assert!(
+        guards["stdout"]
+            .as_str()
+            .is_some_and(|text| text.contains("record bare-id: not configured")),
+        "{guards}"
+    );
+    let runtime = checks
+        .iter()
+        .find(|check| check["name"] == "runtime-version")
+        .expect("runtime-version is a row");
+    assert_eq!(runtime["exit"], serde_json::Value::Null);
+    assert_eq!(runtime["measures"], serde_json::Value::Null);
+    for name in BUILT_IN {
+        let built_in = checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is a row: {said}"));
+        assert_eq!(built_in["layer"], "built-in", "{built_in}");
+        assert_eq!(built_in["verdict"], "pass", "{built_in}");
+        assert_eq!(built_in["exit"], serde_json::Value::Null, "{built_in}");
+        assert_eq!(built_in["stdout"], "", "{built_in}");
+        assert!(
+            built_in["description"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "{built_in}"
+        );
+    }
+    assert!(
+        checks
+            .iter()
+            .position(|check| check["name"] == BUILT_IN[0])
+            .is_some_and(|at| at == DEFAULTS.len()),
+        "the built-in rows follow the scripted ones: {said}"
+    );
+
+    let aside = stderr(&out);
+    assert!(
+        aside.contains("finding guards-installed (defaults) — "),
+        "the rows are on stderr: {aside}"
+    );
+    assert!(
+        aside
+            .lines()
+            .any(|line| line == "doctor 7 checks — 6 pass, 1 finding, 0 could not tell"),
+        "the why is the summary line's own words: {aside}"
+    );
+    assert!(
+        !aside.contains("fleet doctor:"),
+        "a finding is not a refusal line: {aside}"
+    );
+}
+
+/// The control: a clean pass under --json is the success document, `ok` true
+/// and no refusal, so the `false` above is the finding's and not the flag's.
+#[test]
+fn json_on_a_clean_pass_is_the_success_document() {
+    let rig = Rig::new("json-green", CONFIGURED);
+    let out = rig.doctor(&["--json"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["data"]["verdict"], "pass");
+    assert!(document.get("refusal").is_none(), "{said}");
+    assert!(
+        said.starts_with(r#"{"ok":true,"verb":"doctor","data":"#),
+        "{said}"
+    );
+}
+
+/// A could-not-tell under --json: exit 3, the row's own name as the code, and
+/// the rows still carried.
+#[test]
+fn json_on_a_could_not_tell_carries_its_row_and_every_check() {
+    let rig = Rig::new("json-unknown", CONFIGURED);
+    rig.pack("scratch", None);
+    rig.check("scratch", "fx-seven", "exit 7");
+    let out = rig.doctor(&["--json"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
+    assert_eq!(said.lines().count(), 1, "one line: {said}");
+    let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["refusal"]["code"], "could_not_tell");
+    assert_eq!(
+        document["refusal"]["why"],
+        "8 checks — 7 pass, 0 finding, 1 could not tell"
+    );
+    assert_eq!(document["data"]["verdict"], "could_not_tell");
+    assert_eq!(
+        document["data"]["counts"],
+        serde_json::json!({ "pass": 7, "finding": 0, "could_not_tell": 1 })
+    );
+    assert_eq!(
+        document["data"]["checks"].as_array().map(Vec::len),
+        Some(DEFAULTS.len() + BUILT_IN.len() + 1),
+        "{said}"
+    );
+}
+
+/// No project under --json: the verb's own refusal, row 1, not a report.
+#[test]
+fn json_with_no_project_is_a_refused_refusal() {
+    let rig = Rig::new("json-nowhere", CONFIGURED);
+    let elsewhere = rig.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the directory is made");
+    let out = rig.doctor_in(&elsewhere, &["--json"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+    let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["verb"], "doctor");
+    assert_eq!(document["refusal"]["code"], "refused");
+}
+
+/// A name no layer carries under --json: the usage refusal.
+#[test]
+fn json_with_a_name_no_layer_carries_is_a_usage_refusal() {
+    let rig = Rig::new("json-nosuch", CONFIGURED);
+    let out = rig.doctor(&["nosuch", "--json"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}{}", stderr(&out));
+    let document: serde_json::Value = serde_json::from_str(&said).expect("the document parses");
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["refusal"]["code"], "usage");
+    assert!(
+        document.get("data").is_none(),
+        "a refusal before any check carries no rows"
+    );
+}
+
+// ---- 8. no project ----------------------------------------------------------
+
+#[test]
+fn no_project_is_refused() {
+    let rig = Rig::new("nowhere", CONFIGURED);
+    let elsewhere = rig.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the directory is made");
+    let out = rig.doctor_in(&elsewhere, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("fleet doctor: no `fleet.toml`"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+// ---- 9. help ----------------------------------------------------------------
+
+#[test]
+fn the_help_says_the_exit_and_the_root_lists_doctor() {
+    let out = Command::new(env!("CARGO_BIN_EXE_fleet"))
+        .args(["doctor", "--help"])
+        .hermetic_nowhere()
+        .output()
+        .expect("the built binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("3 wins over 1"), "{}", stdout(&out));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_fleet"))
+        .arg("--help")
+        .hermetic_nowhere()
+        .output()
+        .expect("the built binary runs");
+    let page = stdout(&out);
+    let listed = page
+        .split_once("Commands:")
+        .map(|(_, commands)| commands)
+        .unwrap_or_default();
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("doctor")),
+        "`fleet --help` lists doctor: {page}"
+    );
+}
+
+// ---- 10. the adapters answer ------------------------------------------------
+
+/// Both adapters configured as a fleet names them — the store stub by path
+/// and an agent adapter executable by path — each answer, both built-in rows
+/// pass naming what answered, and nothing the verb reads is written: the
+/// stub's state file and every other file under the project and the machine
+/// directory are byte for byte what they were.
+#[test]
+fn the_configured_adapters_answer_and_nothing_is_written() {
+    let rig = Rig::new("adapters", CONFIGURED);
+    rig.agent(&quill(Some("2.4.0")), &declared("2.4.0"));
+    let state = rig.project.join(fleet_core::test_support::stub::STATE_FILE);
+    let held = std::fs::read(&state).expect("the stub's state file reads");
+    let project = snapshot(&rig.project);
+    let machine = snapshot(&rig.machine);
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        row(&said, "store-adapter (built-in)"),
+        "pass store-adapter (built-in) — stub 0 via fleet-store-stub — schema 1, capabilities \
+         valid"
+    );
+    assert_eq!(
+        row(&said, "agent-adapter (built-in)"),
+        format!(
+            "pass agent-adapter (built-in) — quill 2.4.0 via {} — measured 2.4.0",
+            adapter("agent").display()
+        )
+    );
+    assert_eq!(
+        last_line(&said),
+        "doctor 7 checks — 7 pass, 0 finding, 0 could not tell"
+    );
+
+    assert_eq!(
+        std::fs::read(&state).expect("the stub's state file reads"),
+        held,
+        "the stub's state file is byte-identical"
+    );
+    assert!(
+        snapshot(&rig.project) == project,
+        "nothing under the project is written"
+    );
+    assert!(
+        snapshot(&rig.machine) == machine,
+        "nothing under the machine is written"
+    );
+}
+
+/// A built-in row named alone runs alone, as a scripted check does.
+#[test]
+fn a_built_in_row_named_alone_runs_alone() {
+    let rig = Rig::new("one-built-in", CONFIGURED);
+    rig.agent(&quill(Some("2.4.0")), &declared("2.4.0"));
+    let out = rig.doctor(&["agent-adapter"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    let passed = format!(
+        "pass agent-adapter (built-in) — quill 2.4.0 via {} — measured 2.4.0",
+        adapter("agent").display()
+    );
+    assert_eq!(
+        rows(&said),
+        [
+            passed.as_str(),
+            "doctor 1 check — 1 pass, 0 finding, 0 could not tell",
+        ]
+    );
+}
+
+/// `[store] adapter` naming a store no installed pack carries: the store row
+/// could not tell, saying the opener's own refusal, the `fleet pack add` line
+/// included — and every scripted check still runs.
+#[test]
+fn a_store_adapter_no_pack_carries_could_not_tell_and_the_scripted_checks_still_run() {
+    let rig = Rig::new("store-nowhere", CONFIGURED);
+    rig.set_adapter("store", "\"nowhere\"");
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
+    let line = fleet_core::pack::AdapterKind::Store.pack_line(
+        fleet_core::supported::PINNED_PACKS_SOURCE,
+        "nowhere",
+        fleet_core::supported::PINNED_PACKS,
+    );
+    assert_eq!(
+        row(&said, "store-adapter (built-in)"),
+        format!(
+            "could not tell store-adapter (built-in) — no store adapter named `nowhere` in the \
+             installed packs — `{line}` installs the one fleet-packs carries"
+        )
+    );
+    for name in DEFAULTS {
+        row(&said, &format!("{name} (defaults)"));
+    }
+    assert!(
+        row(&said, "agent-adapter (built-in)").starts_with("pass "),
+        "{said}"
+    );
+}
+
+/// A fleet naming the default agent adapter — as `fleet create` writes it —
+/// with no pack installed that carries it: the agent row could not tell,
+/// saying the opener's own refusal, the `fleet pack add` line included, and
+/// every scripted check still runs. The default's name resolves through the
+/// packs and nowhere else.
+#[test]
+fn an_agent_adapter_no_pack_carries_could_not_tell_and_the_scripted_checks_still_run() {
+    let rig = Rig::new("agent-nowhere", CONFIGURED);
+    let name = fleet_core::agent::DEFAULT_AGENT_ADAPTER;
+    rig.set_adapter("agent", &format!("{name:?}"));
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
+    let line = fleet_core::pack::AdapterKind::Agent.pack_line(
+        fleet_core::supported::PINNED_PACKS_SOURCE,
+        name,
+        fleet_core::supported::PINNED_PACKS,
+    );
+    assert_eq!(
+        row(&said, "agent-adapter (built-in)"),
+        format!(
+            "could not tell agent-adapter (built-in) — no agent adapter named `{name}` in the \
+             installed packs — `{line}` installs the one fleet-packs carries"
+        )
+    );
+    for name in DEFAULTS {
+        assert!(
+            row(&said, &format!("{name} (defaults)")).starts_with("pass "),
+            "{name}: {said}"
+        );
+    }
+}
+
+/// A store adapter that answers, declaring what the contract's rules refuse:
+/// a finding naming the field, and not a store that could not tell.
+#[test]
+fn a_store_declaring_what_does_not_validate_is_a_finding() {
+    let rig = Rig::new("store-invalid", CONFIGURED);
+    rig.adapter_in_policy("store");
+    rig.answer(
+        "store",
+        "version",
+        r#"{"schema_version":1,"name":"fx-store","version":"1.0"}"#,
+    );
+    rig.answer(
+        "store",
+        "capabilities",
+        r#"{"schema_version":1,"cli":"two words"}"#,
+    );
+
+    let out = rig.doctor(&["store-adapter"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+    let found = row(&said, "store-adapter (built-in)");
+    assert!(
+        found.starts_with("finding store-adapter (built-in) — fx-store 1.0 via store — "),
+        "{said}"
+    );
+    assert!(found.contains("cli `two words` is not one word"), "{said}");
+}
+
+/// An agent adapter declaring no posture: a finding naming the field.
+#[test]
+fn an_agent_declaring_no_posture_is_a_finding_naming_the_field() {
+    let rig = Rig::new("agent-invalid", CONFIGURED);
+    rig.agent(
+        &quill(Some("2.4.0")),
+        r#"{"schema_version":1,"postures":[],"default_model":"m","first_turn":"/wake {seat}","measured":["2.4.0"]}"#,
+    );
+
+    let out = rig.doctor(&["agent-adapter"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+    let found = row(&said, "agent-adapter (built-in)");
+    assert!(
+        found.starts_with("finding agent-adapter (built-in) — quill 2.4.0 via "),
+        "{said}"
+    );
+    assert!(found.contains("postures is empty"), "{said}");
+}
+
+/// An installed agent at a version the adapter was not measured against
+/// passes, and says to re-measure (ruling 8: a flag, not a gate).
+#[test]
+fn an_agent_off_its_measured_versions_passes_with_the_re_measure_note() {
+    let rig = Rig::new("agent-moved", CONFIGURED);
+    rig.agent(&quill(Some("9.9.9")), &declared("2.4.0"));
+
+    let out = rig.doctor(&["agent-adapter"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert_eq!(
+        row(&said, "agent-adapter (built-in)"),
+        format!(
+            "pass agent-adapter (built-in) — quill 9.9.9 via {} — installed 9.9.9 is not among \
+             the measured 2.4.0: re-measure",
+            adapter("agent").display()
+        )
+    );
+}
+
+/// An agent adapter answering that no agent is installed — its version null —
+/// is a finding naming the adapter.
+#[test]
+fn an_agent_with_no_binary_installed_is_a_finding_naming_the_adapter() {
+    let rig = Rig::new("agent-null", CONFIGURED);
+    rig.agent(&quill(None), &declared("2.4.0"));
+
+    let out = rig.doctor(&["agent-adapter"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{}", stderr(&out));
+    let named = adapter("agent").display().to_string();
+    assert_eq!(
+        row(&said, "agent-adapter (built-in)"),
+        format!(
+            "finding agent-adapter (built-in) — {named} answers that no quill is installed (its \
+             version is null)"
+        )
+    );
+}
+
+/// An agent adapter that sleeps past the bound could not tell, well inside
+/// the sleep, and the child it slept in is gone with its group.
+#[test]
+fn an_agent_past_its_bound_could_not_tell_and_its_group_is_gone() {
+    let mut rig = Rig::new("agent-slow", CONFIGURED);
+    rig.agent(&quill(Some("2.4.0")), &declared("2.4.0"));
+    write(&rig.answers.join("agent").join("sleep"), "");
+    rig.agent_bound_ms = 300;
+
+    let began = std::time::Instant::now();
+    let out = rig.doctor(&["agent-adapter"]);
+    let took = began.elapsed();
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(3), "{said}{}", stderr(&out));
+    let found = row(&said, "agent-adapter (built-in)");
+    assert!(
+        found.starts_with("could not tell agent-adapter (built-in) — "),
+        "{said}"
+    );
+    assert!(found.contains("FLEET_AGENT_TIMEOUT_MS"), "{said}");
+    assert!(
+        took < std::time::Duration::from_secs(15),
+        "the row came back inside the stub's 30 s sleep: {took:?}"
+    );
+
+    let sleeper = std::fs::read_to_string(rig.answers.join("agent").join("sleeper"))
+        .expect("the stub left its sleeper's pid");
+    let gone = (0..20).any(|_| {
+        let alive = Command::new("kill")
+            .args(["-0", sleeper.trim()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if alive {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        !alive
+    });
+    assert!(
+        gone,
+        "the sleeper {} is killed with its group",
+        sleeper.trim()
+    );
+}
+
+/// A pack cannot replace the check that its own adapter answers: an entry of
+/// a built-in row's name is not run, and the row is the verb's.
+#[test]
+fn a_packs_entry_does_not_shadow_a_built_in_row() {
+    let rig = Rig::new("unshadowed", CONFIGURED);
+    let marker = rig.root.join("marker");
+    rig.pack("scratch", None);
+    rig.check(
+        "scratch",
+        "store-adapter",
+        &format!("touch '{}'", marker.display()),
+    );
+
+    let out = rig.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert!(
+        row(&said, "store-adapter (built-in)").starts_with("pass "),
+        "{said}"
+    );
+    assert!(!said.contains("store-adapter (scratch)"), "{said}");
+    assert!(!marker.exists(), "the pack's entry did not run");
+}
+
+/// shared.locations.R26: a declared project on a machine that names no fleet
+/// is refused before any check runs, naming the directory, the machine's
+/// `config.json` and the command that registers the project.
+#[test]
+fn a_declared_project_on_a_machine_that_names_no_fleet_is_refused() {
+    let rig = Rig::new("no-fleet", CONFIGURED);
+    let declared = rig.root.join("declared");
+    write(&declared.join(".fleet/project.toml"), CONFIGURED);
+    common::take_a_store(&declared);
+
+    let out = rig.doctor_in(&declared, &["store-adapter", "agent-adapter"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).is_empty(), "no check ran: {}", stdout(&out));
+    let here = std::fs::canonicalize(&declared).expect("the declared project resolves");
+    assert!(
+        stderr(&out).starts_with(&format!(
+            "fleet doctor: {} declares a project, and {} names no fleet whose policy file \
+             is there to run it under — `fleet create --standalone --fleet <dir>` registers \
+             it with one",
+            here.display(),
+            rig.machine.join("config.json").display()
+        )),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// A machine `config.json` naming the rig's own policy file: a fleet is named,
+/// so what decides a declared project is the register.
+fn names_the_rigs_fleet(rig: &Rig) {
+    write(
+        &rig.machine.join("config.json"),
+        &format!(
+            "{{\"fleet_toml\": {}, \"children\": []}}",
+            serde_json::Value::String(rig.project.join("fleet.toml").display().to_string())
+        ),
+    );
+}
+
+/// The R35 refusal line for a declaration at `here`, as `fleet doctor` says it.
+fn unregistered_line(rig: &Rig, here: &Path) -> String {
+    format!(
+        "fleet doctor: {} declares a project that {} does not list — \
+         `fleet create --standalone` registers it",
+        here.display(),
+        rig.machine.join("projects.toml").display()
+    )
+}
+
+/// shared.locations.R22, R35, R36: a declared project the machine's register
+/// does not list is refused, naming the register and the command that
+/// registers it, under --json as one refusal; the same project registered is
+/// checked. On macOS the register holds the temp dir's `/var` spelling and the
+/// walk reads `/private/var`, so the registered arm is also the check that one
+/// directory under two spellings is one root.
+#[test]
+fn a_declared_project_is_checked_only_once_the_machine_registers_it() {
+    let rig = Rig::new("unregistered", CONFIGURED);
+    names_the_rigs_fleet(&rig);
+    let declared = rig.root.join("declared");
+    write(&declared.join(".fleet/project.toml"), CONFIGURED);
+    common::take_a_store(&declared);
+    let here = std::fs::canonicalize(&declared).expect("the declared project resolves");
+
+    let out = rig.doctor_in(&declared, &["store-adapter"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).is_empty(), "no check ran: {}", stdout(&out));
+    assert!(
+        stderr(&out).starts_with(&unregistered_line(&rig, &here)),
+        "{}",
+        stderr(&out)
+    );
+
+    let json = rig.doctor_in(&declared, &["store-adapter", "--json"]);
+    assert_eq!(json.status.code(), Some(1), "{}", stderr(&json));
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout(&json)).expect("the document parses");
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["refusal"]["code"], "refused");
+
+    fleet_controller::lifecycle::register(&rig.machine, &declared, "declared")
+        .expect("the project is registered, as `fleet create --standalone` registers it");
+    let out = rig.doctor_in(&declared, &["store-adapter"]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", stderr(&out));
+    assert!(
+        row(&said, "store-adapter (built-in)").starts_with("pass "),
+        "{said}"
+    );
+}
+
+/// shared.locations.R22, R35, R36: a seat's worktree carries its own copy of
+/// a committed declaration, and the register lists the primary checkout and
+/// never the worktree. The copy is admitted where the register lists the
+/// `[project] primary` it names, matched as a directory (the declaration
+/// names it canonically, the register by the temp dir's spelling); it is
+/// refused, naming the worktree, where that primary is not listed, and where
+/// the declaration names no primary at all.
+#[test]
+fn a_worktree_s_declaration_is_admitted_by_the_primary_it_names() {
+    let rig = Rig::new("worktree-copy", CONFIGURED);
+    names_the_rigs_fleet(&rig);
+    let primary = rig.root.join("primary");
+    let elsewhere = rig.root.join("elsewhere");
+    std::fs::create_dir_all(&primary).expect("the primary is made");
+    std::fs::create_dir_all(&elsewhere).expect("the other checkout is made");
+    fleet_controller::lifecycle::register(&rig.machine, &primary, "primary")
+        .expect("the primary is registered");
+    let canonical = |dir: &Path| std::fs::canonicalize(dir).expect("the directory resolves");
+
+    for (label, named, admitted) in [
+        ("registered", Some(canonical(&primary)), true),
+        ("unregistered", Some(canonical(&elsewhere)), false),
+        ("none", None, false),
+    ] {
+        let worktree = rig.root.join(format!("worktree-{label}"));
+        let line = named.map_or(String::new(), |dir| {
+            format!(
+                "primary = {}\n",
+                serde_json::Value::String(dir.display().to_string())
+            )
+        });
+        write(
+            &worktree.join(".fleet/project.toml"),
+            &format!("{CONFIGURED}{line}"),
+        );
+        common::take_a_store(&worktree);
+
+        let out = rig.doctor_in(&worktree, &["store-adapter"]);
+        if admitted {
+            let said = stdout(&out);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{label}: {said}{}",
+                stderr(&out)
+            );
+            assert!(
+                row(&said, "store-adapter (built-in)").starts_with("pass "),
+                "{label}: {said}"
+            );
+        } else {
+            assert_eq!(out.status.code(), Some(1), "{label}: {}", stderr(&out));
+            assert!(
+                stderr(&out).starts_with(&unregistered_line(&rig, &canonical(&worktree))),
+                "{label}: {}",
+                stderr(&out)
+            );
+        }
+    }
+}
+
+/// A register that does not read is not an answer either way: could not
+/// tell (shared.exit-codes.R4), naming why.
+#[test]
+fn a_register_that_does_not_read_could_not_tell() {
+    let rig = Rig::new("register-unread", CONFIGURED);
+    names_the_rigs_fleet(&rig);
+    write(&rig.machine.join("projects.toml"), "[[project]\nnot toml");
+    let declared = rig.root.join("declared");
+    write(&declared.join(".fleet/project.toml"), CONFIGURED);
+
+    let out = rig.doctor_in(&declared, &["store-adapter"]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out)
+            .starts_with("fleet doctor: the projects this machine registers could not be read: "),
+        "{}",
+        stderr(&out)
+    );
+}

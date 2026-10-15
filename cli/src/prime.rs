@@ -1,17 +1,32 @@
 //! `fleet prime` — what a session is handed at its start.
 //!
-//! THE EXIT IS ALWAYS DONE AND NOTHING IS READ FROM STDIN. A session-start hook
-//! that fails closed takes the session down with it, so every branch here ends
-//! on a line rather than on a status: a layering this fleet cannot resolve, a
-//! rules file that is not there and a tracker that will not answer each say so
-//! in their own words and the next part still prints.
+//! ONCE THE FLEET IS FOUND THE EXIT IS DONE, AND NOTHING IS READ FROM STDIN.
+//! A session-start hook that fails closed takes the session down with it, so
+//! every branch after that ends on a line rather than on a status: a layering
+//! this fleet cannot resolve, a rules file that is not there and a store that
+//! will not answer each say so in their own words and the next part still
+//! prints. The fleet is found as every project verb finds it
+//! (shared.locations.R21 to R26, R35); where it finds no fleet for this
+//! directory, or a declared project this machine has not registered, it
+//! refuses before anything prints, as every project verb refuses there
+//! (shared.locations.R25, R26, R35): exit 1, the line on stderr.
+//!
+//! Line 2 is the project's store as it names itself: its answer to the
+//! contract's `version`, through the opener every verb takes, and the adapter
+//! that gave it. It COMPARES WITH NO PIN. Which release a store was measured
+//! on is its doctor check's to say, and the doctor is what `fleet run` and a
+//! person consult for it.
 
 use fleet_controller::{config, platform};
+use fleet_core::add;
 use fleet_core::defaults;
 use fleet_core::guard;
+use fleet_core::lock;
 use fleet_core::resolve::{self, Layer};
+use fleet_core::seat::identity::SeatId;
+use fleet_core::store::types::Version;
+use fleet_core::store::{self, Filter, PackDirs, Status};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use crate::exit::Exit;
@@ -20,9 +35,9 @@ use crate::exit::Exit;
 /// that will not answer costs the line and never the session start.
 const ITEMS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The item-tracker binary when nothing names one, resolved on the constructed
-/// child PATH and never by a bare name (lessons claude-code D1).
-const DEFAULT_BD: &str = "bd";
+/// The bound on line 2's `version` call, which reads no items: a store that
+/// will not answer it within this costs the line and never the session start.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The rules file, as a path under a pack's `assets` slot.
 const RULES: &str = "assets/rules.md";
@@ -31,32 +46,42 @@ pub fn command() -> Exit {
     let version = env!("CARGO_PKG_VERSION");
     let cwd = std::env::current_dir().unwrap_or_default();
     let machine_dir = platform::machine_dir();
-    let machine = config::read(&machine_dir.join("config.json")).ok();
 
-    // The order `fleet guard` resolves its policy in, so the two verbs answer
-    // about one file: an embedded fleet's own, and — for a declared project,
-    // which wins at its own level — the FLEET's, named by the machine directory
-    // (controller PRD § Two modes).
-    let fleet_toml = match crate::walk_up_config(&cwd) {
-        Some(crate::Found::Embedded(path)) => Some(path),
-        Some(crate::Found::Declared(_)) | None => machine.as_ref().map(|m| m.fleet_toml.clone()),
+    // THE FLEET IS FOUND AS EVERY PROJECT VERB FINDS IT, through the one
+    // resolution they share (shared.locations.R21 to R26, R35): an embedded
+    // fleet's own `fleet.toml`; for a declared project the machine registers,
+    // the fleet's file `config.json` names; where the walk finds neither, that
+    // same file only inside a git checkout. Anywhere else that resolution's
+    // refusal is this verb's, said before anything prints.
+    let fleet_toml = match fleet_controller::project::resolve_from(&cwd, machine_dir.clone(), None)
+    {
+        Ok(here) => here.policy_file,
+        Err(stop) => return crate::exit::refuse_stop("prime", &stop, false),
     };
+    let machine = config::read(&config::path_in(&machine_dir)).ok();
+    // Line 2's project is the WALK's: a directory the checkout fallback
+    // admitted has no project file of its own, and line 2 says so rather
+    // than naming the checkout.
+    let found = fleet_controller::project::walk_up_config(&cwd);
 
-    let Some(fleet_toml) = fleet_toml else {
-        println!(
-            "fleet {version} — no fleet config found above {}",
-            cwd.display()
-        );
-        return Exit::Done;
-    };
-
-    let policy = crate::read_text(&fleet_toml);
-    let layering = layers(&machine_dir.join("packs"), &machine_dir.join(defaults::DIR));
+    let policy = crate::guard::read_text(&fleet_toml);
+    let (packs_dir, defaults_dir) = defaults::pack_dirs(&machine_dir, None);
+    let layering = layers(&packs_dir, &defaults_dir);
     println!(
         "fleet {version} — packs: {}; guards: {}",
-        packs_of(&layering),
-        guards_of(&policy),
+        packs_of(&layering, &machine_dir.join(lock::LOCK)),
+        guards_of(&layering, &policy),
     );
+    // The items are held under the seat's full id, which is what every
+    // dispatch assigns: a name moves, and the record is keyed by the seat.
+    let seat = machine
+        .as_ref()
+        .and_then(|machine| seat_here(machine, &cwd));
+    let project = project_root(
+        seat.as_ref().map(|(_, root)| root.as_path()),
+        found.as_ref(),
+    );
+    println!("{}", store_line(project.as_deref()));
 
     if let Some(rules) = rules_of(&layering) {
         print!("{rules}");
@@ -65,20 +90,30 @@ pub fn command() -> Exit {
         }
     }
 
-    if let Some(machine) = machine {
-        if let Some((seat, project_root)) = seat_here(&machine, &cwd) {
-            print_items(&project_root, &seat);
-        }
+    if let Some((seat, project_root)) = seat {
+        print_items(&project_root, &seat.id);
     }
 
     Exit::Done
 }
 
-/// Every class this binary carries, on or off, read through the same function
-/// the hook path reads. It ITERATES rather than naming them, so a class a pack
-/// adds reaches this line without an edit here.
-fn guards_of(policy: &str) -> String {
-    guard::CLASSES
+/// Every class the layers declare, on or off, read through the same functions
+/// the hook path reads: core's two, and each class an installed pack's
+/// `guard_classes` turns on.
+///
+/// A layering that refused names core's two alone — they are the classes no
+/// layer has to declare, and the packs half of the line already says why the
+/// rest could not be read. A pack whose manifest cannot say what it turns on
+/// is the line's answer, in its own words.
+fn guards_of(layering: &Layering, policy: &str) -> String {
+    let declared = match layering {
+        Layering::Resolved { layers, .. } => match guard::declared(layers) {
+            Ok(declared) => declared,
+            Err(why) => return format!("could not be read — {why}"),
+        },
+        Layering::Refused(_) => guard::CORE.to_vec(),
+    };
+    declared
         .iter()
         .map(|class| {
             format!(
@@ -134,7 +169,10 @@ fn layers(packs_dir: &Path, defaults_dir: &Path) -> Layering {
     }
 }
 
-fn packs_of(layering: &Layering) -> String {
+/// The installed names, and after them every import one of them declares that
+/// nothing installed answers, with the line that adds it (fleet-4fw): a session
+/// is told here, at its start, rather than by the first run it opens.
+fn packs_of(layering: &Layering, lock_path: &Path) -> String {
     match layering {
         Layering::Refused(why) => format!("could not be resolved — {why}"),
         Layering::Resolved { layers, .. } => {
@@ -144,9 +182,16 @@ fn packs_of(layering: &Layering) -> String {
                 .map(|layer| layer.name.as_str())
                 .collect();
             if installed.is_empty() {
-                "none installed".to_string()
-            } else {
+                return "none installed".to_string();
+            }
+            let missing: Vec<String> = add::missing_imports(layers, lock_path)
+                .iter()
+                .map(|missing| missing.to_string())
+                .collect();
+            if missing.is_empty() {
                 installed.join(", ")
+            } else {
+                format!("{} ({})", installed.join(", "), missing.join("; "))
             }
         }
     }
@@ -174,19 +219,72 @@ fn first_refusal(refusals: &[resolve::Refusal]) -> String {
         .unwrap_or_else(|| "the layering refused without saying why".to_string())
 }
 
+/// The project line 2 reads the store of: the seat's worktree where a row
+/// names this directory, which is the root the item line reads, so the two
+/// lines name one store; else the directory the walk found the project's own
+/// file in.
+fn project_root(
+    seat_root: Option<&Path>,
+    found: Option<&fleet_controller::project::Found>,
+) -> Option<PathBuf> {
+    if let Some(root) = seat_root {
+        return Some(root.to_path_buf());
+    }
+    found?.root().map(Path::to_path_buf)
+}
+
+/// Line 2: the store's name and version and the adapter that answered them, or
+/// why they could not be read, or that there is no project here to have one.
+fn store_line(project_root: Option<&Path>) -> String {
+    let Some(root) = project_root else {
+        return String::from("store: none (no project here)");
+    };
+    match store_version(root) {
+        Ok((version, adapter)) => format!(
+            "store: {} {} (adapter {adapter})",
+            version.name, version.version
+        ),
+        Err(why) => format!("store: could not be read — {why}"),
+    }
+}
+
+/// The store the project's own file names, asked its version through the
+/// opener every verb takes, and the adapter's name: the line names the store a
+/// verb run here writes to, and an adapter that will not open or answer is the
+/// line's answer.
+fn store_version(root: &Path) -> Result<(Version, String), String> {
+    let policy = store::project_policy(root).map_err(|why| why.to_string())?;
+    let (packs_dir, defaults_dir) = defaults::pack_dirs(&platform::machine_dir(), None);
+    let store = fleet_controller::project::open_store_at(
+        root,
+        &policy,
+        PackDirs {
+            packs_dir: &packs_dir,
+            defaults_dir: &defaults_dir,
+        },
+        VERSION_TIMEOUT,
+    )
+    .map_err(|why| why.to_string())?;
+    let version = store.version().map_err(|why| why.to_string())?;
+    Ok((version, store::adapter_name(&policy)))
+}
+
 /// The seat whose row names this directory as a worktree, and that worktree.
 ///
 /// The match is on the directory itself rather than on any parent of it: a row
 /// names a worktree root, and a session under some other checkout inside it is
-/// not that seat's (lessons claude-code B5 — a cwd names a seat and proves
-/// nothing, so the weakest reading is the one taken).
-fn seat_here(machine: &config::MachineConfig, cwd: &Path) -> Option<(String, PathBuf)> {
+/// not that seat's (the claude-code pack's lessons B5 — a cwd names a seat and
+/// proves nothing, so the weakest reading is the one taken).
+fn seat_here<'a>(
+    machine: &'a config::MachineConfig,
+    cwd: &Path,
+) -> Option<(&'a config::Seat, PathBuf)> {
     let here = canonical(cwd);
     for seat in &machine.seats {
         for (_project, path) in &seat.worktrees {
             let root = PathBuf::from(path);
             if canonical(&root) == here {
-                return Some((seat.name.clone(), root));
+                return Some((seat, root));
             }
         }
     }
@@ -197,7 +295,7 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn print_items(project_root: &Path, seat: &str) {
+fn print_items(project_root: &Path, seat: &SeatId) {
     match items(project_root, seat) {
         Ok(items) if items.is_empty() => println!("item: none"),
         Ok(items) => {
@@ -214,61 +312,30 @@ fn print_items(project_root: &Path, seat: &str) {
 /// The seat's open and in-progress items, `(id, title)`, in the order the
 /// tracker listed them.
 ///
-/// NOT `fleet_core::store::Bd`, which makes this same call: that reader waits
-/// on `bd` without a bound, and a session-start hook needs a deadline (see
-/// `ITEMS_TIMEOUT`). It also answers `Row { id, status }`, and this line
-/// carries the title.
-fn items(project_root: &Path, seat: &str) -> Result<Vec<(String, String)>, String> {
-    let bin = resolve_bd()?;
-    let mut cmd = Command::new(bin);
-    cmd.arg("-C")
-        .arg(project_root)
-        .args(["list", "-a", seat, "--json"]);
-    let out = platform::run_bounded(cmd, ITEMS_TIMEOUT)?;
-    if !out.ok {
-        let cause = out
-            .stderr
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("no message")
-            .trim()
-            .to_string();
-        return Err(format!("the listing exited {:?} — {cause}", out.code));
-    }
-    let rows: serde_json::Value =
-        serde_json::from_str(&out.stdout).map_err(|e| format!("the listing is not JSON: {e}"))?;
-    let Some(rows) = rows.as_array() else {
-        return Err("the listing is not an array".to_string());
-    };
-    Ok(rows
-        .iter()
-        .filter(|row| matches!(row["status"].as_str(), Some("open" | "in_progress")))
-        .filter_map(|row| {
-            Some((
-                row["id"].as_str()?.to_string(),
-                row["title"].as_str().unwrap_or("").to_string(),
-            ))
-        })
+/// The store the project's own file names, through the opener every verb
+/// takes, under `ITEMS_TIMEOUT` rather than the store's bound: a session-start
+/// hook cannot wait a minute. The adapter runs on the constructed child PATH,
+/// because a session the controller started carries a `PATH` that finds
+/// nothing (lessons claude-code D1), so a store that does not answer on it is
+/// this line's third answer.
+fn items(project_root: &Path, seat: &SeatId) -> Result<Vec<(String, String)>, String> {
+    let policy = store::project_policy(project_root).map_err(|why| why.to_string())?;
+    let (packs_dir, defaults_dir) = defaults::pack_dirs(&platform::machine_dir(), None);
+    let store = fleet_controller::project::open_store_at(
+        project_root,
+        &policy,
+        PackDirs {
+            packs_dir: &packs_dir,
+            defaults_dir: &defaults_dir,
+        },
+        ITEMS_TIMEOUT,
+    )
+    .map_err(|why| why.to_string())?;
+    Ok(store
+        .list(&Filter::Assignee(*seat))
+        .map_err(|why| why.to_string())?
+        .into_iter()
+        .filter(|row| matches!(row.status, Status::Open | Status::InProgress))
+        .map(|row| (row.id.to_string(), row.title))
         .collect())
-}
-
-/// `FLEET_BD_BIN` when it names an ABSOLUTE path, else the first `bd` on the
-/// constructed child PATH — the shape every other binary this workspace runs
-/// is resolved by.
-pub(crate) fn resolve_bd() -> Result<PathBuf, String> {
-    let child_path = platform::child_path(&platform::home_dir());
-    match std::env::var("FLEET_BD_BIN").ok().as_deref().map(str::trim) {
-        Some(bin) if !bin.is_empty() => {
-            if !Path::new(bin).is_absolute() {
-                return Err(format!(
-                    "the item-tracker seam names `{bin}`, which is not an absolute path"
-                ));
-            }
-            platform::resolve_on_path(&child_path, bin).ok_or_else(|| {
-                format!("the item-tracker seam names `{bin}`, which is not an executable file")
-            })
-        }
-        _ => platform::resolve_on_path(&child_path, DEFAULT_BD)
-            .ok_or_else(|| format!("no `{DEFAULT_BD}` on the constructed child PATH")),
-    }
 }

@@ -1,5 +1,4 @@
-//! `fleet land` through the shipped binary, against a REAL remote (packs PRD
-//! R8, R10; cli PRD § `fleet land`).
+//! `fleet land` through the shipped binary, against a REAL remote.
 //!
 //! This is where the live git path is proven. The rig is three repositories: a
 //! bare one that is `origin`, a second one beside it that is the primary and
@@ -16,7 +15,7 @@
 //! did not.
 //!
 //! Every rc below is read from the child's own status and never off anything it
-//! printed (R10).
+//! printed.
 
 mod common;
 
@@ -27,17 +26,21 @@ use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use common::hermetic::Hermetic;
+use fleet_core::seat::actor::Actor;
+use fleet_core::store::{ItemId, Store as _};
+use fleet_core::test_support::stub::{LOCK_FILE, STATE_FILE};
+use fleet_core::test_support::{EXPORT_DIR, EXPORT_FILE};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-/// Every child this file spawns — the shipped binary, `bd` and `git` —
-/// counted rather than estimated. `FLEET_TEST_SPAWNS=1` prints each one as it
-/// is taken, numbered and stamped; nextest runs one arm per process, so the
+/// Every child this file spawns — the shipped binary, the store stub and `git`
+/// — counted rather than estimated. `FLEET_TEST_SPAWNS=1` prints each one as
+/// it is taken, numbered and stamped; nextest runs one arm per process, so the
 /// highest number a process prints is that arm's own count.
 ///
 /// The kind leads the label, so a reading can separate the binary's spawns
-/// from the store's: `fleet` is the shipped binary, `bd` the work graph, `git`
-/// the repositories.
+/// from the store's: `fleet` is the shipped binary, `store` a call this rig
+/// makes of the stub itself, `git` the repositories.
 static SPAWNS: AtomicUsize = AtomicUsize::new(0);
 
 static STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -50,15 +53,39 @@ fn spawned(what: &str) {
 }
 
 const REVIEWER: &str = "a-reviewer";
-const BUILDER: &str = "a-builder";
+/// The two seats' ids, which the policy lists them under: the item is held by
+/// the reviewer's and ordered to the builder's, as dispatch and deliver write
+/// them.
+const REVIEWER_ID: &str = "01a0d1f1-0aec-765f-9abe-d4f993b9739a";
+const BUILDER_ID: &str = "01a0d1f1-0aec-765f-9abe-bfbf2ac3ce32";
 const WORK: &str = "a-builder/feat/the-work";
 /// The second item's branch, for the arm that asks for two landings at once.
 const OTHER: &str = "a-builder/feat/the-other";
 
-/// The suite is a script whose exit a seam file sets, so an arm chooses green
-/// or red without changing the command the note reports.
-const POLICY: &str = "[gates]\nsuite = \"sh the-suite.sh\"\nci_marker = \"sh the-marker.sh\"\n\n\
-                      [core]\nreviewer = \"a-reviewer\"\n";
+const POLICY: &str = "[landing]\nci_marker = \"sh the-marker.sh\"\n\n\
+                      [core]\nreviewer = \"a-reviewer\"\n\n\
+                      [seats.01a0d1f1-0aec-765f-9abe-d4f993b9739a]\n\
+                      kind = \"agent\"\nname = \"a-reviewer\"\n\n\
+                      [seats.01a0d1f1-0aec-765f-9abe-bfbf2ac3ce32]\n\
+                      kind = \"agent\"\nname = \"a-builder\"\n";
+
+/// [`POLICY`] with the store stub named as the project's store, which is the
+/// file the trunk carries: every checkout of it keeps its project on the stub.
+fn policy() -> String {
+    let named = serde_json::to_string(&common::stub_path().display().to_string())
+        .expect("a path is JSON text");
+    format!("{POLICY}\n[store]\nadapter = {named}\n")
+}
+
+/// What the store's own directory carries on the trunk beside the export: the
+/// state the stub keeps kept out of git, as a project keeps a database it does
+/// not version.
+const STORE_IGNORES: &str = "state.*\n";
+
+/// The test every landing below is handed, as `fleet land --test`: a script
+/// whose exit a seam file sets, so an arm chooses green or red without changing
+/// the command the note reports.
+const SUITE: &str = "sh the-suite.sh";
 
 /// Where every stub script below reads its seam files from: the rig's own root,
 /// handed to the landing and inherited by the children it spawns.
@@ -189,8 +216,8 @@ fn quoted(word: &str) -> String {
 // ---- the template ------------------------------------------------------------
 
 /// The rig every arm copies: the bare, the primary that pushes to it, both work
-/// branches, the pack and the scratch board — built once and never mutated
-/// afterwards.
+/// branches, the pack and the store's tracked half — built once and never
+/// mutated afterwards.
 ///
 /// ONE PER PROCESS, the way `tests/dispatch.rs`'s shared project is, and it
 /// outlives the arms that copy it: a shared handle has no owner to drop it, so
@@ -217,7 +244,7 @@ struct Template {
 impl Template {
     fn shared() -> &'static Template {
         static TEMPLATE: OnceLock<Template> = OnceLock::new();
-        TEMPLATE.get_or_init(|| Template::at(built_once("with-gates", POLICY)))
+        TEMPLATE.get_or_init(|| Template::at(built_once("with-marker", &policy())))
     }
 
     /// The fixture read off the tree, by the process that built it and by every
@@ -236,14 +263,15 @@ impl Template {
     }
 
     /// Built in the order the pieces actually depend on each other: the trunk,
-    /// the two work branches, then the work graph, whose tracked half rides the
+    /// the two work branches, then the store's tracked half, which rides the
     /// trunk.
     ///
-    /// THE STORE IS THE PRIMARY'S, as it is on a real box: `bd init` from a
-    /// linked worktree writes into the main worktree, and the database itself
-    /// is never versioned. What a reviewer's checkout gets is the tracked half
-    /// — the export among it — which is the file a landing rewrites.
-    fn build(&mut self, policy: &str, label: &str) {
+    /// THE TEMPLATE HOLDS NO STORE, only its tracked half: the export, and the
+    /// ignore file that keeps the stub's state out of git. The verbs run in the
+    /// reviewer's checkout, which carries the policy and so resolves as the
+    /// project, and the stub keeps one store per root — so each rig makes its
+    /// store there, beside the export a landing rewrites.
+    fn build(&mut self, policy: &str) {
         std::fs::create_dir_all(self.root.join("hooks")).expect("the fixture directory is made");
         defaults_into(&self.root);
 
@@ -281,7 +309,7 @@ impl Template {
 
         self.commit = self.a_branch(WORK, "the-work.txt", "the work");
         self.other = self.a_branch(OTHER, "the-other.txt", "the other work");
-        self.a_board(label);
+        self.a_store_half();
         write(&self.root.join("the-commit"), &self.commit);
         write(&self.root.join("the-other"), &self.other);
     }
@@ -309,44 +337,29 @@ impl Template {
         commit
     }
 
-    /// The work graph and its tracked half on the trunk. IT HOLDS NO ITEMS: an
-    /// arm's rig creates its own, and what this commit puts on the trunk is the
+    /// The store's tracked half on the trunk: the export of an empty store,
+    /// taken by the stub itself, and the ignore file beside it. IT HOLDS NO
+    /// ITEMS and no store — the state the export was taken from is removed
+    /// before the commit — and what this commit puts on the trunk is the
     /// export file a landing regenerates.
-    fn a_board(&self, label: &str) {
-        spawned("bd init");
-        let init = Command::new("bd")
-            .args(["init", "--prefix", "fx", "--quiet"])
-            .args(common::bd_init_server_args(label))
-            .current_dir(&self.primary)
-            .output()
-            .expect("bd is on the process PATH");
-        assert!(init.status.success(), "bd init: {}", stderr(&init));
-        let export = bd_in(
-            &self.primary,
-            &[
-                "export",
-                "-o",
-                &self
-                    .primary
-                    .join(".beads/issues.jsonl")
-                    .display()
-                    .to_string(),
-            ],
+    fn a_store_half(&self) {
+        let store = common::store_at(&self.primary);
+        spawned("store [\"scratch\"]");
+        store
+            .scratch(&self.primary)
+            .expect("the stub makes a store");
+        spawned("store [\"export\"]");
+        let exported = store.export(&self.primary).expect("the stub exports");
+        assert_eq!(exported, self.primary.join(EXPORT_FILE));
+        write(
+            &self.primary.join(EXPORT_DIR).join(".gitignore"),
+            STORE_IGNORES,
         );
-        assert!(export.status.success(), "bd export: {}", stderr(&export));
-        // `bd init` records the git origin it found as `sync.remote`, and this
-        // one is the TEMPLATE's bare. It rides the store commit into every
-        // rig's checkout, where nothing can rewrite it — the reviewer's tree
-        // has to stay clean — so the line is dropped before it is committed.
-        let config = self.primary.join(".beads/config.yaml");
-        let kept: String = std::fs::read_to_string(&config)
-            .expect("bd init wrote a config")
-            .lines()
-            .filter(|line| !line.contains(&self.root.display().to_string()))
-            .map(|line| format!("{line}\n"))
-            .collect();
-        write(&config, &kept);
-        git(&self.primary, &["add", "--", ".beads"]);
+        for state in [STATE_FILE, LOCK_FILE] {
+            std::fs::remove_file(self.primary.join(state))
+                .unwrap_or_else(|e| panic!("{state} is removed: {e}"));
+        }
+        git(&self.primary, &["add", "--", EXPORT_DIR]);
         git(
             &self.primary,
             &["commit", "--quiet", "--no-gpg-sign", "-m", "the store"],
@@ -357,11 +370,11 @@ impl Template {
     /// The standing half of the copy's correctness, and the one a look at the
     /// directories only answers once: EVERY file a rig copies is asked whether
     /// it names this template — under the name it was built as AND the name it
-    /// is renamed to — and the only ones allowed to are the two files
-    /// [`rebased`] rewrites per rig. A path anywhere else is a rig reading the
-    /// template's bare, its board or its seams while its own assertions pass.
+    /// is renamed to — and the only one allowed to is the file [`rebased`]
+    /// rewrites per rig. A path anywhere else is a rig reading the template's
+    /// bare, its store or its seams while its own assertions pass.
     fn names_itself_nowhere_a_copy_would_carry(&self, public: &Path) {
-        let rewritten = [self.primary.join(".git/config"), repo_state(&self.primary)];
+        let rewritten = [self.primary.join(".git/config")];
         let mut named: Vec<(PathBuf, String)> = Vec::new();
         for file in files_under(&self.bare)
             .into_iter()
@@ -420,12 +433,11 @@ fn built_once(name: &str, policy: &str) -> PathBuf {
         commit: String::new(),
         other: String::new(),
     };
-    building.build(policy, name);
+    building.build(policy);
     // The origin was written under the private name, which the rename below
     // takes away. Re-pointing it at the public one leaves the per-rig rewrite
     // one path to find and one to replace.
     rebased(&building.primary.join(".git/config"), &mine, &root);
-    rebased_if_there(&repo_state(&building.primary), &mine, &root);
     building.names_itself_nowhere_a_copy_would_carry(&root);
 
     // A rename onto a directory another arm already put there refuses, which is
@@ -503,9 +515,10 @@ impl Rig {
     }
 
     /// A copy of the template, each piece copied the only way it can be: the
-    /// repositories and the board by directory, with every file that names
-    /// the template rewritten; the reviewer's checkout ADDED FRESH from this
-    /// rig's own bare, because a linked worktree cannot be copied at all.
+    /// repositories by directory, with every file that names the template
+    /// rewritten; the reviewer's checkout ADDED FRESH from this rig's own
+    /// bare, because a linked worktree cannot be copied at all; and the store
+    /// made in that checkout, which is the project the verbs resolve there.
     fn of(template: &'static Template, label: &str) -> Rig {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let root =
@@ -528,7 +541,6 @@ impl Rig {
         copy_tree(&template.bare, &rig.bare);
         copy_tree(&template.primary, &rig.primary);
         rebased(&rig.primary.join(".git/config"), &template.root, &rig.root);
-        rebased_if_there(&repo_state(&rig.primary), &template.root, &rig.root);
         write(&rig.root.join("the-rc"), "0\n");
         write(&rig.root.join("the-marker-rc"), "0\n");
         write(&rig.root.join("the-sleep"), "0\n");
@@ -541,6 +553,10 @@ impl Rig {
             &rig.reviewer.display().to_string(),
             "origin/main",
         ]);
+        spawned("store [\"scratch\"]");
+        rig.store()
+            .scratch(&rig.reviewer)
+            .expect("the stub makes the reviewer checkout's store");
         rig.item =
             rig.a_delivered_item("an item to land", WORK, "the-work.txt", &rig.commit.clone());
         rig
@@ -550,58 +566,64 @@ impl Rig {
         self.root.join("hooks").display().to_string()
     }
 
-    /// An item held by the reviewer, carrying the orders and the delivery note
-    /// the verb reads. ONE `bd create`: every field it needs is one that call
-    /// already takes, and a bd call on a served board is the cost this rig
-    /// pays most of.
-    fn a_delivered_item(&self, title: &str, branch: &str, file: &str, commit: &str) -> String {
-        let delivery = format!(
-            "DELIVERED {commit} — {BUILDER}\n\
-             commit:  {commit}\n\
-             branch:  {branch}\n\
-             base:    origin/main at {commit}, fetched at 2026-09-12T00:00:00Z\n\
-             files:   {file}\n\
-             gate:    AC2 green, each rc read from its own command\n\
-             suite:   the workspace suite, rc 0\n\
-             spec corrections: none\n\
-             not proven: what this arm did not run\n\
-             decisions: none\n\
-             covers: R8"
-        );
-        let made = bd_in(
-            &self.primary,
-            &[
-                "create",
-                "--title",
-                title,
-                "--description",
-                "a scratch item",
-                "--type",
-                "task",
-                "--assignee",
-                REVIEWER,
-                "--metadata",
-                &format!(
-                    r#"{{"orders": {{"by": "an-architect", "kind": "dispatch", "seat": "{BUILDER}", "at": "2026-09-12T00:00:00Z"}}}}"#
-                ),
-                "--notes",
-                &delivery,
-                "--actor",
-                BUILDER,
-                "--json",
-            ],
-        );
-        assert!(made.status.success(), "bd create: {}", stderr(&made));
-        let value: serde_json::Value =
-            serde_json::from_str(stdout(&made).trim()).expect("bd create answers JSON");
-        value["id"].as_str().expect("an id").to_string()
+    /// The store the verbs read and write: the reviewer checkout's own.
+    fn store(&self) -> fleet_core::store::exec::Exec {
+        common::store_at(&self.reviewer)
     }
 
-    /// The ACCEPTED verdict, written by the SHIPPED verb rather than typed
-    /// here: what land gates on is what `fleet review --land` actually writes.
+    /// An item held by the reviewer, carrying the order and the delivered
+    /// entry the verb reads — the builder's, as `fleet deliver` appends it.
+    fn a_delivered_item(&self, title: &str, branch: &str, file: &str, commit: &str) -> String {
+        use fleet_core::entry::{Body, CheckResult, Delivered, NotProven, Ran, SuiteRun};
+
+        let delivery = Body::Delivered(Delivered {
+            commit: commit.to_string(),
+            branch: branch.to_string(),
+            base: commit.to_string(),
+            files: vec![file.to_string()],
+            checks: vec![CheckResult {
+                check: "AC2".to_string(),
+                result: "green, each rc read from its own command".to_string(),
+            }],
+            suite: SuiteRun::Ran(Ran {
+                command: "the workspace suite".to_string(),
+                rc: 0,
+            }),
+            spec_corrections: Vec::new(),
+            not_proven: vec![NotProven {
+                surface: "what this arm did not run".to_string(),
+                command: "cargo nextest run".to_string(),
+            }],
+            decisions: Vec::new(),
+            covers: vec!["R8".to_string()],
+        });
+        spawned("store [\"create\"]");
+        let item = common::filed(&self.reviewer, title, &[]);
+        spawned("store [\"update\"]");
+        common::hand_to(&self.reviewer, &item, REVIEWER_ID);
+        spawned("store [\"order.set\"]");
+        common::ordered(
+            &self.reviewer,
+            &item,
+            fleet_core::store::OrderKind::Dispatch,
+            "run:an-architect",
+            Some(BUILDER_ID),
+        );
+        let builder = Actor::typed(&format!("seat:{BUILDER_ID}"))
+            .and_then(Result::ok)
+            .expect("the builder is a typed actor");
+        spawned("store [\"append\"]");
+        self.store()
+            .append(&ItemId::from(item.as_str()), &delivery, &builder)
+            .expect("the delivered entry is appended");
+        item
+    }
+
+    /// The accept, appended by the SHIPPED verb as the reviewer rather than
+    /// typed here: what land gates on is the reviewed entry `fleet review
+    /// --land` actually writes.
     fn accepted(&self) {
-        let reviewed = self.run(&["review", &self.item, "--land"]);
-        assert_eq!(reviewed.status.code(), Some(0), "{}", stderr(&reviewed));
+        reviewed(self, &self.item);
     }
 
     fn in_primary(&self, args: &[&str]) -> String {
@@ -616,22 +638,46 @@ impl Rig {
         git(&self.bare, args)
     }
 
-    fn bd(&self, args: &[&str]) -> Output {
-        bd_in(&self.reviewer, args)
-    }
-
+    /// The item as the store answers it, in the contract's own JSON.
     fn item_json(&self) -> serde_json::Value {
-        let out = self.bd(&["-q", "show", &self.item, "--json"]);
-        let value: serde_json::Value =
-            serde_json::from_str(stdout(&out).trim()).expect("bd show answers JSON");
-        value[0].clone()
+        spawned("store [\"show\"]");
+        common::shown(&self.reviewer, &self.item)
     }
 
-    fn notes(&self) -> String {
-        self.item_json()["notes"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string()
+    /// The reason the item was closed with, or `None` while it is open.
+    fn close_reason(&self) -> Option<String> {
+        common::with_state(&self.reviewer, |store| {
+            store
+                .closed
+                .lock()
+                .expect("the closes are not poisoned")
+                .get(&self.item)
+                .cloned()
+        })
+    }
+
+    /// The item's last landed entry, off the timeline the shipped `fleet item
+    /// show --json` prints — the reading the SDK takes — or `None` where the
+    /// item carries none.
+    fn landing(&self, item: &str) -> Option<serde_json::Value> {
+        spawned(&format!("fleet [\"item\", \"show\", {item:?}, \"--json\"]"));
+        let out = Command::new(env!("CARGO_BIN_EXE_fleet"))
+            .args(["item", "show", item, "--json"])
+            .current_dir(&self.reviewer)
+            .hermetic(&self.root.join("home"), &self.machine)
+            .env(SEAM, &self.root)
+            .output()
+            .expect("the built binary runs");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let document: serde_json::Value =
+            serde_json::from_str(stdout(&out).trim()).expect("item show --json is one document");
+        document["data"]["timeline"]
+            .as_array()
+            .expect("the document carries a timeline")
+            .iter()
+            .rev()
+            .find(|entry| entry["kind"] == "landed")
+            .cloned()
     }
 
     /// Every event the machine directory's stream holds, newest last.
@@ -657,9 +703,9 @@ impl Rig {
         Command::new(env!("CARGO_BIN_EXE_fleet"))
             .args(self.args(args, &packs))
             .current_dir(&self.reviewer)
-            .hermetic(&self.root.join("home"), &self.machine, None)
+            .hermetic(&self.root.join("home"), &self.machine)
             .env(SEAM, &self.root)
-            .env("BEADS_ACTOR", REVIEWER)
+            .env("FLEET_ACTOR", REVIEWER)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fleet tests")
@@ -681,9 +727,9 @@ impl Rig {
         let mut command = pty_command(env!("CARGO_BIN_EXE_fleet"), &all);
         let out = command
             .current_dir(&self.reviewer)
-            .hermetic(&self.root.join("home"), &self.machine, None)
+            .hermetic(&self.root.join("home"), &self.machine)
             .env(SEAM, &self.root)
-            .env("BEADS_ACTOR", REVIEWER)
+            .env("FLEET_ACTOR", REVIEWER)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fleet tests")
@@ -696,7 +742,7 @@ impl Rig {
     }
 
     fn land(&self) -> Output {
-        self.run(&["land", &self.item, &self.commit])
+        self.run(&["land", &self.item, &self.commit, "--test", SUITE])
     }
 
     /// A landing started and not waited on, its two streams into one file the
@@ -711,13 +757,13 @@ impl Rig {
             .unwrap_or_else(|e| panic!("{} is opened: {e}", into.display()));
         let both = page.try_clone().expect("the page is shared with stderr");
         Command::new(env!("CARGO_BIN_EXE_fleet"))
-            .args(self.args(&["land", item, commit], &packs))
+            .args(self.args(&["land", item, commit, "--test", SUITE], &packs))
             .current_dir(&self.reviewer)
             .stdout(std::process::Stdio::from(page))
             .stderr(std::process::Stdio::from(both))
-            .hermetic(&self.root.join("home"), &self.machine, None)
+            .hermetic(&self.root.join("home"), &self.machine)
             .env(SEAM, &self.root)
-            .env("BEADS_ACTOR", REVIEWER)
+            .env("FLEET_ACTOR", REVIEWER)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fleet tests")
@@ -787,35 +833,6 @@ fn rebased(config: &Path, from: &Path, to: &Path) {
     write(config, &moved);
 }
 
-/// The board's own record of where it fetches from, and the second absolute
-/// path a copy carries — written only where the run named no dolt server and
-/// `bd init` fell back to the embedded engine, which records the git origin it
-/// found as a dolt remote. That origin is the TEMPLATE's bare. A served board
-/// writes no such directory at all, so this file is present under one engine
-/// and absent under the other, and the same tree answers differently under
-/// `fleet/tools/dolt-test-server` than under a bare `cargo nextest run`.
-fn repo_state(primary: &Path) -> PathBuf {
-    primary.join(".beads/embeddeddolt/fx/.dolt/repo_state.json")
-}
-
-/// [`rebased`] for a file only one of the two board engines writes: absent
-/// under a served board, and nothing to repoint when it is.
-fn rebased_if_there(config: &Path, from: &Path, to: &Path) {
-    if config.exists() {
-        rebased(config, from, to);
-    }
-}
-
-fn bd_in(root: &Path, args: &[&str]) -> Output {
-    spawned(&format!("bd {args:?}"));
-    Command::new("bd")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .expect("bd runs")
-}
-
 fn write(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap_or_else(|e| panic!("{} is written: {e}", path.display()));
 }
@@ -849,9 +866,9 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 // ---- the green landing -------------------------------------------------------
 
-/// The whole live path: the range line read from a real push, the bare's own
-/// `main` moved to it, the note and the close on the item, and the work branch
-/// gone from both sides.
+/// The whole live path: the range line read from a real push and resolved
+/// whole, the bare's own `main` moved to it, the landed entry and the close on
+/// the item, and the work branch gone from both sides.
 #[test]
 fn a_green_landing_moves_the_bare_and_closes_the_item() {
     let rig = Rig::new("green");
@@ -868,19 +885,16 @@ fn a_green_landing_moves_the_bare_and_closes_the_item() {
         .rev()
         .find_map(|line| line.strip_prefix("LANDED ").map(str::to_string))
         .expect("the last line names the landed sha");
-    // git's own push line prints the range ABBREVIATED, and this sha is read
-    // off that line and nowhere else — so it is asked to resolve rather than
-    // asserted forty characters long.
-    assert!(
-        (7..=40).contains(&landed.len()),
-        "the landed sha is git's own abbreviation: {landed}"
-    );
+    // git's own push line prints the range ABBREVIATED, and the landing
+    // resolves both ends in the tree that pushed (fleet-56e): what reaches the
+    // record is the whole sha, which IS what the bare now calls main.
     assert_ne!(rig.bare_main(), before, "the trunk moved");
     assert_eq!(
-        git(&rig.bare, &["rev-parse", &landed]),
+        landed,
         rig.bare_main(),
-        "and it resolves, on the bare, to what the bare now calls main"
+        "the landed sha is whole, and is the bare's main"
     );
+    assert_eq!(landed.len(), 40, "forty hex: {landed}");
 
     // The squash: one commit on the trunk, carrying the delivery's file and the
     // subject, the marker and the two trailers.
@@ -888,13 +902,15 @@ fn a_green_landing_moves_the_bare_and_closes_the_item() {
     // the store's export, regenerated in the act and riding the same commit.
     assert_eq!(
         rig.in_bare(&["show", "--name-only", "--format=", "main"]),
-        ".beads/issues.jsonl\nthe-work.txt",
+        format!("{EXPORT_FILE}\nthe-work.txt"),
         "the delivered file and the regenerated export, and nothing beside them"
     );
+    // Taken in the act, before the push — so it carries the item as the review
+    // left it, and not the landed entry or the close, which follow the push.
     assert!(
-        rig.in_bare(&["show", "main:.beads/issues.jsonl"])
+        rig.in_bare(&["show", &format!("main:{EXPORT_FILE}")])
             .contains(&rig.item),
-        "and the export that landed is one taken after the close"
+        "and the export that landed is one taken with the item on the store"
     );
     let subject = rig.in_bare(&["log", "-1", "--format=%s", "main"]);
     assert!(
@@ -904,26 +920,68 @@ fn a_green_landing_moves_the_bare_and_closes_the_item() {
     );
     let body = rig.in_bare(&["log", "-1", "--format=%b", "main"]);
     assert!(
-        body.contains(&format!("Seat: {REVIEWER}"))
-            && body.contains(&format!("Implemented-by: {BUILDER}")),
-        "both trailers: {body}"
+        body.contains(&format!("Seat: {REVIEWER_ID}\n"))
+            && body.contains(&format!("Implemented-by: {BUILDER_ID}")),
+        "both trailers, each a seat id: {body}"
     );
 
-    // The record.
-    let notes = rig.notes();
-    assert!(
-        notes.contains(&format!("LANDED {landed} on main by {REVIEWER}")),
-        "the note's first line is on the item:\n{notes}"
+    // The record: the landed entry, every sha whole, by the reviewer.
+    let entry = rig
+        .landing(&rig.item)
+        .expect("the item carries a landed entry");
+    assert_eq!(entry["sha"], serde_json::json!(landed), "{entry}");
+    assert_eq!(
+        entry["old"],
+        serde_json::json!(before),
+        "the trunk it moved from, whole: {entry}"
     );
+    assert_eq!(entry["squash_of"], serde_json::json!(rig.commit), "{entry}");
+    assert_eq!(
+        entry["by"],
+        serde_json::json!(format!("seat:{REVIEWER_ID}")),
+        "{entry}"
+    );
+    assert_eq!(
+        entry["test"],
+        serde_json::json!({ "command": SUITE, "rc": 0 }),
+        "and it names the command the landing was handed: {entry}"
+    );
+    assert_eq!(
+        entry["work_branch"],
+        serde_json::json!({ "branch": WORK, "classification": "safe" }),
+        "{entry}"
+    );
+    assert_eq!(
+        entry["checks"].as_array().map(Vec::len),
+        Some(7),
+        "one row per check read: {entry}"
+    );
+    let notes = common::with_state(&rig.reviewer, |store| {
+        store
+            .comments
+            .lock()
+            .expect("the comments are not poisoned")
+            .get(&rig.item)
+            .into_iter()
+            .flatten()
+            .filter(|comment| {
+                !matches!(
+                    fleet_core::entry::decode(&comment.text),
+                    fleet_core::entry::Read::Entry(_)
+                )
+            })
+            .map(|comment| comment.text.clone())
+            .collect::<Vec<_>>()
+    });
     assert!(
-        notes.contains("suite: sh the-suite.sh, rc 0"),
-        "and it names the suite the project declared:\n{notes}"
+        notes.is_empty(),
+        "and the item carries nothing but entries: fleet writes no note: {notes:?}"
     );
     assert_eq!(rig.item_json()["status"], serde_json::json!("closed"));
-    assert!(
-        notes.contains(&format!("landed {landed}"))
-            || rig.item_json()["close_reason"] == serde_json::json!(format!("landed {landed}")),
-        "the close names the landed sha"
+    assert_eq!(
+        rig.close_reason(),
+        Some(format!("landed {landed}")),
+        "the close names the whole landed sha"
     );
 
     // THE EVENTS, off the stream the binary wrote. The accept this rig made in
@@ -936,9 +994,14 @@ fn a_green_landing_moves_the_bare_and_closes_the_item() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["item.reviewed", "gate.read", "item.landed"],
-        "the accept, the reading, the landing: {events:?}"
+        vec![
+            fleet_core::item::ITEM_ENTRY,
+            fleet_core::item::CHECK_READ,
+            fleet_core::item::ITEM_ENTRY
+        ],
+        "the accept's signal, the reading, the landing's signal: {events:?}"
     );
+    assert_eq!(events[0]["payload"]["kind"], serde_json::json!("reviewed"));
     let reading = &events[1]["payload"];
     let landing = &events[2]["payload"];
     assert_eq!(reading["item"].as_str(), Some(rig.item.as_str()));
@@ -946,19 +1009,17 @@ fn a_green_landing_moves_the_bare_and_closes_the_item() {
     assert_eq!(reading["rc"], serde_json::json!(0));
     assert_eq!(reading["verdict"].as_str(), Some("green"));
     assert_eq!(reading["reading"], serde_json::json!(1));
-    assert_eq!(events[2]["actor"].as_str(), Some(REVIEWER));
-    assert_eq!(landing["sha"].as_str(), Some(landed.as_str()));
     assert_eq!(
-        landing["squash_of"].as_str(),
-        Some(rig.commit.as_str()),
-        "the reviewed commit, and not the one the trunk now carries: {events:?}"
+        events[2]["actor"],
+        serde_json::json!({ "kind": "seat", "id": REVIEWER_ID }),
+        "the landing is the reviewer's act, typed"
     );
-    // The old side is the range line's own, which git prints ABBREVIATED — so it
-    // is asked to resolve rather than compared forty characters long.
+    // The landing's signal names the landed entry above, which carries the
+    // shas.
     assert_eq!(
-        rig.in_bare(&["rev-parse", landing["base"].as_str().expect("a base")]),
-        before,
-        "and the old side of the push's own range line: {events:?}"
+        *landing,
+        serde_json::json!({ "item": rig.item, "entry": entry["id"], "kind": "landed" }),
+        "{events:?}"
     );
 
     // The work branch, gone from both sides on SAFE.
@@ -983,7 +1044,7 @@ fn a_green_landing_moves_the_bare_and_closes_the_item() {
 /// the SAME call run again lands.
 ///
 /// Both halves are one arm because they are one question: a refusal that left
-/// the squash staged, or that left the board it rewrote dirty, is one no re-run
+/// the squash staged, or that left the export it rewrote dirty, is one no re-run
 /// can get past — and the first thing a reviewer does after a refusal is run it
 /// again.
 #[test]
@@ -1012,7 +1073,7 @@ fn a_refusal_puts_the_tree_back_and_the_re_run_lands() {
     assert_eq!(
         rig.in_reviewer(&["status", "--porcelain"]),
         "",
-        "the squash and the rewritten board are both put back"
+        "the squash and the rewritten export are both put back"
     );
     assert_eq!(
         rig.in_reviewer(&["diff", "--cached", "--name-only"]),
@@ -1061,6 +1122,8 @@ fn an_also_path_rides_the_landing_and_the_branch_is_still_deleted() {
         "land",
         &rig.item,
         &rig.commit,
+        "--test",
+        SUITE,
         "--also",
         "the-log.md",
         "--reason",
@@ -1074,17 +1137,89 @@ fn an_also_path_rides_the_landing_and_the_branch_is_still_deleted() {
     );
     assert_eq!(
         rig.in_bare(&["show", "--name-only", "--format=", "main"]),
-        ".beads/issues.jsonl\nthe-log.md\nthe-work.txt",
+        format!("{EXPORT_FILE}\nthe-log.md\nthe-work.txt"),
         "the admitted path rode the landing commit"
     );
     assert!(
         !rig.bare_has(&format!("refs/heads/{WORK}")) && !rig.has(WORK),
         "and the branch is gone from both sides"
     );
+    let entry = rig
+        .landing(&rig.item)
+        .expect("the item carries a landed entry");
     assert!(
-        rig.notes().contains("plus --also the-log.md"),
-        "the staged-set row names what was admitted:\n{}",
-        rig.notes()
+        entry["checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|row| row["evidence"]
+                .as_str()
+                .is_some_and(|evidence| evidence.contains("plus --also the-log.md"))),
+        "the staged-set row names what was admitted: {entry}"
+    );
+}
+
+/// A path git would QUOTE in the plain porcelain — a space and a non-ASCII
+/// character — is refused by its own name and admitted by that same name: the
+/// tree gate, the staged set and `--also` all read it raw, so the value a
+/// reviewer types from the refusal is the value every later check compares.
+#[test]
+fn an_exotic_also_path_rides_the_landing() {
+    let rig = Rig::new("exotic");
+    rig.accepted();
+    write(
+        &rig.reviewer.join("café menu.md"),
+        "the reviewer's own line\n",
+    );
+
+    let out = rig.land();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("`café menu.md` is changed in the working tree"),
+        "the loose path, raw: {}",
+        stderr(&out)
+    );
+
+    let out = rig.run(&[
+        "land",
+        &rig.item,
+        &rig.commit,
+        "--test",
+        SUITE,
+        "--also",
+        "café menu.md",
+        "--reason",
+        "the gate is the owner's",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).contains("6. work branch      SAFE"),
+        "an admitted path is not unlanded work:\n{}",
+        stdout(&out)
+    );
+    let landed = rig.in_bare(&["show", "--name-only", "-z", "--format=", "main"]);
+    assert!(
+        landed.split('\0').any(|path| path == "café menu.md"),
+        "the admitted path rode the landing commit: {landed:?}"
+    );
+    let entry = rig
+        .landing(&rig.item)
+        .expect("the item carries a landed entry");
+    assert!(
+        entry["checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|row| row["evidence"]
+                .as_str()
+                .is_some_and(|evidence| evidence.contains("plus --also café menu.md"))),
+        "the staged-set row names what was admitted: {entry}"
     );
 }
 
@@ -1195,7 +1330,10 @@ fn a_trunk_moved_during_the_act_is_rebase_needed() {
         "and it stands alone: this landing added nothing"
     );
     assert_eq!(rig.item_json()["status"], serde_json::json!("open"));
-    assert!(!rig.notes().contains("LANDED "), "and wrote no note");
+    assert!(
+        rig.landing(&rig.item).is_none(),
+        "and wrote no landed entry"
+    );
 }
 
 /// A remote that rejects the push: exit 1, the remote's own words printed, and
@@ -1222,21 +1360,24 @@ fn a_rejected_push_prints_the_remotes_words_and_writes_nothing() {
     assert_eq!(rig.bare_main(), before, "nothing landed");
     assert_eq!(rig.item_json()["status"], serde_json::json!("open"));
     assert!(
-        !rig.notes().contains("LANDED "),
-        "and no note was written:\n{}",
-        rig.notes()
+        rig.landing(&rig.item).is_none(),
+        "and no landed entry was written"
     );
 }
 
 // ---- the ui (the ruling carried) ---------------------------------------------
 
+/// How long the bar arm's suite writes, a line a second: past the ui's
+/// two-second threshold by enough that the bar is read on more than one count
+/// once it is drawn.
+const BAR_SUITE_SECONDS: usize = 4;
+
 /// The bar is stderr's and the gate table is stdout's (the ruling carried).
 ///
-/// The reading that separates them is the TERMINAL and not the clock: a
-/// landing against a real remote outlasts the ui module's two-second threshold
-/// whatever its suite does — measured, a suite exiting at once still drew the
-/// bar — so the control here is the same landing on a pipe, where the module's
-/// own rule says nothing is drawn. That the threshold itself is a rule rather
+/// The reading that separates them is the TERMINAL and not the clock: the
+/// suite holds the landing past the ui module's two-second threshold, and the
+/// control is the same landing on a pipe, where the module's own rule says
+/// nothing is drawn. That the threshold itself is a rule rather
 /// than a silence is `src/ui.rs`'s own arms and `tests/ui.rs`'s spinner pair.
 #[test]
 fn the_bar_is_drawn_on_a_terminal_and_never_on_a_pipe() {
@@ -1251,26 +1392,27 @@ fn the_bar_is_drawn_on_a_terminal_and_never_on_a_pipe() {
 
     let rig = Rig::new("bar");
     rig.accepted();
-    // Two seconds, and the assertion below is why: the suite writes a line a
-    // second, and the bar has to be read on two DIFFERENT counts.
-    rig.suite_sleeps("2");
+    // Long enough that the suite is still writing when the threshold passes,
+    // wherever in it that falls: the suite writes a line a second, and the bar
+    // has to be read on two DIFFERENT counts after it appears.
+    rig.suite_sleeps(&BAR_SUITE_SECONDS.to_string());
 
-    let out = rig.on_a_pty(&["land", &rig.item, &rig.commit]);
+    let out = rig.on_a_pty(&["land", &rig.item, &rig.commit, "--test", SUITE]);
     // The child's own status, which `script` hands back — not inferred from
-    // anything the page says (R10).
+    // anything the page says.
     assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
     let page = stdout(&out);
     assert!(page.contains("LANDED "), "the landing succeeded:\n{page}");
     assert!(
         page.contains("/7 "),
-        "the bar is bounded by the gate rows the note renders:\n{page}"
+        "the bar is bounded by the check rows the note renders:\n{page}"
     );
 
     // THE COUNT GREW, which is what "as it grows" means and what a single read
-    // cannot produce: the suite writes a line a second for two seconds, so the
+    // cannot produce: the suite writes a line a second, so the
     // page has to carry at least two DIFFERENT counts, and the last line the
     // suite writes has to be among them or the bar stopped refreshing early.
-    let counts: Vec<usize> = (0..=3)
+    let counts: Vec<usize> = (0..=BAR_SUITE_SECONDS + 1)
         .filter(|n| page.contains(&format!("— {n} line(s)")))
         .collect();
     assert!(
@@ -1278,7 +1420,7 @@ fn the_bar_is_drawn_on_a_terminal_and_never_on_a_pipe() {
         "the bar's message was read more than once: counts seen {counts:?} in:\n{page}"
     );
     assert!(
-        counts.contains(&2),
+        counts.contains(&BAR_SUITE_SECONDS),
         "and it kept reading to the suite's last line: counts seen {counts:?}"
     );
 
@@ -1288,7 +1430,7 @@ fn the_bar_is_drawn_on_a_terminal_and_never_on_a_pipe() {
     piped.accepted();
     // The control answers the arm above only if its suite ran as long as that
     // one's did, so it is timed the same and for the same reason.
-    piped.suite_sleeps("2");
+    piped.suite_sleeps(&BAR_SUITE_SECONDS.to_string());
     let out = piped.land();
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(stderr(&out), "", "a pipe gets no bar at all");
@@ -1317,7 +1459,7 @@ fn make_executable(path: &Path) {
     std::fs::set_permissions(path, perms).expect("the file is made executable");
 }
 
-// ---- the lane (flights PRD R15, S3b) -----------------------------------------
+// ---- the lane: one per project, a lock `land` itself takes -------------------
 
 /// A second item on its own branch, its own file and its own accepted verdict,
 /// so two landings can be asked for at once.
@@ -1329,13 +1471,24 @@ fn make_executable(path: &Path) {
 fn a_second_item(rig: &Rig) -> (String, String) {
     let commit = rig.other.clone();
     let item = rig.a_delivered_item("a second item to land", OTHER, "the-other.txt", &commit);
-    let reviewed = rig.run(&["review", &item, "--land"]);
-    assert_eq!(reviewed.status.code(), Some(0), "{}", stderr(&reviewed));
+    reviewed(rig, &item);
     (item, commit)
 }
 
-/// TWO LANDINGS ASKED FOR AT ONCE QUEUE ON THE LANE, and both land in order
-/// (R15, S3b).
+/// `fleet review --land` on this item as the reviewer, answering the reviewed
+/// entry it appended by its id.
+fn reviewed(rig: &Rig, item: &str) {
+    let out = rig.run(&["review", item, "--land", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let document: serde_json::Value =
+        serde_json::from_str(stdout(&out).trim()).expect("review --json answers one document");
+    assert!(
+        document["data"]["entry"].is_string(),
+        "the accept is an entry on the record: {document}"
+    );
+}
+
+/// TWO LANDINGS ASKED FOR AT ONCE QUEUE ON THE LANE, and both land in order.
 ///
 /// THE WAIT IS SIZED TO THE LOCK AND NOT TO A CLOCK. The arm holds the first
 /// landing inside its suite until a file appears, watches the LOCK FILE for the
@@ -1448,7 +1601,7 @@ fn await_in(path: &Path, phrase: &str, what: &str) {
     }
 }
 
-// ---- the JSON envelope (cli PRD § The JSON envelope; MVP path row 2) ---------
+// ---- the JSON envelope (MVP path row 2) --------------------------------------
 
 /// Stdout as the ONE document it is under `--json`: the flag's whole promise to
 /// a caller is that the stream can be parsed rather than searched.
@@ -1469,7 +1622,7 @@ fn a_landing_under_json_prints_the_sha_the_push_named_and_the_table_on_stderr() 
     let rig = Rig::new("json");
     rig.accepted();
 
-    let out = rig.run(&["land", &rig.item, &rig.commit, "--json"]);
+    let out = rig.run(&["land", &rig.item, &rig.commit, "--test", SUITE, "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
     let document = one_document(&out);
@@ -1480,13 +1633,19 @@ fn a_landing_under_json_prints_the_sha_the_push_named_and_the_table_on_stderr() 
     assert_eq!(data["state"], serde_json::json!("landed"), "{data}");
 
     // The document's sha against what the BARE says its trunk is now: only the
-    // remote can answer the claim a landing makes.
+    // remote can answer the claim a landing makes, and the sha is whole.
     let sha = data["sha"].as_str().expect("the document names a sha");
     assert_eq!(
-        git(&rig.bare, &["rev-parse", sha]),
+        sha,
         rig.bare_main(),
-        "the sha the document carries is the trunk the bare now holds: {data}"
+        "the sha the document carries is the trunk the bare now holds, whole: {data}"
     );
+    // The entry the landing wrote, by the id `item show` lists it under.
+    let entry = rig
+        .landing(&rig.item)
+        .expect("the item carries a landed entry");
+    assert!(data["entry"].is_string(), "{data}");
+    assert_eq!(data["entry"], entry["id"], "the landed entry's id: {data}");
 
     let page = stderr(&out);
     assert!(
@@ -1504,7 +1663,7 @@ fn a_refused_landing_under_json_prints_the_refusal_shape_and_the_same_exit_code(
     rig.suite_exits("3");
     let before = rig.bare_main();
 
-    let out = rig.run(&["land", &rig.item, &rig.commit, "--json"]);
+    let out = rig.run(&["land", &rig.item, &rig.commit, "--test", SUITE, "--json"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
 
     let document = one_document(&out);

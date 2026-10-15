@@ -6,9 +6,10 @@
 //! every seat has a shell and every fleet has a record. The other two —
 //! release-ref and production-write — fail it, because a fifty-commit side
 //! project has no release refs and no production cloud, so they are A PACK'S
-//! guards on the same rules (packs PRD § The guards): the class lives here,
-//! which classes a provider runs is the pack's overlay to wire, and the
-//! `[guards]` table switches any of them off the same way.
+//! guards on the same rules: the class lives here, a pack turns it on by
+//! naming it in its manifest's `[pack] guard_classes` ([`declared`] reads the
+//! set), and the fleet's `[guards]` table switches any of them off the same
+//! way.
 //!
 //! Three rules hold for every class:
 //!
@@ -24,19 +25,24 @@
 //!
 //! NO PROVIDER REACHES THIS MODULE. The payload one agent runtime hands a
 //! pre-tool hook, and the document it reads a refusal out of, are that
-//! runtime's contract and live in the caller's adapter; a second runtime adds
-//! a reader of its own and reuses these classes unchanged. Nothing here states
-//! a decision value, touches the filesystem or reads the process table: the
-//! caller resolves the policy and hands it in, which is what keeps the
-//! judgment testable over text alone.
+//! runtime's contract: its agent adapter declares both as data, in the
+//! `[hook]` table [`hook`] reads, and a second runtime declares a mapping of
+//! its own and reuses these classes unchanged. Nothing here states a decision
+//! value or reads the process table, and the judgment touches no filesystem:
+//! the caller resolves the policy and hands it in, which is what keeps the
+//! judgment testable over text alone. [`declared`] is the one reader here that
+//! opens a file, and what it opens is the layers' manifests, never a policy.
 
+pub mod hook;
 pub mod lex;
 pub mod production_write;
 pub mod record;
 pub mod release_ref;
 pub mod shell_trap;
 
+use crate::pack;
 use crate::policy;
+use crate::resolve::Layer;
 
 /// The escape for each guarded act THAT HAS ONE, as a leading assignment on the
 /// command itself. They are NOT interchangeable: each licenses the act it names and
@@ -48,29 +54,31 @@ pub const ESCAPE_TRAP: &str = "FLEET_TRAP_OK";
 pub const ESCAPE_NOTES_REPLACE: &str = "FLEET_NOTES_REPLACE_OK";
 pub const ESCAPE_SQL_WRITE: &str = "FLEET_SQL_WRITE_OK";
 pub const ESCAPE_BARE_ID: &str = "FLEET_BARE_ID_OK";
+pub const ESCAPE_ENTRY_FORGE: &str = "FLEET_ENTRY_FORGE_OK";
 pub const ESCAPE_PROD_WRITE: &str = "FLEET_PROD_WRITE_OK";
 
-/// The release-ref class has no constant above and cannot have one: the packs
-/// PRD's row reads "none at this layer; a hook beneath it holds the override".
-/// A leading assignment would put a release one prefix away from a seat, and the
-/// person who cuts one does it from their own shell, where no pre-tool hook runs
-/// at all. This is the sentence a refusal with no escape prints in its place.
+/// The release-ref class has no constant above and cannot have one: there is no
+/// escape at this layer, and a hook beneath it holds the override. A leading
+/// assignment would put a release one prefix away from a seat, and the person
+/// who cuts one does it from their own shell, where no pre-tool hook runs at
+/// all. This is the sentence a refusal with no escape prints in its place.
 pub const NO_ESCAPE: &str =
     "no escape at this layer — a release is cut by a person from their own shell";
 
 /// The key the bare-id check needs before it refuses anything.
 pub const ITEM_PREFIX_KEY: &str = "[project] item_prefix";
 
-/// The keys the two pack classes need, each in the project's own `[gates]`
-/// table. A check whose key is absent or empty refuses nothing and says so under
-/// the check flag (packs PRD R16).
-pub const RELEASE_REF_GLOB_KEY: &str = "[gates] release_ref_glob";
-pub const PROD_BUCKETS_KEY: &str = "[gates] prod_buckets";
-pub const PROD_PROJECTS_KEY: &str = "[gates] prod_projects";
-pub const PROD_APPS_KEY: &str = "[gates] prod_apps";
-pub const PROD_MAKE_GOALS_KEY: &str = "[gates] prod_make_goals";
-pub const PROD_DAGGER_FUNCTIONS_KEY: &str = "[gates] prod_dagger_functions";
-pub const PROD_WORKFLOW_REFS_KEY: &str = "[gates] prod_workflow_refs";
+/// The keys the two pack classes need, each in the project's own
+/// `[guards.targets]` table, beside the fleet's `[guards]` switches. A check
+/// whose key is absent or empty refuses nothing and says so under the check
+/// flag.
+pub const RELEASE_REF_GLOB_KEY: &str = "[guards.targets] release_ref_glob";
+pub const PROD_BUCKETS_KEY: &str = "[guards.targets] prod_buckets";
+pub const PROD_PROJECTS_KEY: &str = "[guards.targets] prod_projects";
+pub const PROD_APPS_KEY: &str = "[guards.targets] prod_apps";
+pub const PROD_MAKE_GOALS_KEY: &str = "[guards.targets] prod_make_goals";
+pub const PROD_DAGGER_FUNCTIONS_KEY: &str = "[guards.targets] prod_dagger_functions";
+pub const PROD_WORKFLOW_REFS_KEY: &str = "[guards.targets] prod_workflow_refs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
@@ -89,15 +97,45 @@ pub const CLASSES: [Class; 4] = [
     Class::ProductionWrite,
 ];
 
+/// The classes that pass core's bar and run in every fleet. They need no
+/// declaration, because the defaults layer carries no manifest to declare them.
+pub const CORE: [Class; 2] = [Class::ShellTrap, Class::Record];
+
+/// The classes a guard with no class runs over these layers: [`CORE`], and
+/// every class an installed layer's `[pack] guard_classes` names, once each and
+/// in [`CLASSES`] order whatever order the packs wrote them in.
+///
+/// A LAYER WHOSE MANIFEST CANNOT BE READ IS AN `Err` naming it, never a layer
+/// read past: a set built without it would run fewer classes than the fleet
+/// declared, and a guard fails open exactly there.
+pub fn declared(layers: &[Layer]) -> Result<Vec<Class>, String> {
+    let mut on: Vec<Class> = CORE.to_vec();
+    for layer in layers.iter().filter(|layer| !layer.defaults) {
+        let manifest = pack::read_manifest(&layer.root)
+            .map_err(|read| match read {
+                pack::ManifestRead::Unreadable(e) => e.to_string(),
+                pack::ManifestRead::Defects(defects) => defects
+                    .first()
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "the manifest refused and said nothing".to_string()),
+            })
+            .map_err(|why| {
+                format!(
+                    "layer `{}` cannot say which guard classes it turns on: {why}",
+                    layer.name
+                )
+            })?;
+        on.extend(manifest.guards);
+    }
+    Ok(CLASSES
+        .into_iter()
+        .filter(|class| on.contains(class))
+        .collect())
+}
+
 impl Class {
     pub fn parse(name: &str) -> Option<Class> {
-        match name {
-            "shell-trap" => Some(Class::ShellTrap),
-            "record" => Some(Class::Record),
-            "release-ref" => Some(Class::ReleaseRef),
-            "production-write" => Some(Class::ProductionWrite),
-            _ => None,
-        }
+        CLASSES.into_iter().find(|class| class.name() == name)
     }
 
     pub fn name(self) -> &'static str {
@@ -145,22 +183,8 @@ pub struct Policy {
     /// The target the bare-id check needs. A check whose target is not
     /// configured refuses nothing.
     pub item_prefix: Option<String>,
-    /// The glob the push-target check matches a push's destination against.
-    pub release_ref_glob: Option<String>,
-    /// The three lists the production-write class reads, one per check. THE LIST
-    /// IS THE WHOLE TARGET SET: this module evidences nothing from a tree and
-    /// derives nothing from a name, so an empty one refuses nothing.
-    pub prod_buckets: Vec<String>,
-    pub prod_projects: Vec<String>,
-    pub prod_apps: Vec<String>,
-    /// The three lists that name a PRODUCT's own production surfaces rather
-    /// than a cloud target: the build-tool goals that deploy, the module
-    /// functions declared as production writes, and the workflow-and-ref pairs
-    /// written `<workflow>:<ref glob>`. Same rule as the three above — the list
-    /// is the whole target set, and an empty one refuses nothing.
-    pub prod_make_goals: Vec<String>,
-    pub prod_dagger_functions: Vec<String>,
-    pub prod_workflow_refs: Vec<String>,
+    /// The project's own `[guards.targets]`, as [`targets`] reads them.
+    pub targets: Targets,
     /// The two readings this module cannot make for itself, because it touches
     /// no filesystem and runs no process: the application the configuration file
     /// beside the command names, and the project the machine is currently
@@ -170,20 +194,29 @@ pub struct Policy {
     /// the judgment depend on something the text cannot show.
     pub cwd_app: Option<String>,
     pub active_project: Option<String>,
+    /// The command word a seat types to reach the project's store, as the
+    /// store's capabilities declare it: the calls the record class judges,
+    /// and whose text the shell-trap class reads, are this word's, by that
+    /// name or by a path ending in it. `None` is a store that declares no
+    /// command, and every check that reads one refuses nothing.
+    ///
+    /// THE DEFAULT IS THE DEFAULT STORE ADAPTER'S NAME, [`DEFAULT_ADAPTER`],
+    /// which is also the command the bd pack's adapter declares — `bd` — and a
+    /// caller that cannot read the declaration keeps it: a guard that cannot
+    /// tell polices that command, and is never turned off by a store that did
+    /// not answer.
+    ///
+    /// [`DEFAULT_ADAPTER`]: crate::store::DEFAULT_ADAPTER
+    pub cli: Option<String>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
         Policy {
             enabled: true,
+            cli: Some(crate::store::DEFAULT_ADAPTER.to_string()),
             item_prefix: None,
-            release_ref_glob: None,
-            prod_buckets: Vec::new(),
-            prod_projects: Vec::new(),
-            prod_apps: Vec::new(),
-            prod_make_goals: Vec::new(),
-            prod_dagger_functions: Vec::new(),
-            prod_workflow_refs: Vec::new(),
+            targets: Targets::default(),
             cwd_app: None,
             active_project: None,
         }
@@ -237,13 +270,7 @@ pub fn judge(class: Class, command: &str, policy: &Policy) -> Verdict {
         return Verdict::Silent;
     }
     let found = match class {
-        Class::ShellTrap => {
-            if leading_escape(command, ESCAPE_TRAP) {
-                None
-            } else {
-                shell_trap::judge(command)
-            }
-        }
+        Class::ShellTrap => shell_trap::judge(command, policy.cli.as_deref()),
         Class::Record => record::judge(command, policy),
         Class::ReleaseRef => release_ref::judge(command, policy),
         // Its own escape is read inside the class, beside the checks it
@@ -304,15 +331,24 @@ pub fn item_prefix(config: &toml::Table) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The targets the two pack classes read, all in the project's own `[gates]`
-/// table and all through the census, so the pairs a guard reads can be read out
-/// of this source without running it (packs PRD R18).
+/// The targets the two pack classes read, all in the project's own
+/// `[guards.targets]` table and all through the census, so the pairs a guard
+/// reads can be read out of this source without running it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Targets {
+    /// The glob the push-target check matches a push's destination against.
     pub release_ref_glob: Option<String>,
+    /// The three lists the production-write class reads, one per check. THE LIST
+    /// IS THE WHOLE TARGET SET: this module evidences nothing from a tree and
+    /// derives nothing from a name, so an empty one refuses nothing.
     pub prod_buckets: Vec<String>,
     pub prod_projects: Vec<String>,
     pub prod_apps: Vec<String>,
+    /// The three lists that name a PRODUCT's own production surfaces rather
+    /// than a cloud target: the build-tool goals that deploy, the module
+    /// functions declared as production writes, and the workflow-and-ref pairs
+    /// written `<workflow>:<ref glob>`. Same rule as the three above — the list
+    /// is the whole target set, and an empty one refuses nothing.
     pub prod_make_goals: Vec<String>,
     pub prod_dagger_functions: Vec<String>,
     pub prod_workflow_refs: Vec<String>,
@@ -320,13 +356,35 @@ pub struct Targets {
 
 pub fn targets(config: &toml::Table) -> Targets {
     Targets {
-        release_ref_glob: string_target(policy::read("gates", "release_ref_glob", config)),
-        prod_buckets: list_target(policy::read("gates", "prod_buckets", config)),
-        prod_projects: list_target(policy::read("gates", "prod_projects", config)),
-        prod_apps: list_target(policy::read("gates", "prod_apps", config)),
-        prod_make_goals: list_target(policy::read("gates", "prod_make_goals", config)),
-        prod_dagger_functions: list_target(policy::read("gates", "prod_dagger_functions", config)),
-        prod_workflow_refs: list_target(policy::read("gates", "prod_workflow_refs", config)),
+        release_ref_glob: string_target(policy::read("guards.targets", "release_ref_glob", config)),
+        prod_buckets: list_target(policy::read("guards.targets", "prod_buckets", config)),
+        prod_projects: list_target(policy::read("guards.targets", "prod_projects", config)),
+        prod_apps: list_target(policy::read("guards.targets", "prod_apps", config)),
+        prod_make_goals: list_target(policy::read("guards.targets", "prod_make_goals", config)),
+        prod_dagger_functions: list_target(policy::read(
+            "guards.targets",
+            "prod_dagger_functions",
+            config,
+        )),
+        prod_workflow_refs: list_target(policy::read(
+            "guards.targets",
+            "prod_workflow_refs",
+            config,
+        )),
+    }
+}
+
+/// `[guards].<class>.enabled`, `[project] item_prefix` and `[guards.targets]`
+/// over ONE parse of a file's text; every other field is the default. An
+/// unreadable or unparsable file reads as an empty table, as for
+/// [`enabled_in`].
+pub fn policy_in(class: Class, text: &str) -> Policy {
+    let table = text.parse::<toml::Table>().unwrap_or_default();
+    Policy {
+        enabled: enabled(class, &table),
+        item_prefix: item_prefix(&table),
+        targets: targets(&table),
+        ..Policy::default()
     }
 }
 
@@ -363,13 +421,13 @@ pub fn configured(class: Class, check: &str, policy: &Policy) -> bool {
     match class.target_of(check) {
         None => true,
         Some(ITEM_PREFIX_KEY) => policy.item_prefix.is_some(),
-        Some(RELEASE_REF_GLOB_KEY) => policy.release_ref_glob.is_some(),
-        Some(PROD_BUCKETS_KEY) => !policy.prod_buckets.is_empty(),
-        Some(PROD_PROJECTS_KEY) => !policy.prod_projects.is_empty(),
-        Some(PROD_APPS_KEY) => !policy.prod_apps.is_empty(),
-        Some(PROD_MAKE_GOALS_KEY) => !policy.prod_make_goals.is_empty(),
-        Some(PROD_DAGGER_FUNCTIONS_KEY) => !policy.prod_dagger_functions.is_empty(),
-        Some(PROD_WORKFLOW_REFS_KEY) => !policy.prod_workflow_refs.is_empty(),
+        Some(RELEASE_REF_GLOB_KEY) => policy.targets.release_ref_glob.is_some(),
+        Some(PROD_BUCKETS_KEY) => !policy.targets.prod_buckets.is_empty(),
+        Some(PROD_PROJECTS_KEY) => !policy.targets.prod_projects.is_empty(),
+        Some(PROD_APPS_KEY) => !policy.targets.prod_apps.is_empty(),
+        Some(PROD_MAKE_GOALS_KEY) => !policy.targets.prod_make_goals.is_empty(),
+        Some(PROD_DAGGER_FUNCTIONS_KEY) => !policy.targets.prod_dagger_functions.is_empty(),
+        Some(PROD_WORKFLOW_REFS_KEY) => !policy.targets.prod_workflow_refs.is_empty(),
         Some(_) => false,
     }
 }
@@ -379,14 +437,6 @@ pub fn configured(class: Class, check: &str, policy: &Policy) -> bool {
 /// table: opt-out, never opt-in, and nothing printed.
 pub fn enabled_in(class: Class, text: &str) -> bool {
     enabled(class, &text.parse::<toml::Table>().unwrap_or_default())
-}
-
-pub fn item_prefix_in(text: &str) -> Option<String> {
-    item_prefix(&text.parse::<toml::Table>().unwrap_or_default())
-}
-
-pub fn targets_in(text: &str) -> Targets {
-    targets(&text.parse::<toml::Table>().unwrap_or_default())
 }
 
 /// The application a deployment configuration file names, read off that file's
@@ -460,14 +510,23 @@ pub const SURFACES: [Surface; 5] = [
     },
 ];
 
-/// The command word every guarded call is made through: the work graph's.
-pub const WORK_GRAPH: &str = "bd";
+/// Whether any check could read [`Policy::cli`] for this text: whether it
+/// carries a subcommand word a check reads a store call by. A text carrying
+/// none is judged the same whatever the store declares, so a caller that pays
+/// for the declaration pays only for a text this answers yes to.
+pub fn reads_the_cli(command: &str) -> bool {
+    SURFACES
+        .iter()
+        .map(|surface| surface.subcommand)
+        .chain(["sql", "comments"])
+        .any(|word| command.contains(word))
+}
 
-/// The work graph's subcommand for this statement, or `None` where the
-/// statement invokes something else.
-pub fn subcommand_of(current: &[&lex::Token]) -> Option<String> {
+/// The store command's subcommand for this statement, or `None` where the
+/// statement invokes something else or the store declares no command.
+pub fn subcommand_of(current: &[&lex::Token], cli: Option<&str>) -> Option<String> {
     let head = current.first()?;
-    if lex::basename(&head.text) != WORK_GRAPH {
+    if Some(lex::basename(&head.text)) != cli {
         return None;
     }
     current[1..]
@@ -478,8 +537,8 @@ pub fn subcommand_of(current: &[&lex::Token]) -> Option<String> {
 
 /// The stored-text arguments of one statement, as the words they were typed
 /// as: the record class reads their value, the shell-trap class their quoting.
-pub fn text_arguments<'t>(current: &[&'t lex::Token]) -> Vec<&'t lex::Token> {
-    let Some(subcommand) = subcommand_of(current) else {
+pub fn text_arguments<'t>(current: &[&'t lex::Token], cli: Option<&str>) -> Vec<&'t lex::Token> {
+    let Some(subcommand) = subcommand_of(current, cli) else {
         return Vec::new();
     };
     let Some(surface) = SURFACES.iter().find(|s| s.subcommand == subcommand) else {

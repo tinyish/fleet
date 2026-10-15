@@ -1,11 +1,11 @@
 //! The layers: an ordered list of pack roots, top first, resolved to one file
 //! per relative path.
 //!
-//! The caller assembles the list — the fleet's own pack, then its imports in
-//! the order its manifest declares them, then the binary's defaults last. This
-//! resolver never reads a manifest to find its imports, and refuses one level
-//! down: a listed import declaring imports of its own is named rather than
-//! followed.
+//! The caller assembles the list — the installed packs in [`ordered`]'s order,
+//! or one pack over the directories `fleet pack check --over` names — then the
+//! binary's defaults last. This resolver never follows an import to find a
+//! pack, and refuses one level down: a listed pack that another listed pack
+//! imports, declaring imports of its own, is named rather than followed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -78,6 +78,7 @@ pub enum Refusal {
     TransitiveImport {
         layer: String,
         import: String,
+        importers: Vec<String>,
     },
     AgentNameCollision {
         agent: String,
@@ -104,7 +105,7 @@ pub enum Refusal {
     },
     /// The binary's defaults have not been materialized. Named rather than
     /// resolved as an empty bottom layer, because an empty bottom publishes no
-    /// registry and gates nothing.
+    /// registry and checks nothing.
     NoDefaults {
         root: String,
     },
@@ -119,10 +120,19 @@ impl fmt::Display for Refusal {
             Refusal::Manifest { layer, defect } => {
                 write!(f, "layer `{layer}`: {defect}")
             }
-            Refusal::TransitiveImport { layer, import } => write!(
+            Refusal::TransitiveImport {
+                layer,
+                import,
+                importers,
+            } => write!(
                 f,
-                "layer `{layer}` declares its own import `{import}` — \
-                 imports are one level deep"
+                "layer `{layer}` declares its own import `{import}` and is imported by {} — \
+                 imports are one level deep",
+                importers
+                    .iter()
+                    .map(|importer| format!("`{importer}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Refusal::AgentNameCollision {
                 agent,
@@ -169,7 +179,7 @@ impl fmt::Display for Refusal {
 /// layer's declaration of its own surface, so a caller that assembled the list
 /// itself and forgot resolves with a real pack as the bottom — and then every
 /// shadow that pack does not list is refused, or, where it publishes no
-/// registry, nothing is gated at all.
+/// registry, nothing is checked at all.
 pub fn layers(packs_dir: &Path, defaults_dir: &Path) -> Result<Vec<Layer>, Vec<Refusal>> {
     layers_over(installed(packs_dir), defaults_dir)
 }
@@ -206,9 +216,8 @@ pub fn installed(packs_dir: &Path) -> Vec<Layer> {
         if !root.join(pack::MANIFEST).is_file() {
             continue;
         }
-        let name = std::fs::read_to_string(root.join(pack::MANIFEST))
+        let name = pack::read_manifest(&root)
             .ok()
-            .and_then(|text| pack::parse_manifest(&text).ok())
             .map(|m| m.name)
             .unwrap_or(entry);
         layers.push(Layer::new(name, root));
@@ -217,7 +226,13 @@ pub fn installed(packs_dir: &Path) -> Vec<Layer> {
 }
 
 /// The installed packs in the order [`resolve`] wants them: every pack before
-/// each pack it imports, ties broken by name.
+/// each pack it imports, laid in tiers — every pack nothing still waiting
+/// imports goes in together, by name, and the packs they import after them.
+///
+/// A NAME ORDERS A PACK ONLY WITHIN ITS TIER (fleet-6oc). Taking one pack at a
+/// time, by name, put a pack nothing imports beneath an importer's runtime when
+/// it sorted after the importer and above the importer when it sorted before,
+/// so what a layering held depended on what its packs were called.
 ///
 /// THE DEFAULTS ARE NOT ORDERED HERE. The registry rule reads the BOTTOM
 /// layer's declaration of its own surface, and the bottom is the binary's own
@@ -238,22 +253,26 @@ pub fn ordered(layers: Vec<Layer>) -> Result<Vec<Layer>, Vec<Refusal>> {
     let mut placed: Vec<Layer> = Vec::new();
     let mut waiting = rest;
     while !waiting.is_empty() {
-        // A pack nobody still waiting imports may go next: everything that
-        // imports it is already placed above it.
-        let next = waiting.iter().position(|candidate| {
-            !waiting.iter().any(|other| {
-                other.name != candidate.name
-                    && imports_of_name(&imports, &other.name).contains(&candidate.name)
+        // Every pack nobody still waiting imports goes next, together:
+        // everything that imports any of them is already placed above.
+        let free: Vec<bool> = waiting
+            .iter()
+            .map(|candidate| {
+                !waiting.iter().any(|other| {
+                    other.name != candidate.name
+                        && imports_of_name(&imports, &other.name).contains(&candidate.name)
+                })
             })
-        });
-        match next {
-            Some(index) => placed.push(waiting.remove(index)),
-            None => {
-                return Err(vec![Refusal::ImportCycle {
-                    packs: waiting.into_iter().map(|l| l.name).collect(),
-                }])
-            }
+            .collect();
+        if !free.contains(&true) {
+            return Err(vec![Refusal::ImportCycle {
+                packs: waiting.into_iter().map(|l| l.name).collect(),
+            }]);
         }
+        let (tier, below): (Vec<_>, Vec<_>) =
+            waiting.into_iter().zip(free).partition(|(_, free)| *free);
+        placed.extend(tier.into_iter().map(|(layer, _)| layer));
+        waiting = below.into_iter().map(|(layer, _)| layer).collect();
     }
     Ok(placed)
 }
@@ -271,9 +290,8 @@ pub fn slot_path(resolution: &Resolution, layers: &[Layer], relative: &str) -> O
 }
 
 fn imports_of(root: &Path) -> BTreeSet<String> {
-    std::fs::read_to_string(root.join(pack::MANIFEST))
+    pack::read_manifest(root)
         .ok()
-        .and_then(|text| pack::parse_manifest(&text).ok())
         .map(|manifest| manifest.imports.into_iter().map(|i| i.name).collect())
         .unwrap_or_default()
 }
@@ -282,10 +300,8 @@ fn imports_of_name<'m>(
     imports: &'m BTreeMap<String, BTreeSet<String>>,
     name: &str,
 ) -> &'m BTreeSet<String> {
-    static NONE: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
-    imports
-        .get(name)
-        .unwrap_or_else(|| NONE.get_or_init(BTreeSet::new))
+    static NONE: BTreeSet<String> = BTreeSet::new();
+    imports.get(name).unwrap_or(&NONE)
 }
 
 pub fn resolve(layers: &[Layer]) -> Result<Resolution, Vec<Refusal>> {
@@ -321,27 +337,43 @@ pub fn resolve(layers: &[Layer]) -> Result<Resolution, Vec<Refusal>> {
         }
     }
 
-    // The top layer is the one whose imports the caller already walked; every
-    // pack beneath it is one of those imports and may declare none of its own at
-    // this depth. The defaults layer carries no manifest at all and is read
-    // past: it is a directory this binary wrote, not a pack.
-    for layer in layers.iter().skip(1).filter(|layer| !layer.defaults) {
-        match std::fs::read_to_string(layer.root.join(pack::MANIFEST)) {
-            Ok(text) => match pack::parse_manifest(&text) {
-                Ok(manifest) => {
-                    for import in manifest.imports {
-                        refusals.push(Refusal::TransitiveImport {
-                            layer: layer.name.clone(),
-                            import: import.name,
-                        });
-                    }
+    // Imports are one level deep: a pack another listed pack imports may
+    // declare none of its own. Who imports whom is read off the manifests and
+    // never off where a layer sits (fleet-6oc), so several packs may import one
+    // runtime, and no pack becomes an import by sorting after another. Only an
+    // imported pack's manifest is this rule's subject, and one that cannot be
+    // read cannot show it declares nothing. The defaults layer carries no
+    // manifest at all and is read past: it is a directory this binary wrote,
+    // not a pack.
+    let packs: Vec<&Layer> = layers.iter().filter(|layer| !layer.defaults).collect();
+    let declared: Vec<BTreeSet<String>> = packs.iter().map(|l| imports_of(&l.root)).collect();
+    for layer in &packs {
+        let importers: Vec<String> = packs
+            .iter()
+            .zip(&declared)
+            .filter(|(_, theirs)| theirs.contains(&layer.name))
+            .map(|(importer, _)| importer.name.clone())
+            .collect();
+        if importers.is_empty() {
+            continue;
+        }
+        match pack::read_manifest(&layer.root) {
+            Ok(manifest) => {
+                for import in manifest.imports {
+                    refusals.push(Refusal::TransitiveImport {
+                        layer: layer.name.clone(),
+                        import: import.name,
+                        importers: importers.clone(),
+                    });
                 }
-                Err(defects) => refusals.extend(defects.into_iter().map(|d| Refusal::Manifest {
+            }
+            Err(pack::ManifestRead::Defects(defects)) => {
+                refusals.extend(defects.into_iter().map(|d| Refusal::Manifest {
                     layer: layer.name.clone(),
                     defect: d.to_string(),
-                })),
-            },
-            Err(e) => refusals.push(Refusal::Manifest {
+                }))
+            }
+            Err(pack::ManifestRead::Unreadable(e)) => refusals.push(Refusal::Manifest {
                 layer: layer.name.clone(),
                 defect: e.to_string(),
             }),

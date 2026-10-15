@@ -1,8 +1,7 @@
-//! Routines: standing duties the controller's own tick evaluates and fires
-//! (PRD R22–R24).
+//! Routines: standing duties the controller's own tick evaluates and fires.
 //!
-//! One clock and one record. There is no second daemon and no per-routine service
-//! job: every routine from the fleet install, from every installed pack and from
+//! One clock and one record. There is no second service and no per-routine
+//! service job: every routine from the fleet install, from every installed pack and from
 //! every project is read on the tick, and a controller that is down fires
 //! nothing and says so by the absence of its own events.
 //!
@@ -13,18 +12,19 @@
 
 pub mod action;
 pub mod file;
-pub mod gate;
 pub mod load;
 pub mod state;
+pub mod trigger;
 
 use crate::clock;
-use crate::events::{self, EventLog};
+use crate::events::{self, ActorRef, EventLog};
 use crate::observe::RosterState;
 use file::Routine;
-use gate::Due;
+use fleet_core::seat::identity::SeatId;
 use serde::{Deserialize, Serialize};
 use state::{RoutineState, State};
 use std::path::Path;
+use trigger::Due;
 
 /// A file holding the instant every routine clock reads, for a caller driving the
 /// tick against a clock of its own. Unset is this machine's own.
@@ -32,12 +32,15 @@ pub const CLOCK_SEAM: &str = "FLEET_ORDERS_CLOCK";
 
 /// What one routine's action produced, terminally.
 ///
-/// Four are a success and three are not, and the streak below counts only the
+/// Five are a success and three are not, and the streak below counts only the
 /// second kind — a could-not-tell that reset the streak would hide a duty whose
 /// instrument has been unreadable for a week.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Delivered,
+    /// A ring typed into a seat that was mid-turn: it waits behind the turn in
+    /// hand, and is never called delivered (`crate::effect::Typed::Queued`).
+    Queued,
     Filed,
     Deduped,
     Ran,
@@ -50,6 +53,7 @@ impl Outcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Outcome::Delivered => "delivered",
+            Outcome::Queued => "queued",
             Outcome::Filed => "filed",
             Outcome::Deduped => "deduped",
             Outcome::Ran => "ran",
@@ -68,11 +72,15 @@ impl Outcome {
         )
     }
 
-    /// The exit `fleet routine run` carries for this outcome, from the cli PRD's
-    /// one exit table.
+    /// The exit `fleet routine run` carries for this outcome, from the one exit
+    /// table every verb shares.
     pub fn exit_code(self) -> u8 {
         match self {
-            Outcome::Delivered | Outcome::Filed | Outcome::Deduped | Outcome::Ran => 0,
+            Outcome::Delivered
+            | Outcome::Queued
+            | Outcome::Filed
+            | Outcome::Deduped
+            | Outcome::Ran => 0,
             Outcome::CouldNotTell => 3,
             Outcome::Absent => 4,
             Outcome::Failed => 1,
@@ -80,17 +88,21 @@ impl Outcome {
     }
 }
 
-/// One seat as a routine's ring reads it: where it works, what a person calls it,
-/// and what the roster said about it this tick.
+/// One seat as a routine's ring reads it: where it works, the name its session
+/// answers to, and what the roster said about it this tick.
 #[derive(Clone, Debug)]
 pub struct SeatView {
-    pub seat_dir: String,
-    pub display_name: String,
+    /// The seat, and what a nudge action finds its view by.
+    pub id: SeatId,
+    /// The name the seat's session answers to: the one its newest session row
+    /// recorded at start, else its machine name
+    /// (`sessions::Table::session_name`). The ring addresses it by this.
+    pub session_name: String,
     pub worktree: String,
     pub state: RosterState,
     /// The configuration directory this seat's session is held under, where its
-    /// own row names one (flights PRD R13). A ring that reached a spawned seat
-    /// through the fleet's directory would start a second session beside it.
+    /// own row names one. A ring that reached a spawned seat through the
+    /// fleet's directory would start a second session beside it.
     pub config_dir: Option<String>,
 }
 
@@ -141,7 +153,7 @@ pub fn rows(registry: &load::Registry, state: &State, now: u64) -> Vec<RoutineRo
                 name: routine.name.clone(),
                 source: routine.source.as_string(),
                 trigger: routine.trigger.as_str().to_string(),
-                next_due: gate::next_due(routine, now, last_fired, last_evaluated)
+                next_due: trigger::next_due(routine, now, last_fired, last_evaluated)
                     .map(clock::stamp_secs),
                 last_outcome: entry.last_outcome.clone(),
                 last_fired: entry.last_fired.clone(),
@@ -169,14 +181,16 @@ impl Pass<'_> {
         }
     }
 
+    /// One line of the routine's ledger, by the routine: `{routine, <name>}`.
     fn append(&mut self, kind: &str, routine: &str, payload: serde_json::Value) {
-        if let Err(e) = self.events.append(kind, routine, payload) {
-            eprintln!("fleet observe: could not append {kind} for {routine}: {e}");
-        }
+        self.events
+            .append_or_say(kind, &ActorRef::routine(routine), payload, |e| {
+                format!("fleet observe: could not append {kind} for {routine}: {e}")
+            });
     }
 }
 
-/// One pass over every loaded routine (PRD R22, Q2).
+/// One pass over every loaded routine.
 ///
 /// The state is written BEFORE the action on every firing: a duty that happened
 /// and was not recorded fires again forever, and a double firing costs one turn.
@@ -188,7 +202,7 @@ pub fn tick(registry: &load::Registry, pass: &mut Pass, now: u64) {
             .last_evaluated
             .as_deref()
             .and_then(clock::secs_of_stamp);
-        if !gate::is_due_an_evaluation(routine, now, last_evaluated) {
+        if !trigger::is_due_an_evaluation(routine, now, last_evaluated) {
             continue;
         }
         // A run holding the lock owns this routine for as long as it holds it.
@@ -201,7 +215,7 @@ pub fn tick(registry: &load::Registry, pass: &mut Pass, now: u64) {
         }
         let last_fired = entry.last_fired.as_deref().and_then(clock::secs_of_stamp);
         let machine = &pass.machine;
-        let answer = gate::gate(routine, now, last_fired, &|routine| {
+        let answer = trigger::evaluate(routine, now, last_fired, &|routine| {
             action::run_check(routine, machine)
         });
         match answer {
@@ -228,7 +242,7 @@ pub fn tick(registry: &load::Registry, pass: &mut Pass, now: u64) {
     }
 }
 
-/// A gate that could not answer: the state moves, the streak grows, and one
+/// A trigger that could not answer: the state moves, the streak grows, and one
 /// event says which instrument was unreadable.
 pub fn record_could_not_tell(
     routine: &Routine,
@@ -279,7 +293,7 @@ pub fn fire(
     pass.append(events::ROUTINE_FIRED, &routine.name, opening);
 
     let started = std::time::Instant::now();
-    let done = action::run(routine, &pass.machine, &stamp);
+    let done = action::run(routine, &pass.machine);
     let duration_ms = started.elapsed().as_millis() as u64;
 
     let mut entry = pass.state.entry(&routine.name);
@@ -338,15 +352,4 @@ fn add_by(payload: &mut serde_json::Value, by: Option<&str>) {
     if let (Some(object), Some(by)) = (payload.as_object_mut(), by) {
         object.insert("by".to_string(), by.into());
     }
-}
-
-/// The state a routine carries into an evaluation, as epoch seconds.
-pub fn stamps_of(entry: &RoutineState) -> (Option<u64>, Option<u64>) {
-    (
-        entry.last_fired.as_deref().and_then(clock::secs_of_stamp),
-        entry
-            .last_evaluated
-            .as_deref()
-            .and_then(clock::secs_of_stamp),
-    )
 }

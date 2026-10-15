@@ -1,12 +1,13 @@
-//! Fixture tests for the transient-seat primitives (PRD R30–R32).
+//! Fixture tests for the transient-seat primitives.
 //!
-//! The `lessons::` module below is the contract named in
-//! `fleet/brain/lessons/*.md` § Test inventory: each fact the code in this slice
-//! exercises owes a test under the exact name the inventory carries.
+//! No lessons arm is left here: the one this file held, lessons claude-code A8's
+//! `remove_answers_three_ways`, was retired with its entry by fleet-rge6.4
+//! (`fleet/brain/lessons/` § Test inventory).
 //!
-//! The three verbs are driven against a STUB AGENT — a shell script this file
-//! writes, which serves a roster the arm controls, records every call it was
-//! given, and exits at a code the arm sets — and against a SCRATCH GIT
+//! The three verbs are driven against a RIG AGENT — the stub's own reading
+//! rules over listings this file keeps, per configuration directory, in files
+//! the arm controls ([`RigAgent`]), recording every listing it was asked for
+//! and every launch — and against a SCRATCH GIT
 //! REPOSITORY carrying a local `refs/remotes/origin/main`, which is the shape a
 //! spawn cuts a worktree from. So what a verb did is a reading of the machine it
 //! left behind, and never of what it reported.
@@ -21,18 +22,26 @@
 //! states the two readings it is judged against. The overrides' own wiring is
 //! measured in `cli/tests/seat.rs`, which sets them on the CHILD it drives.
 
-use fleet_controller::adapter::claude_code::ClaudeCode;
-use fleet_controller::adapter::{Agent, RemoveAnswer, RosterRead};
 use fleet_controller::config;
 use fleet_controller::events;
+use fleet_controller::host::{Host, HostRead};
 use fleet_controller::platform;
 use fleet_controller::policy::{self, Policy};
 use fleet_controller::sessions;
-use fleet_controller::test_support::FakeClock;
+use fleet_controller::test_support::{self, reading, FakeHost, StubAgent};
 use fleet_controller::transient::{self, Machine, Readings, Refusal, Spawn};
+use fleet_core::agent::{
+    Activity, Agent, AgentError, Argv, Capabilities, Launch, Permissions, Posture, Resume,
+    SeatActivity, SeatContext, SeatRef, Version,
+};
+use fleet_core::seat::identity::SeatId;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// The id of the one named — not transient — row the refusal arms add beside a
+/// spawned seat.
+const NAMED_ID: &str = "01a0d1f1-0aec-765f-9abe-d4f993b9739a";
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -128,44 +137,328 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// The host a rig's spawns run their sessions on: a [`FakeHost`] that also
+/// does, as a session comes up, what the stub's start branch did while starts
+/// were the agent's own `--bg` children — so the witnesses the arms read stay
+/// the same files.
+///
+/// It records the argv after the program one per line and a `start` line in
+/// the call log; it holds inside the
+/// start while the gate stands; it makes a
+/// branch in the worktree where the arm asked for one; and it ends the pane
+/// with the status the arm set, as a session that exits at once does.
+///
+/// A turn typed into a pane is TAKEN, as a live session takes one: every
+/// listed row carrying that pane's pid reads `busy` from the next read on — in
+/// the fleet's listing and in every seat's own under the machine directory —
+/// unless the arm planted `never_taken`, which is a session that leaves what
+/// was typed at its prompt.
+///
+/// A KILL is a retire's stop: logged, held while the gate stands, and then the
+/// session gone with every listed row carrying its pane's pid, because an
+/// interactive row leaves the listing with its process
+/// (the claude-code pack's lessons B10) — unless the arm made the fake keep its
+/// kills, which is a host whose kill answered and did not take. Its panes die on the interrupt
+/// ([`FakeHost::exit_on_interrupt`]), so a stop here is not a whole grace long:
+/// the grace is the effects suite's arm.
+struct RigHost {
+    fake: FakeHost,
+    roster: PathBuf,
+    machine: PathBuf,
+    never_taken: PathBuf,
+    /// Held across a listing's rewrite, so two feeds typing at once each see
+    /// their own row turn.
+    rewriting: std::sync::Mutex<()>,
+    calls: PathBuf,
+    gate: PathBuf,
+    start_argv: PathBuf,
+    start_exit: PathBuf,
+    start_makes_branch: PathBuf,
+}
+
+impl RigHost {
+    /// Every listing the rig serves — the fleet's and each seat's own under
+    /// the machine directory — rewritten row by row, under the rewrite lock.
+    fn rewrite_listings(&self, edit: impl Fn(&mut Vec<serde_json::Value>)) {
+        let _held = self.rewriting.lock().expect("the rig host's own lock");
+        let seats = std::fs::read_dir(self.machine.join("config"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|dir| dir.path().join("roster.json"));
+        for listing in std::iter::once(self.roster.clone()).chain(seats) {
+            let Ok(body) = std::fs::read_to_string(&listing) else {
+                continue;
+            };
+            let Ok(mut rows) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else {
+                continue;
+            };
+            edit(&mut rows);
+            // Renamed into place, so a listing read beside the rewrite meets
+            // the old rows or the new ones and never half of either.
+            let rows = serde_json::to_string(&rows).expect("the rows serialize");
+            fleet_core::fs::write_atomic(&listing, rows.as_bytes())
+                .expect("the listing is rewritten");
+        }
+    }
+
+    fn log(&self, line: &str) {
+        let mut calls = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.calls)
+            .expect("the call log opens");
+        use std::io::Write as _;
+        writeln!(calls, "{line}").expect("the call is logged");
+    }
+
+    fn wait_at_the_gate(&self) {
+        let mut held = 0;
+        while self.gate.is_file() && held < 200 {
+            held += 1;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Host for RigHost {
+    fn new_session(
+        &self,
+        name: &str,
+        cwd: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+    ) -> Result<(), String> {
+        let mut recorded = String::new();
+        for arg in argv.iter().skip(1) {
+            recorded.push_str(arg);
+            recorded.push('\n');
+        }
+        std::fs::write(&self.start_argv, recorded).expect("the argv is recorded");
+        self.log("start");
+        self.wait_at_the_gate();
+        if let Ok(branch) = std::fs::read_to_string(&self.start_makes_branch) {
+            if !branch.trim().is_empty() {
+                git_at(cwd, &["branch", branch.trim()]);
+            }
+        }
+        self.fake.new_session(name, cwd, argv, env)?;
+        if let Some(code) = std::fs::read_to_string(&self.start_exit)
+            .ok()
+            .and_then(|code| code.trim().parse::<i32>().ok())
+            .filter(|code| *code != 0)
+        {
+            self.fake.end(name, Some(code));
+        }
+        Ok(())
+    }
+
+    fn send(&self, name: &str, text: &str) -> Result<(), String> {
+        self.fake.send(name, text)?;
+        if self.never_taken.is_file() {
+            return Ok(());
+        }
+        let Some(pid) = self.fake.session(name).map(|pane| pane.pid) else {
+            return Ok(());
+        };
+        self.rewrite_listings(|rows| {
+            for row in rows.iter_mut().filter(|row| row["pid"] == pid) {
+                row["status"] = "busy".into();
+            }
+        });
+        Ok(())
+    }
+
+    fn keys(&self, name: &str, keys: &[&str]) -> Result<(), String> {
+        self.fake.keys(name, keys)
+    }
+
+    fn capture(&self, name: &str) -> Result<String, String> {
+        self.fake.capture(name)
+    }
+
+    fn kill(&self, name: &str) -> Result<(), String> {
+        self.log(&format!("kill {name}"));
+        self.wait_at_the_gate();
+        let pid = self.fake.session(name).map(|pane| pane.pid);
+        self.fake.kill(name)?;
+        if let (Some(pid), None) = (pid, self.fake.session(name)) {
+            self.rewrite_listings(|rows| rows.retain(|row| row["pid"] != pid));
+        }
+        Ok(())
+    }
+
+    fn list(&self) -> HostRead {
+        self.fake.list()
+    }
+
+    fn attach(&self, name: &str, write: bool) -> std::process::Command {
+        self.fake.attach(name, write)
+    }
+
+    fn version(&self) -> Option<String> {
+        self.fake.version()
+    }
+}
+
+/// The agent a rig's verbs run through: the stub's own reading rules
+/// ([`reading::readings_from`]) over listings this rig keeps in files — the
+/// fleet's own at `roster`, and a configuration directory's own at
+/// `<dir>/roster.json` where the arm planted one — and the stub's own launch
+/// and resume ([`StubAgent::launched`]).
+///
+/// Every listing it reads is recorded, one directory per line, in
+/// `listing_dirs` — the fleet's own recorded as `fleet_dir` — which is the
+/// seam that says WHICH directory a read was made through. While
+/// `roster_fails` stands every listing fails; while `fleet_roster_fails`
+/// stands the fleet's own does, and a seat's own still answers.
+///
+/// A seat's session log is kept under the directory its row names
+/// ([`RigAgent::log_path`]), which `context` and the logged-out reading read.
+struct RigAgent {
+    roster: PathBuf,
+    roster_fails: PathBuf,
+    fleet_roster_fails: PathBuf,
+    listing_dirs: PathBuf,
+    fleet_dir: PathBuf,
+    /// Every launch's whole request, in order.
+    launches: std::sync::Mutex<Vec<Launch>>,
+}
+
+impl RigAgent {
+    /// Where a session's log is kept under a configuration directory.
+    fn log_path(dir: &Path, session: &str) -> PathBuf {
+        dir.join("sessions").join(format!("{session}.jsonl"))
+    }
+
+    /// The directory a seat is read under: its own where the request names
+    /// one, and the fleet's otherwise.
+    fn dir_of(&self, seat: &SeatRef) -> PathBuf {
+        seat.config_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.fleet_dir.clone())
+    }
+
+    /// One directory's listing, or why it gave none — recorded either way it
+    /// answers.
+    fn listing(&self, dir: Option<&str>) -> Result<String, String> {
+        if self.roster_fails.is_file() {
+            return Err("the listing exited 1".to_string());
+        }
+        if dir.is_none() && self.fleet_roster_fails.is_file() {
+            return Err("the fleet's listing exited 1".to_string());
+        }
+        let named = dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.fleet_dir.clone());
+        let mut asked = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.listing_dirs)
+            .expect("the listing log opens");
+        use std::io::Write as _;
+        writeln!(asked, "{}", named.display()).expect("the listing is logged");
+        let own = dir
+            .map(|dir| Path::new(dir).join("roster.json"))
+            .filter(|own| own.is_file());
+        std::fs::read_to_string(own.as_deref().unwrap_or(&self.roster)).map_err(|e| e.to_string())
+    }
+
+    fn launches(&self) -> Vec<Launch> {
+        self.launches
+            .lock()
+            .expect("the rig agent's own lock")
+            .clone()
+    }
+}
+
+impl Agent for RigAgent {
+    fn capabilities(&self) -> Result<Capabilities, AgentError> {
+        Ok(test_support::capabilities())
+    }
+
+    fn version(&self) -> Result<Version, AgentError> {
+        Ok(Version {
+            name: StubAgent::NAME.to_string(),
+            version: Some(StubAgent::VERSION.to_string()),
+        })
+    }
+
+    fn launch(&self, launch: &Launch) -> Result<Argv, AgentError> {
+        self.launches
+            .lock()
+            .expect("the rig agent's own lock")
+            .push(launch.clone());
+        Ok(StubAgent::launched(launch))
+    }
+
+    fn resume(&self, resume: &Resume) -> Result<Argv, AgentError> {
+        Ok(StubAgent::resumed(resume))
+    }
+
+    fn read(&self, seats: &[SeatRef]) -> Result<Vec<SeatActivity>, AgentError> {
+        Ok(reading::readings_from(
+            seats,
+            &|dir: Option<&str>| self.listing(dir),
+            &|seat: &SeatRef, session: &str| {
+                std::fs::read_to_string(RigAgent::log_path(&self.dir_of(seat), session)).ok()
+            },
+        ))
+    }
+
+    fn context(&self, seats: &[SeatRef]) -> Result<Vec<SeatContext>, AgentError> {
+        Ok(seats
+            .iter()
+            .map(|seat| {
+                let path = seat
+                    .session_id
+                    .as_deref()
+                    .map(|session| RigAgent::log_path(&self.dir_of(seat), session));
+                let body = path
+                    .as_ref()
+                    .and_then(|path| std::fs::read_to_string(path).ok());
+                let written = path
+                    .as_ref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .and_then(|meta| meta.modified().ok());
+                reading::context_of(seat, body.as_deref(), written)
+            })
+            .collect())
+    }
+}
+
 /// A whole machine in a temp directory: a scratch primary with a trunk ref, a
-/// worktrees directory, a machine directory and one stub agent.
+/// worktrees directory, a machine directory, the files one rig agent reads and
+/// the host its spawns run on.
 struct Rig {
     root: PathBuf,
     primary: PathBuf,
     worktrees: PathBuf,
     machine: PathBuf,
     home: PathBuf,
-    stub: PathBuf,
     roster: PathBuf,
     roster_fails: PathBuf,
+    /// While this file stands, the FLEET'S OWN listing fails — the one read under
+    /// the adapter's own directory — and a seat's listing under its own still
+    /// answers, which is what a start's watch reads.
+    fleet_roster_fails: PathBuf,
     /// Every configuration directory a listing was asked under, appended one per
-    /// line by the stub: the seam that says WHICH directory a read was made
-    /// through (flights PRD R13).
+    /// line by the rig agent: the seam that says WHICH directory a read was made
+    /// through.
     listing_dirs: PathBuf,
-    stop_keeps_the_roster: PathBuf,
     calls: PathBuf,
     start_argv: PathBuf,
-    start_cwd: PathBuf,
-    /// What the child could read of the seat's local settings when it came up,
-    /// which is the only witness that the write happened BEFORE the start.
-    settings_at_start: PathBuf,
-    nudge_argv: PathBuf,
+    /// Planted, a turn typed into a seat's pane is never taken ([`RigHost`]).
+    never_taken: PathBuf,
     start_exit: PathBuf,
-    stop_exit: PathBuf,
-    rm_exit: PathBuf,
-    rm_stdout: PathBuf,
-    nudge_exit: PathBuf,
     start_makes_branch: PathBuf,
-    /// While this file stands, the stub's start and stop block in it — so an arm
-    /// can hold a verb inside one of its windows and read what a SECOND verb
-    /// gets done meanwhile. Absent by default, which is every other arm here.
+    /// While this file stands, the host's start and kill block in it — so an
+    /// arm can hold a verb inside one of its windows and read what a SECOND
+    /// verb gets done meanwhile. Absent by default, which is every other arm
+    /// here.
     gate: PathBuf,
-    /// The clock every verb driven against this rig spends its one duration-
-    /// subject wait on — `cleared`'s start-watch window. Fake, so the window
-    /// costs no wall clock; the listings inside it are real children and their
-    /// number is the same either way.
-    clock: FakeClock,
+    host: RigHost,
 }
 
 impl Rig {
@@ -181,31 +474,35 @@ impl Rig {
             worktrees: root.join("a-project-worktrees"),
             machine: root.join("machine"),
             home: root.join("home"),
-            stub: root.join("agent-stub"),
             roster: root.join("roster.json"),
             roster_fails: root.join("roster-fails"),
+            fleet_roster_fails: root.join("fleet-roster-fails"),
             listing_dirs: root.join("listing-dirs"),
-            stop_keeps_the_roster: root.join("stop-keeps-the-roster"),
             calls: root.join("calls"),
             start_argv: root.join("start-argv"),
-            start_cwd: root.join("start-cwd"),
-            settings_at_start: root.join("settings-at-start"),
-            nudge_argv: root.join("nudge-argv"),
+            never_taken: root.join("never-taken"),
             start_exit: root.join("start-exit"),
-            stop_exit: root.join("stop-exit"),
-            rm_exit: root.join("rm-exit"),
-            rm_stdout: root.join("rm-stdout"),
-            nudge_exit: root.join("nudge-exit"),
             start_makes_branch: root.join("start-makes-branch"),
             gate: root.join("gate"),
-            clock: FakeClock::new(),
+            host: RigHost {
+                fake: FakeHost::new(),
+                roster: root.join("roster.json"),
+                machine: root.join("machine"),
+                never_taken: root.join("never-taken"),
+                rewriting: std::sync::Mutex::new(()),
+                calls: root.join("calls"),
+                gate: root.join("gate"),
+                start_argv: root.join("start-argv"),
+                start_exit: root.join("start-exit"),
+                start_makes_branch: root.join("start-makes-branch"),
+            },
             root,
         };
+        rig.host.fake.exit_on_interrupt();
         for dir in [&rig.worktrees, &rig.machine, &rig.home] {
             std::fs::create_dir_all(dir).expect("the fixture directory is created");
         }
         copy_tree(&trunk_template(), &rig.primary);
-        rig.write_stub();
         rig.roster("[]");
         rig.write_config("[]");
         rig
@@ -215,134 +512,34 @@ impl Rig {
         git_at(&self.primary, args)
     }
 
-    /// Commit a file onto the fixture's trunk and move `origin/main` onto it,
-    /// so a worktree cut from the trunk comes up carrying it — which is the
-    /// shape of a project that TRACKS its own local settings document.
-    fn tracked_on_trunk(&self, relative: &str, body: &str) -> &Rig {
-        let path = self.primary.join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("the tracked file's directory is created");
+    /// The agent every verb here runs through, over this rig's files.
+    fn agent(&self) -> RigAgent {
+        RigAgent {
+            roster: self.roster.clone(),
+            roster_fails: self.roster_fails.clone(),
+            fleet_roster_fails: self.fleet_roster_fails.clone(),
+            listing_dirs: self.listing_dirs.clone(),
+            fleet_dir: self.home.join("agent"),
+            launches: std::sync::Mutex::new(Vec::new()),
         }
-        std::fs::write(&path, body).expect("the tracked file is written");
-        // `--force`: this path is on the box's own global excludes file, which
-        // reaches a fixture repository because `GIT_CONFIG_GLOBAL=/dev/null`
-        // leaves `core.excludesFile` at its default rather than empty — and a
-        // project that tracks this file tracked it over that same ignore.
-        self.git(&["add", "--force", "--", relative]);
-        self.git(&[
-            "commit",
-            "--quiet",
-            "--no-gpg-sign",
-            "-m",
-            "the project's own rules",
-        ]);
-        self.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        self
     }
 
-    /// The stub. Every branch records the call it was given, so what a verb
-    /// passed is read from what the child received.
-    ///
-    /// The `--bg` branch runs in the seat's own worktree, which is what lets an
-    /// arm ask it to make a branch there before it fails — the case a rollback
-    /// must not delete.
-    fn write_stub(&self) {
-        let body = format!(
-            "#!/bin/sh\n\
-             gate() {{\n\
-             \x20 n=0\n\
-             \x20 while [ -f '{gate}' ] && [ $n -lt 200 ]; do\n\
-             \x20   n=$((n+1))\n\
-             \x20   sleep 0.05\n\
-             \x20 done\n\
-             }}\n\
-             case \"$1\" in\n\
-             \x20 agents)\n\
-             \x20   [ -f '{roster_fails}' ] && exit 1\n\
-             \x20   printf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> '{listing_dirs}'\n\
-             \x20   if [ -f \"$CLAUDE_CONFIG_DIR/roster.json\" ]; then\n\
-             \x20     /bin/cat \"$CLAUDE_CONFIG_DIR/roster.json\"\n\
-             \x20   else\n\
-             \x20     /bin/cat '{roster}'\n\
-             \x20   fi\n\
-             \x20   ;;\n\
-             \x20 --bg)\n\
-             \x20   printf '%s\\n' \"$@\" > '{start_argv}'\n\
-             \x20   pwd > '{start_cwd}'\n\
-             \x20   /bin/cat .claude/settings.local.json > '{settings_at_start}' 2>/dev/null\n\
-             \x20   echo \"start\" >> '{calls}'\n\
-             \x20   gate\n\
-             \x20   b=$(/bin/cat '{branch}' 2>/dev/null)\n\
-             \x20   [ -n \"$b\" ] && git branch \"$b\"\n\
-             \x20   exit $(/bin/cat '{start_exit}' 2>/dev/null || echo 0)\n\
-             \x20   ;;\n\
-             \x20 stop)\n\
-             \x20   echo \"stop $2\" >> '{calls}'\n\
-             \x20   gate\n\
-             \x20   if [ ! -f '{stop_keeps}' ]; then\n\
-             \x20     printf '[]' > '{roster}'\n\
-             \x20     [ -f \"$CLAUDE_CONFIG_DIR/roster.json\" ] \\\n\
-             \x20       && printf '[]' > \"$CLAUDE_CONFIG_DIR/roster.json\"\n\
-             \x20   fi\n\
-             \x20   exit $(/bin/cat '{stop_exit}' 2>/dev/null || echo 0)\n\
-             \x20   ;;\n\
-             \x20 rm)\n\
-             \x20   echo \"rm $2\" >> '{calls}'\n\
-             \x20   /bin/cat '{rm_stdout}' 2>/dev/null\n\
-             \x20   exit $(/bin/cat '{rm_exit}' 2>/dev/null || echo 0)\n\
-             \x20   ;;\n\
-             \x20 -p)\n\
-             \x20   printf '%s\\n' \"$@\" > '{nudge_argv}'\n\
-             \x20   echo \"nudge\" >> '{calls}'\n\
-             \x20   exit $(/bin/cat '{nudge_exit}' 2>/dev/null || echo 0)\n\
-             \x20   ;;\n\
-             \x20 *) exit 64 ;;\n\
-             esac\n",
-            roster = self.roster.display(),
-            roster_fails = self.roster_fails.display(),
-            listing_dirs = self.listing_dirs.display(),
-            stop_keeps = self.stop_keeps_the_roster.display(),
-            start_argv = self.start_argv.display(),
-            start_cwd = self.start_cwd.display(),
-            settings_at_start = self.settings_at_start.display(),
-            nudge_argv = self.nudge_argv.display(),
-            calls = self.calls.display(),
-            branch = self.start_makes_branch.display(),
-            gate = self.gate.display(),
-            start_exit = self.start_exit.display(),
-            stop_exit = self.stop_exit.display(),
-            rm_exit = self.rm_exit.display(),
-            rm_stdout = self.rm_stdout.display(),
-            nudge_exit = self.nudge_exit.display(),
-        );
-        std::fs::write(&self.stub, body).expect("the stub is written");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&self.stub, std::fs::Permissions::from_mode(0o755))
-            .expect("the stub is executable");
-    }
-
-    fn agent(&self) -> ClaudeCode {
-        ClaudeCode::with_seams(
-            self.stub.display().to_string(),
-            self.home.join(".claude"),
-            Duration::from_secs(20),
-            self.machine.clone(),
-            platform::child_path(&self.home),
-            Some(self.stub.clone()),
-            String::new(),
-        )
-    }
-
+    /// The fleet's own listing: the arm's rows and the arrivals ([`test_support::with_arrivals`]).
     fn roster(&self, body: &str) -> &Rig {
-        std::fs::write(&self.roster, body).expect("the roster is written");
+        std::fs::write(&self.roster, test_support::with_arrivals(body))
+            .expect("the roster is written");
         self
     }
 
     /// The listing THIS directory serves, which the fleet's own does not: the
-    /// seam that lets an arm tell the two reads apart (flights PRD R13).
+    /// seam that lets an arm tell the two reads apart.
     fn roster_under(&self, config_dir: &Path, body: &str) -> &Rig {
         std::fs::create_dir_all(config_dir).expect("the configuration directory is made");
-        std::fs::write(config_dir.join("roster.json"), body).expect("the roster is written");
+        std::fs::write(
+            config_dir.join("roster.json"),
+            test_support::with_arrivals(body),
+        )
+        .expect("the roster is written");
         self
     }
 
@@ -385,6 +582,40 @@ impl Rig {
 
     fn config_bytes(&self) -> Vec<u8> {
         std::fs::read(self.config_path()).unwrap_or_default()
+    }
+
+    /// The seat list's row for this machine name, read off the raw document:
+    /// the row is keyed by its id, and a transient seat's machine name is
+    /// `agent-` and that id's short form.
+    fn row_of(&self, seat: &str) -> serde_json::Value {
+        let document: serde_json::Value =
+            serde_json::from_slice(&self.config_bytes()).expect("the seat list is JSON");
+        let named = |row: &serde_json::Value| {
+            row["id"]
+                .as_str()
+                .and_then(|id| SeatId::parse(id).ok())
+                .is_some_and(|id| format!("agent-{}", id.short()) == seat)
+        };
+        document["children"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| named(row)))
+            .cloned()
+            .unwrap_or_else(|| panic!("the seat list carries a row for {seat}: {document}"))
+    }
+
+    /// Every entry in the worktrees directory, sorted: a spawn's name is
+    /// minted, so "no worktree was made" is an empty directory and not the
+    /// absence of one name.
+    fn worktree_entries(&self) -> Vec<String> {
+        let mut entries: Vec<String> = std::fs::read_dir(&self.worktrees)
+            .map(|dir| {
+                dir.filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort();
+        entries
     }
 
     fn table_bytes(&self) -> Vec<u8> {
@@ -438,15 +669,15 @@ impl Rig {
         std::fs::read_to_string(&self.calls).unwrap_or_default()
     }
 
-    /// How many starts the stub has been given, which is what says a SECOND
+    /// How many starts the host has been given, which is what says a SECOND
     /// spawn has reached its window while a first one's start already stands in
     /// the call log.
     fn starts(&self) -> usize {
         self.calls().lines().filter(|line| *line == "start").count()
     }
 
-    /// Hold the stub's next start or stop inside its window, until [`release`]
-    /// lifts it. The stub's own wait is bounded at ten seconds, so an arm that
+    /// Hold the host's next start or stop inside its window, until [`release`]
+    /// lifts it. The host's own wait is bounded at ten seconds, so an arm that
     /// panics before lifting it ends rather than hangs.
     fn hold(&self) {
         std::fs::write(&self.gate, "").expect("the gate is written");
@@ -477,11 +708,22 @@ impl Rig {
             .collect()
     }
 
-    /// The argv file as it was WRITTEN, unsplit. The stub prints one argument
+    /// The argv file as it was WRITTEN, unsplit. The host writes one argument
     /// per line and a first turn is several lines long, so the lines are not the
     /// arguments and an argument carrying newlines can only be read here.
     fn start_argv_text(&self) -> String {
-        std::fs::read_to_string(&self.start_argv).expect("the stub recorded an argv")
+        std::fs::read_to_string(&self.start_argv).expect("the host recorded an argv")
+    }
+
+    /// The id a seat's machine name resolves to on the seat list, which is
+    /// what the session table keys its rows on. Taken while the row stands.
+    fn id_of(&self, seat: &str) -> String {
+        config::read(&self.config_path())
+            .expect("the seat list parses")
+            .resolve(seat)
+            .expect("the seat list names the seat")
+            .id
+            .to_string()
     }
 
     /// A roster row, as the agent's listing shapes one.
@@ -490,7 +732,7 @@ impl Rig {
     fn sight(&self, seat: &str, session_id: &str) {
         let mut table = self.table();
         let row = table
-            .newest_for_mut(seat)
+            .newest_for_mut(&self.id_of(seat))
             .expect("the spawn wrote a row for this seat");
         row.session_id = Some(session_id.to_string());
         sessions::write(&self.table_path(), &table).expect("the table is written back");
@@ -500,43 +742,55 @@ impl Rig {
     /// time is measured from.
     fn dispatched_at(&self, seat: &str) -> u64 {
         self.table()
-            .newest_for(seat)
+            .newest_for(&self.id_of(seat))
             .expect("the spawn wrote a row for this seat")
             .dispatched_at
     }
 
-    /// A transcript where the adapter's own path rule puts one, UNDER THE
+    /// A session log where the rig agent's own path rule puts one, UNDER THE
     /// SEAT'S OWN configuration directory.
     ///
-    /// The row's directory and not the home default: a spawned seat comes up
-    /// under one of its own, so a transcript planted under the default is a
-    /// file no reader of that seat would ever open.
-    fn plant_transcript(
-        &self,
-        seat: &str,
-        worktree: &str,
-        session_id: &str,
-        body: &str,
-    ) -> PathBuf {
+    /// The row's directory and not the fleet's: a spawned seat comes up under
+    /// one of its own, so a log planted under the fleet's is a file no reader
+    /// of that seat would ever open.
+    fn plant_transcript(&self, seat: &str, session_id: &str, body: &str) -> PathBuf {
         let config_dir = self
             .table()
-            .newest_for(seat)
+            .newest_for(&self.id_of(seat))
             .and_then(|row| row.config_dir.clone())
             .map(PathBuf::from)
             .expect("the spawn recorded the seat's own configuration directory");
-        let path = fleet_controller::adapter::transcript_path(&config_dir, worktree, session_id);
+        let path = RigAgent::log_path(&config_dir, session_id);
         std::fs::create_dir_all(path.parent().expect("the transcript has a parent"))
             .expect("the transcript's directory is made");
         std::fs::write(&path, body).expect("the transcript is written");
         path
     }
 
-    fn row(&self, session: &str, short: &str, cwd: &str, pid: u32, status: &str) -> String {
+    /// A live pane on the rig's host for the seat `id`, standing in `cwd` and
+    /// running as `pid` — the pane a listed row carrying that pid is the
+    /// seat's session by (E2).
+    fn host_pane(&self, id: &str, cwd: &str, pid: u32) -> &Rig {
+        let session =
+            fleet_controller::host::session_for(&SeatId::parse(id).expect("a hand-written id"));
+        self.host
+            .fake
+            .new_session(
+                &session,
+                Path::new(cwd),
+                &["/nowhere/agent".to_string()],
+                &[],
+            )
+            .expect("the fake host starts the pane");
+        self.host.fake.set_pid(&session, pid);
+        self
+    }
+
+    fn row(&self, session: &str, cwd: &str, pid: u32, status: &str) -> String {
         format!(
-            "{{\"sessionId\": {session}, \"id\": {short}, \"cwd\": {cwd}, \"pid\": {pid}, \
+            "{{\"sessionId\": {session}, \"cwd\": {cwd}, \"pid\": {pid}, \
              \"status\": {status}}}",
             session = json_string(session),
-            short = json_string(short),
             cwd = json_string(cwd),
             status = json_string(status),
         )
@@ -553,6 +807,19 @@ fn json_string(value: &str) -> String {
     serde_json::Value::String(value.to_string()).to_string()
 }
 
+/// A spawned seat's machine name: `agent-` and the last eight hex digits of a
+/// freshly minted id.
+fn assert_agent_name(seat: &str) {
+    let short = seat.strip_prefix("agent-").unwrap_or("");
+    assert!(
+        short.len() == 8
+            && short
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        "{seat:?} is not agent-<8 hex>"
+    );
+}
+
 /// The policy these arms run under.
 ///
 /// `start_watch_seconds` is 10, not 1. It bounds two waits of opposite shapes
@@ -567,11 +834,17 @@ fn json_string(value: &str) -> String {
 /// roster still, so it spends the whole window on purpose and says so.
 fn a_policy() -> Policy {
     policy::parse(
-        "[controller]\nstart_watch_seconds = 10\nnudge_timeout_seconds = 30\n\
-         nudge_model = \"a-cheap-model\"\ndefault_model = \"a-model\"\n\
+        "[controller]\nstart_watch_seconds = 10\nnudge_timeout_seconds = 1\n\
+         default_model = \"a-model\"\n\
          max_transient_busy = 3\n",
     )
     .expect("the policy parses")
+}
+
+/// The caller that withdraws nothing, which is what every retire did before the
+/// seam existed: a controller with no work graph in reach passes it.
+fn withdraws_nothing(_seat: &str) -> Result<Vec<String>, Refusal> {
+    Ok(Vec::new())
 }
 
 /// A load reading and a cpu count no arm here is judged against by accident.
@@ -580,25 +853,25 @@ const CALM: Readings = Readings {
     cpus: Some(8),
 };
 
-fn machine_of<'a>(rig: &'a Rig, agent: &'a ClaudeCode, policy: &'a Policy) -> Machine<'a> {
+fn machine_of<'a>(rig: &'a Rig, agent: &'a RigAgent, policy: &'a Policy) -> Machine<'a> {
     machine_reading(rig, agent, policy, CALM)
 }
 
 fn machine_reading<'a>(
     rig: &'a Rig,
-    agent: &'a ClaudeCode,
+    agent: &'a RigAgent,
     policy: &'a Policy,
     readings: Readings,
 ) -> Machine<'a> {
     Machine {
         machine_dir: &rig.machine,
         agent,
+        host: &rig.host,
         policy,
         project: "a-project",
         primary: &rig.primary,
         worktrees_dir: &rig.worktrees,
         readings,
-        clock: &rig.clock,
     }
 }
 
@@ -617,12 +890,32 @@ fn spawned(
     cpus: u32,
     first_turn: &str,
 ) -> Result<transient::Spawned, Refusal> {
-    spawned_with(rig, policy, load, cpus, first_turn, None)
+    let agent = rig.agent();
+    let machine = machine_reading(
+        rig,
+        &agent,
+        policy,
+        Readings {
+            load: Some(load),
+            cpus: Some(cpus),
+        },
+    );
+    transient::spawn(
+        &machine,
+        &Spawn {
+            first_turn,
+            model: None,
+            permissions: Permissions::default(),
+            item: None,
+            base: None,
+        },
+        1_000,
+    )
 }
 
 /// The same spawn cut from a NAMED BASE rather than from the trunk ref, which
-/// is what a reviewer's and a returned builder's worktree is (flights PRD R11,
-/// R14), and carrying a model over the policy's default.
+/// is what a reviewer's and a returned builder's worktree is, and carrying a
+/// model over the policy's default.
 fn spawned_at(
     rig: &Rig,
     policy: &Policy,
@@ -644,45 +937,32 @@ fn spawned_at(
         &Spawn {
             first_turn: "the first turn",
             model,
-            settings: None,
+            permissions: Permissions::default(),
             item: None,
             base,
-            config_files: &[],
         },
         1_000,
     )
 }
 
-/// The same spawn with the settings document the caller would have rendered.
-/// `None` is what a caller offering none passes, and it is what every arm above
-/// this one runs under.
+/// The same spawn handing `permissions` to its launch, through `agent` — so
+/// an arm reads the launch the agent was asked for.
 fn spawned_with(
     rig: &Rig,
+    agent: &RigAgent,
     policy: &Policy,
-    load: f64,
-    cpus: u32,
     first_turn: &str,
-    settings: Option<&str>,
+    permissions: Permissions,
 ) -> Result<transient::Spawned, Refusal> {
-    let agent = rig.agent();
-    let machine = machine_reading(
-        rig,
-        &agent,
-        policy,
-        Readings {
-            load: Some(load),
-            cpus: Some(cpus),
-        },
-    );
+    let machine = machine_reading(rig, agent, policy, CALM);
     transient::spawn(
         &machine,
         &Spawn {
             first_turn,
             model: None,
-            settings,
+            permissions,
             item: None,
             base: None,
-            config_files: &[],
         },
         1_000,
     )
@@ -761,8 +1041,9 @@ fn the_belt_reads_the_five_minute_sample() {
     );
 }
 
-/// R30's first leg. The refusal prints BOTH readings, and it creates nothing:
-/// the seat list is byte-identical and the worktrees directory is empty.
+/// The load belt's first leg. The refusal prints BOTH readings, and it
+/// creates nothing: the seat list is byte-identical and the worktrees directory
+/// is empty.
 ///
 /// RED-PROVED IN THE SAME ARM by lowering the reading one unit: at 9.0 against a
 /// ceiling of 8.0 the spawn refuses, and at 8.0 it proceeds — so the refusal is
@@ -796,19 +1077,22 @@ fn a_load_average_over_the_ceiling_refuses_and_creates_nothing() {
         refusal.message
     );
     assert_eq!(rig.config_bytes(), before, "the seat list is untouched");
-    assert!(
-        !rig.worktrees.join("transient-1").exists(),
+    assert_eq!(
+        rig.worktree_entries(),
+        Vec::<String>::new(),
         "no worktree was made"
     );
     assert!(rig.calls().is_empty(), "and the agent was never called");
 
     // The control, one unit down: the same call at the ceiling proceeds.
     let spawn = spawned(&rig, &policy, 8.0, 8, "/work").expect("8.00 is not over 8.00");
-    assert_eq!(spawn.seat, "transient-1");
+    assert_agent_name(&spawn.seat);
 }
 
-/// R30's second leg, counted off the roster: a live row in a TRANSIENT row's
-/// worktree carrying the agent's busy word.
+/// The load belt's second leg, counted off the agent's reading: a TRANSIENT
+/// seat whose live pane the agent reads busy. Each seat's pane is on the host,
+/// and its listed row carries that pane's pid — a row is a seat's by its pane
+/// and never by the worktree it stands in (CORRECTIONS AT REVIEW, 2026-09-25).
 ///
 /// RED-PROVED by lowering the count one: at two mid-turn against a cap of one
 /// the spawn refuses, and with one of the two rows idle it proceeds.
@@ -818,33 +1102,30 @@ fn the_transient_cap_refuses_when_more_seats_are_mid_turn_than_the_cap() {
     let policy = policy::parse("[controller]\nstart_watch_seconds = 10\nmax_transient_busy = 1\n")
         .expect("the policy parses");
 
-    let one = rig.worktrees.join("transient-1").display().to_string();
-    let two = rig.worktrees.join("transient-2").display().to_string();
+    let one = rig.worktrees.join("agent-0a1b2c3d").display().to_string();
+    let two = rig.worktrees.join("agent-4e5f6a7b").display().to_string();
     rig.write_config(&format!(
-        "[{{\"name\": \"transient-1\", \"transient\": true, \
+        "[{{\"id\": \"01a0d1f1-0aec-765f-9abe-00000a1b2c3d\", \"transient\": true, \
            \"worktrees\": {{\"a-project\": {one}}}}}, \
-          {{\"name\": \"transient-2\", \"transient\": true, \
+          {{\"id\": \"01a0d1f1-0aec-765f-9abe-00004e5f6a7b\", \"transient\": true, \
            \"worktrees\": {{\"a-project\": {two}}}}}, \
-          {{\"name\": \"a-named-seat\", \
+          {{\"id\": \"{NAMED_ID}\", \"name\": \"a-named-seat\", \
            \"worktrees\": {{\"a-project\": {named}}}}}]",
         one = json_string(&one),
         two = json_string(&two),
         named = json_string(&rig.primary.display().to_string()),
     ));
     let before = rig.config_bytes();
+    rig.host_pane("01a0d1f1-0aec-765f-9abe-00000a1b2c3d", &one, 11)
+        .host_pane("01a0d1f1-0aec-765f-9abe-00004e5f6a7b", &two, 22)
+        .host_pane(NAMED_ID, &rig.primary.display().to_string(), 33);
     rig.roster(&format!(
         "[{}, {}, {}]",
-        rig.row("s-one", "a1", &one, 11, "busy"),
-        rig.row("s-two", "b2", &two, 22, "busy"),
+        rig.row("s-one", &one, 11, "busy"),
+        rig.row("s-two", &two, 22, "busy"),
         // The control inside the fixture: a NAMED seat mid-turn is not counted,
         // so the number the belt reads is transient seats and not sessions.
-        rig.row(
-            "s-named",
-            "c3",
-            &rig.primary.display().to_string(),
-            33,
-            "busy"
-        ),
+        rig.row("s-named", &rig.primary.display().to_string(), 33, "busy"),
     ));
 
     let refusal = spawned(&rig, &policy, 0.1, 8, "/work")
@@ -867,8 +1148,9 @@ fn the_transient_cap_refuses_when_more_seats_are_mid_turn_than_the_cap() {
         refusal.message
     );
     assert_eq!(rig.config_bytes(), before, "the seat list is untouched");
-    assert!(
-        !rig.worktrees.join("transient-3").exists(),
+    assert_eq!(
+        rig.worktree_entries(),
+        Vec::<String>::new(),
         "no worktree was made"
     );
     assert!(
@@ -880,28 +1162,43 @@ fn the_transient_cap_refuses_when_more_seats_are_mid_turn_than_the_cap() {
     // The control, one unit down: with one of the two idle the spawn proceeds.
     rig.roster(&format!(
         "[{}, {}]",
-        rig.row("s-one", "a1", &one, 11, "busy"),
-        rig.row("s-two", "b2", &two, 22, "idle"),
+        rig.row("s-one", &one, 11, "busy"),
+        rig.row("s-two", &two, 22, "idle"),
     ));
     let spawn = spawned(&rig, &policy, 0.1, 8, "/work").expect("one mid-turn is not over one");
-    assert_eq!(
-        spawn.seat, "transient-3",
-        "and the name is the lowest free one, which is not 1"
+    assert_agent_name(&spawn.seat);
+    assert!(
+        spawn.seat != "agent-0a1b2c3d" && spawn.seat != "agent-4e5f6a7b",
+        "and the name is a fresh one, not a row's the list already carries: {}",
+        spawn.seat
     );
 }
 
 /// An unreadable roster makes the cap leg COULD NOT TELL and refuses nothing —
-/// a daemon nobody can ask must not wedge every spawn in the fleet — while the
+/// an agent nobody can ask must not wedge every spawn in the fleet — while the
 /// load leg keeps its teeth.
+///
+/// A transient seat with a live pane is on the host, so the leg has a seat to
+/// ask about: a fleet with none asks the agent nothing, and its count is a
+/// reading of zero.
 #[test]
 fn an_unreadable_roster_makes_the_cap_leg_could_not_tell_and_the_spawn_proceeds() {
     let rig = Rig::new("belt-unreadable");
     let policy = a_policy();
-    rig.seam(&rig.roster_fails, "");
+    let one = rig.worktrees.join("agent-0a1b2c3d").display().to_string();
+    rig.write_config(&format!(
+        "[{{\"id\": \"01a0d1f1-0aec-765f-9abe-00000a1b2c3d\", \"transient\": true, \
+           \"worktrees\": {{\"a-project\": {one}}}}}]",
+        one = json_string(&one),
+    ));
+    rig.host_pane("01a0d1f1-0aec-765f-9abe-00000a1b2c3d", &one, 11);
+    // The FLEET'S listing, and not the new seat's own: a start is believed
+    // only off the listing under the seat's directory, which is another read.
+    rig.seam(&rig.fleet_roster_fails, "");
 
     let spawn = spawned(&rig, &policy, 0.1, 8, "/work")
         .expect("a cap leg nobody could read refuses nothing");
-    assert_eq!(spawn.seat, "transient-1");
+    assert_agent_name(&spawn.seat);
     assert!(
         spawn.belt.busy.is_none() && spawn.belt.busy_unreadable.is_some(),
         "the cap leg carries its cause: {:?}",
@@ -929,192 +1226,59 @@ fn an_unreadable_roster_makes_the_cap_leg_could_not_tell_and_the_spawn_proceeds(
 
 // ---- AC2: the spawn ---------------------------------------------------------
 
-/// A spawned seat comes up under the plugin root the policy names, on the same
-/// element and in the same position a named seat's start carries it: only a
-/// loaded plugin root gives a session the overlay's hooks (lessons claude-code
-/// D5), and a transient seat is the one that runs a dispatched item.
+/// A spawned seat's launch is handed the seat's permissions in fleet's own
+/// words — the command words and the builder's checks the spawn was given —
+/// with the seat's own worktree and its own configuration directory: the
+/// posture refuses every writing call the session holds no rule for, and
+/// rendering them into the agent's own format, inside what the request names,
+/// is the agent's adapter's (reviewer call 2026-09-25, E8).
 ///
-/// Read from the argv the CHILD received. The control is a second rig under a
-/// policy that names no root, which carries no such element at all.
+/// The control is a spawn handed none, whose launch carries none: a seat's
+/// rules never name a command nobody gave.
 #[test]
-fn a_spawn_starts_the_seat_under_the_plugin_root_the_policy_names() {
-    let rig = Rig::new("plugin-root");
-    let policy = policy::parse(
-        "[controller]\nstart_watch_seconds = 10\ndefault_model = \"a-model\"\n\
-         plugin_dir = \"/an/overlay\"\n",
-    )
-    .expect("the policy parses");
-
-    let spawn = spawned(&rig, &policy, 0.1, 8, "the first turn").expect("the spawn lands");
-    assert_eq!(spawn.seat, "transient-1");
-    let argv = rig.start_argv();
-    let at = argv
-        .iter()
-        .position(|word| word == "--plugin-dir")
-        .unwrap_or_else(|| panic!("the flag is in the argv: {argv:?}"));
-    assert_eq!(argv.get(at + 1).map(String::as_str), Some("/an/overlay"));
-    assert_eq!(
-        argv.get(at + 2).map(String::as_str),
-        Some("the first turn"),
-        "the element after the root's value is the first turn: {argv:?}"
-    );
-
-    // The control: the same spawn under a policy that names none.
-    let bare = Rig::new("plugin-root-control");
-    let spawn = spawned(&bare, &a_policy(), 0.1, 8, "the first turn").expect("the spawn lands");
-    assert_eq!(spawn.seat, "transient-1");
-    let argv = bare.start_argv();
-    assert!(
-        !argv.iter().any(|word| word == "--plugin-dir"),
-        "a fleet that names no plugin root passes no such element: {argv:?}"
-    );
-}
-
-/// A JSON settings document in the shape the pack's overlay carries one, with
-/// the worktree rule's path left for the caller to fill.
-fn a_settings_doc(worktree: &str) -> String {
-    format!("{{\"permissions\":{{\"allow\":[\"Bash(make check:*)\",\"Edit(/{worktree}/**)\"]}}}}")
-}
-
-/// A transient seat's session comes up under permission rules the spawn wrote
-/// into its own worktree: the posture refuses every writing call the session
-/// holds no rule for, and a permission list cannot ride the plugin root the
-/// overlay is loaded through (packs PRD § The first slice).
-///
-/// Three claims, and the third is the one a later reading cannot make on its
-/// own: the document is at the path the adapter names, `{worktree}` reads as
-/// the seat's own checkout, and THE CHILD COULD READ IT — the stub copies the
-/// file out of its own working directory on the way past, so the write is
-/// proved to have landed before the start and not merely before the assertion.
-#[test]
-fn a_spawn_writes_the_seats_permission_rules_before_its_first_turn() {
-    let rig = Rig::new("settings");
-    let template = a_settings_doc(transient::WORKTREE);
-
-    let spawn = spawned_with(&rig, &a_policy(), 0.1, 8, "the first turn", Some(&template))
+fn a_spawn_hands_the_seats_permissions_to_its_launch() {
+    let rig = Rig::new("permissions");
+    let agent = rig.agent();
+    let given = Permissions {
+        commands: vec!["make".to_string(), "cargo".to_string()],
+        touched: Some("make check".to_string()),
+    };
+    let spawn = spawned_with(&rig, &agent, &a_policy(), "the first turn", given.clone())
         .expect("the spawn lands");
-    let worktree = rig.worktrees.join("transient-1");
-    assert_eq!(spawn.worktree, worktree);
 
-    let want = a_settings_doc(&worktree.display().to_string());
-    let path = worktree.join(".claude/settings.local.json");
+    let launches = agent.launches();
+    assert_eq!(launches.len(), 1, "one launch: {launches:?}");
+    assert_eq!(launches[0].permissions, given, "the permissions, as given");
     assert_eq!(
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
-        want,
-        "the document is rendered with the seat's own worktree in the rule"
+        launches[0].worktree,
+        spawn.worktree.display().to_string(),
+        "for the seat's own worktree"
     );
     assert_eq!(
-        std::fs::read_to_string(&rig.settings_at_start).unwrap_or_default(),
-        want,
-        "and the child read those same bytes out of its working directory as it came up"
+        launches[0].config_dir.as_deref(),
+        Some(
+            rig.config_dir_of(&spawn.seat)
+                .display()
+                .to_string()
+                .as_str()
+        ),
+        "under the seat's own configuration directory"
     );
-    assert_eq!(
-        rig.events_of(events::SESSION_SPAWNED)[0]["payload"]["settings"],
-        serde_json::json!("written"),
-        "and the stream says the document was written rather than merged"
-    );
-}
 
-/// The control on the arm above, and the other half of R13's shape: a spawn
-/// offered no document writes none, and a NAMED seat's start never reaches this
-/// verb at all — the loop starts it through `effect::spawn_woken`, whose
-/// worktree is a person's own.
-#[test]
-fn a_spawn_offered_no_settings_writes_none() {
-    let rig = Rig::new("settings-none");
-    spawned(&rig, &a_policy(), 0.1, 8, "the first turn").expect("the spawn lands");
-    let claude = rig.worktrees.join("transient-1").join(".claude");
-    assert!(
-        !claude.exists(),
-        "{} was created by a spawn that was offered nothing",
-        claude.display()
-    );
-    assert!(
-        std::fs::read_to_string(&rig.settings_at_start)
-            .unwrap_or_default()
-            .is_empty(),
-        "and the child found nothing to read when it came up"
-    );
-    assert_eq!(
-        rig.events_of(events::SESSION_SPAWNED)[0]["payload"]["settings"],
-        serde_json::Value::Null,
-        "and the stream carries no settings word for a spawn that wrote none"
-    );
-}
-
-/// The same document with a deny list, which is the other half a merge folds.
-fn a_settings_doc_with_deny(worktree: &str) -> String {
-    format!(
-        "{{\"permissions\":{{\"allow\":[\"Bash(make check:*)\",\"Edit(/{worktree}/**)\"],\
-         \"deny\":[\"Bash(git push:*)\"]}}}}"
+    // The control: a spawn handed none launches with none.
+    let bare = rig.agent();
+    spawned_with(
+        &rig,
+        &bare,
+        &a_policy(),
+        "the first turn",
+        Permissions::default(),
     )
+    .expect("the spawn lands");
+    assert_eq!(bare.launches()[0].permissions, Permissions::default());
 }
 
-/// A project may TRACK `.claude/settings.local.json` on its trunk, and every
-/// transient worktree is cut from that trunk — so the spawn folds the pack's
-/// lists into the document it finds instead of writing over it.
-///
-/// THE LOAD-BEARING ASSERTION IS THE PROJECT'S RULE, NOT THE PACK'S: an arm
-/// that asked only whether the pack's rules were present would read green with
-/// the overwrite still in place, which is what this file measured before.
-/// `Bash(make check:*)` is on both sides on purpose: a rule the project already
-/// carries is not appended a second time.
-#[test]
-fn a_spawn_merges_the_packs_rules_into_a_settings_document_the_project_tracks() {
-    let rig = Rig::new("settings-merge");
-    let project = "{\n  \"permissions\": {\n    \"allow\": [\"Bash(make lint:*)\", \
-                   \"Bash(make check:*)\"],\n    \"deny\": [\"Bash(rm:*)\"]\n  },\n  \
-                   \"model\": \"a-project-model\"\n}\n";
-    rig.tracked_on_trunk(".claude/settings.local.json", project);
-
-    let template = a_settings_doc_with_deny(transient::WORKTREE);
-    let spawn = spawned_with(&rig, &a_policy(), 0.1, 8, "the first turn", Some(&template))
-        .expect("the spawn lands");
-    let worktree = rig.worktrees.join("transient-1");
-    assert_eq!(spawn.worktree, worktree);
-
-    let path = worktree.join(".claude/settings.local.json");
-    let read = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
-    let merged: serde_json::Value =
-        serde_json::from_str(&read).unwrap_or_else(|e| panic!("the merged document is JSON: {e}"));
-
-    assert_eq!(
-        merged["permissions"]["allow"],
-        serde_json::json!([
-            "Bash(make lint:*)",
-            "Bash(make check:*)",
-            format!("Edit(/{}/**)", worktree.display()),
-        ]),
-        "the project's own allow rule survives BESIDE the pack's, first and once"
-    );
-    assert_eq!(
-        merged["permissions"]["deny"],
-        serde_json::json!(["Bash(rm:*)", "Bash(git push:*)"]),
-        "and its deny rule survives beside the pack's"
-    );
-    assert_eq!(
-        merged["model"],
-        serde_json::json!("a-project-model"),
-        "and a key of the project's the pack knows nothing about is untouched"
-    );
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(&rig.settings_at_start).unwrap_or_default()
-        )
-        .unwrap_or(serde_json::Value::Null),
-        merged,
-        "and the child read the merged document out of its working directory as it came up"
-    );
-    assert_eq!(
-        rig.events_of(events::SESSION_SPAWNED)[0]["payload"]["settings"],
-        serde_json::json!("merged"),
-        "and the stream says which of the two happened"
-    );
-}
-
-/// The whole of R30's happy path, read off the machine it left behind.
+/// The whole of the spawn's happy path, read off the machine it left behind.
 #[test]
 fn a_spawn_makes_a_detached_worktree_a_row_and_a_session_and_prints_its_name() {
     let rig = Rig::new("spawn");
@@ -1129,10 +1293,11 @@ fn a_spawn_makes_a_detached_worktree_a_row_and_a_session_and_prints_its_name() {
         "the first turn\nand its second line\n",
     )
     .expect("the spawn lands");
-    assert_eq!(spawn.seat, "transient-1", "the lowest free name");
+    assert_agent_name(&spawn.seat);
+    let seat = spawn.seat.as_str();
 
     // The worktree, detached at the trunk ref.
-    let worktree = rig.worktrees.join("transient-1");
+    let worktree = rig.worktrees.join(seat);
     assert!(worktree.is_dir(), "{} is there", worktree.display());
     let head = std::process::Command::new("git")
         .arg("-C")
@@ -1162,8 +1327,12 @@ fn a_spawn_makes_a_detached_worktree_a_row_and_a_session_and_prints_its_name() {
         .seats;
     let row = seats
         .iter()
-        .find(|seat| seat.name == "transient-1")
+        .find(|row| row.machine_name() == seat)
         .expect("the row is on the file");
+    assert!(
+        row.name.is_none(),
+        "a transient seat has no name of its own"
+    );
     assert!(row.transient, "the row says transient");
     assert_eq!(row.model.as_deref(), Some("a-model"), "the policy's model");
     assert_eq!(
@@ -1171,14 +1340,15 @@ fn a_spawn_makes_a_detached_worktree_a_row_and_a_session_and_prints_its_name() {
         vec![("a-project".to_string(), worktree.display().to_string())]
     );
 
-    // The start: the file's text is the LAST argument, and the posture is the
-    // transient one rather than a named seat's.
+    // The start: an interactive session, the file's text is the LAST argument,
+    // and the posture is the transient one rather than a named seat's.
     let argv = rig.start_argv();
-    assert_eq!(argv.first().map(String::as_str), Some("--bg"));
+    assert_eq!(argv.first().map(String::as_str), Some("--name"));
+    assert!(!argv.iter().any(|word| word == "--bg"), "{argv:?}");
     assert!(
         rig.start_argv_text()
             .ends_with("the first turn\nand its second line\n\n"),
-        "the first turn's text is the last argument, WHOLE — the stub prints one \
+        "the first turn's text is the last argument, WHOLE — the host writes one \
          argument per line, so a turn of two lines is the last two: {:?}",
         rig.start_argv_text()
     );
@@ -1188,36 +1358,59 @@ fn a_spawn_makes_a_detached_worktree_a_row_and_a_session_and_prints_its_name() {
             .and_then(|at| argv.get(at + 1))
             .map(String::as_str)
     };
-    assert_eq!(flag("--permission-mode"), Some(policy.posture_for(true)));
+    // Fleet's `unattended`, which the launch is asked for in fleet's own word
+    // and its adapter maps to its agent's (ruling 14).
+    assert_eq!(policy.posture_for(true), Posture::Unattended);
+    assert_eq!(flag("--posture"), Some("unattended"));
     assert_eq!(flag("--model"), Some("a-model"));
-    assert_eq!(flag("--name"), Some("transient-1"));
+    assert_eq!(flag("--name"), Some(seat));
 
-    // The session-table row, and the one event.
+    // The session-table row, keyed on the seat's id, and the one event, whose
+    // actor is that seat, by its id.
     let table = rig.table();
     let opened = table
-        .newest_for("transient-1")
+        .newest_for(&row.id.to_string())
         .expect("the table carries the row this start opened");
     assert!(opened.transient);
     assert_eq!(opened.worktree, worktree.display().to_string());
+    assert_eq!(
+        opened.name, seat,
+        "the session is named by the machine name"
+    );
     assert!(
         opened.first_turn.starts_with("the first turn"),
         "the occupant marker is the turn's text: {:?}",
         opened.first_turn
     );
-    assert_eq!(rig.events_of(events::SESSION_SPAWNED).len(), 1);
+    assert_eq!(
+        opened.posture,
+        sessions::StoredPosture::Known(Posture::Unattended)
+    );
+    let spawned_lines = rig.events_of(events::SESSION_SPAWNED);
+    assert_eq!(spawned_lines.len(), 1);
+    assert_eq!(
+        spawned_lines[0]["payload"]["posture"], "unattended",
+        "the line carries fleet's word and not the agent's"
+    );
+    assert_eq!(
+        spawned_lines[0]["actor"],
+        serde_json::json!({ "kind": "seat", "id": row.id.to_string() })
+    );
     assert!(rig.events_of(events::SESSION_CRASHED).is_empty());
 
-    // A second spawn takes the next free name and its own directory.
+    // A second spawn mints a seat of its own and its own directory.
     let second = spawned(&rig, &policy, 0.1, 8, "another turn").expect("the second spawn lands");
-    assert_eq!(second.seat, "transient-2");
-    assert!(rig.worktrees.join("transient-2").is_dir());
+    assert_agent_name(&second.seat);
+    assert_ne!(second.seat, seat);
+    assert!(rig.worktrees.join(&second.seat).is_dir());
 }
 
-/// The lock arm: two spawns started at once take two different names.
+/// The lock arm: two spawns started at once take two different seats, and the
+/// file carries both rows.
 ///
-/// The name is chosen INSIDE the writer's lock, so this is what a choice made
-/// outside it would red — both threads would read an empty list, both would pick
-/// `transient-1`, and one `git worktree add` would fail on the other's path.
+/// The row is appended INSIDE the writer's lock, so this is what a
+/// read-modify-write outside it would red — both threads would read an empty
+/// list and each rename its own one-row version over the other's.
 #[test]
 fn two_concurrent_spawns_take_two_different_names() {
     let rig = Rig::new("spawn-race");
@@ -1237,10 +1430,9 @@ fn two_concurrent_spawns_take_two_different_names() {
                         &Spawn {
                             first_turn: "a turn",
                             model: None,
-                            settings: None,
+                            permissions: Permissions::default(),
                             item: None,
                             base: None,
-                            config_files: &[],
                         },
                         1_000,
                     )
@@ -1259,24 +1451,29 @@ fn two_concurrent_spawns_take_two_different_names() {
     sorted.sort();
     sorted.dedup();
     assert_eq!(sorted.len(), 2, "two spawns took one name: {names:?}");
-    assert_eq!(
-        sorted,
-        vec!["transient-1".to_string(), "transient-2".to_string()]
-    );
+    for name in &sorted {
+        assert_agent_name(name);
+    }
     let seats = config::read(&rig.config_path())
         .expect("the seat list parses")
         .seats;
     assert_eq!(seats.len(), 2, "and the file carries both rows");
+    let mut rows: Vec<String> = seats.iter().map(config::Seat::machine_name).collect();
+    rows.sort();
+    assert_eq!(
+        rows, sorted,
+        "and they are the two seats the spawns printed"
+    );
 }
 
-/// A14 in this verb's clothes: a start that exits inside its watch window rolls
-/// the worktree and the row back, and NEVER a branch.
+/// A start whose session exits inside its watch window rolls the worktree and
+/// the row back, leaves nothing on the host, and NEVER deletes a branch.
 #[test]
 fn a_start_that_fails_rolls_back_the_worktree_and_the_row_and_never_the_branch() {
     let rig = Rig::new("spawn-rollback");
     let policy = a_policy();
     rig.seam(&rig.start_exit, "1\n");
-    // The stub makes this branch in the worktree it was started in, BEFORE it
+    // The session makes this branch in the worktree it was started in, BEFORE it
     // fails — which is the commit-bearing ref a rollback must leave alone.
     rig.seam(&rig.start_makes_branch, "a-branch-the-seat-made\n");
 
@@ -1297,7 +1494,7 @@ fn a_start_that_fails_rolls_back_the_worktree_and_the_row_and_never_the_branch()
                 .as_str()
                 .expect("the crash names the output file")
         ),
-        "the refusal names the file the adapter wrote: {}",
+        "the refusal names the capture the start kept: {}",
         refusal.message
     );
     assert!(
@@ -1305,8 +1502,9 @@ fn a_start_that_fails_rolls_back_the_worktree_and_the_row_and_never_the_branch()
         "and no spawned line stands beside it"
     );
 
-    assert!(
-        !rig.worktrees.join("transient-1").exists(),
+    assert_eq!(
+        rig.worktree_entries(),
+        Vec::<String>::new(),
         "the worktree is gone"
     );
     // The row is GONE, not the file byte-identical: the rollback rewrites the
@@ -1319,8 +1517,13 @@ fn a_start_that_fails_rolls_back_the_worktree_and_the_row_and_never_the_branch()
         "the seat-list row survived the rollback: {seats:?}"
     );
     assert!(
-        rig.table().newest_for("transient-1").is_none(),
+        rig.table().sessions.is_empty(),
         "and no session-table row was opened"
+    );
+    assert_eq!(
+        rig.host.list(),
+        HostRead::Readable(Vec::new()),
+        "and the failed start's session is not left on the host"
     );
 
     // THE BRANCH SURVIVES. This is the assertion the rollback exists to keep
@@ -1335,28 +1538,35 @@ fn a_start_that_fails_rolls_back_the_worktree_and_the_row_and_never_the_branch()
 
 // ---- AC3: the feed ----------------------------------------------------------
 
-/// A spawned transient seat with a live idle row on the roster, for the feed and
-/// retire arms to act on.
+/// A spawned transient seat with a live row on the roster, for the feed and
+/// retire arms to act on: the row carries the seat's pane's pid, which is what
+/// it is the seat's by, and the pid a retire's last probe reads — one no
+/// process can hold ([`test_support::FIRST_PANE_PID`]), so `process_alive`
+/// answers a measured `false` rather than an unknown.
 fn a_spawned_seat(rig: &Rig, policy: &Policy, status: &str) -> (String, u32) {
     let spawn = spawned(rig, policy, 0.1, 8, "the turn it came up with")
         .expect("the fixture's spawn lands");
     let worktree = rig.worktrees.join(&spawn.seat).display().to_string();
-    // A pid this process has already reaped, so `process_alive` answers a
-    // measured `false` at the retire's last probe rather than an unknown.
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "exit 0"])
-        .spawn()
-        .expect("a child spawns");
-    let pid = child.id();
-    child.wait().expect("the child is reaped");
+    let pid = pane_pid(rig, &spawn.seat);
     rig.roster(&format!(
         "[{}]",
-        rig.row("a-session", "ab12", &worktree, pid, status)
+        rig.row("a-session", &worktree, pid, status)
     ));
     (spawn.seat, pid)
 }
 
-/// R31's four refusals, each with its own status.
+/// The pid the rig's host gave `seat`'s pane — the pid the seat's row is
+/// found by.
+fn pane_pid(rig: &Rig, seat: &str) -> u32 {
+    rig.host
+        .fake
+        .session(&rig.id_of(seat))
+        .expect("the spawn left the seat's pane on the host")
+        .pid
+}
+
+/// The feed's refusals, each with its own status, and none of them typing a
+/// byte into the seat's pane.
 #[test]
 fn feed_refuses_a_named_row_an_absent_session_an_unreadable_roster_and_a_busy_one() {
     let rig = Rig::new("feed-refusals");
@@ -1364,6 +1574,8 @@ fn feed_refuses_a_named_row_an_absent_session_an_unreadable_roster_and_a_busy_on
     let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
+    let session = rig.id_of(&seat);
+    let pid = pane_pid(&rig, &seat);
 
     // A named row: 6. Added beside the transient one the spawn wrote, through
     // the same file, so both kinds are on one list.
@@ -1374,6 +1586,7 @@ fn feed_refuses_a_named_row_an_absent_session_an_unreadable_roster_and_a_busy_on
         .as_array_mut()
         .expect("children is an array")
         .push(serde_json::json!({
+            "id": NAMED_ID,
             "name": "a-named-seat",
             "worktrees": { "a-project": rig.primary.display().to_string() },
         }));
@@ -1393,40 +1606,59 @@ fn feed_refuses_a_named_row_an_absent_session_an_unreadable_roster_and_a_busy_on
         transient::feed(&machine, "nobody", "a turn").expect_err("an unknown seat is refused");
     assert_eq!(unknown.code, 1, "{}", unknown.message);
 
-    // No live row: 4.
+    // An unreadable roster: 3 — a session nobody could ask is a question and
+    // not an absence.
     let before = rig.table_bytes();
-    rig.roster("[]");
-    let absent = transient::feed(&machine, &seat, "a turn").expect_err("nothing to feed");
-    assert_eq!(absent.code, 4, "{}", absent.message);
-    assert_eq!(rig.table_bytes(), before, "and the table is untouched");
-
-    // An unreadable roster: 3, which is not the 4 above — a session nobody could
-    // ask is a question and not an absence.
     rig.seam(&rig.roster_fails, "");
     let unreadable =
         transient::feed(&machine, &seat, "a turn").expect_err("an unreadable roster is a question");
     assert_eq!(unreadable.code, 3, "{}", unreadable.message);
     let _ = std::fs::remove_file(&rig.roster_fails);
 
-    // A live row the agent reports mid-turn: 1, and the table byte-identical.
+    // The row carrying the pane's pid reads mid-turn: 1, and the table
+    // byte-identical.
     let worktree = rig.worktrees.join(&seat).display().to_string();
     rig.roster(&format!(
         "[{}]",
-        rig.row("a-session", "ab12", &worktree, 4242, "busy")
+        rig.row("a-session", &worktree, pid, "busy")
     ));
     let busy = transient::feed(&machine, &seat, "a turn").expect_err("a seat holding a turn");
     assert_eq!(busy.code, 1, "{}", busy.message);
     assert!(busy.message.contains(&seat), "{}", busy.message);
     assert_eq!(rig.table_bytes(), before, "the table is byte-identical");
+
+    // The row stopped in front of a person: 1, before any byte.
+    rig.roster(&format!(
+        "[{}]",
+        rig.row("a-session", &worktree, pid, "waiting")
+    ));
+    let blocked = transient::feed(&machine, &seat, "a turn").expect_err("a seat at a dialog");
+    assert_eq!(blocked.code, 1, "{}", blocked.message);
     assert!(
-        !rig.calls().contains("nudge"),
-        "and no turn was delivered: {}",
-        rig.calls()
+        blocked.message.contains("blocked on"),
+        "{}",
+        blocked.message
+    );
+    assert_eq!(rig.table_bytes(), before, "the table is byte-identical");
+
+    // The pane has died: 4, whatever the listing still says.
+    rig.roster("[]");
+    rig.host.fake.end(&session, Some(0));
+    let absent = transient::feed(&machine, &seat, "a turn").expect_err("nothing to feed");
+    assert_eq!(absent.code, 4, "{}", absent.message);
+    assert_eq!(rig.table_bytes(), before, "and the table is untouched");
+
+    assert!(
+        rig.host.fake.sends(&session).is_empty(),
+        "and no refused feed typed a byte: {:?}",
+        rig.host.fake.sends(&session)
     );
 }
 
-/// R31's happy path: the marker moves, the turn is delivered, and the move is
-/// journaled on the stream.
+/// The feed's happy path, and fleet-nrl's arm: the brief is PASTED INTO THE
+/// SEAT'S OWN PANE — one paste of the whole turn, then one submit, to the
+/// session its id names — and nothing else runs it. The marker moves, and the
+/// move is journaled on the stream as delivered once the row turned busy.
 #[test]
 fn a_live_idle_row_is_fed_and_the_occupant_marker_moves() {
     let rig = Rig::new("feed");
@@ -1434,20 +1666,32 @@ fn a_live_idle_row_is_fed_and_the_occupant_marker_moves() {
     let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
+    let calls_before = rig.calls();
 
     let fed = transient::feed(&machine, &seat, "the next turn\nwith a second line\n")
         .expect("an idle seat is fed");
     assert_eq!(fed.prior, "the turn it came up with");
 
-    let argv = std::fs::read_to_string(&rig.nudge_argv).expect("the stub recorded the turn");
-    assert!(
-        argv.contains("the next turn"),
-        "the file's text reached the agent: {argv}"
+    let id = rig.id_of(&seat);
+    assert_eq!(
+        rig.host.fake.sends(&fleet_controller::host::session_for(
+            &SeatId::parse(&id).expect("the seat's id parses")
+        )),
+        vec![
+            test_support::Sent::Paste("the next turn\nwith a second line\n".to_string()),
+            test_support::Sent::Submit
+        ],
+        "the whole brief, pasted once into the seat's own session, then submitted"
+    );
+    assert_eq!(
+        rig.calls(),
+        calls_before,
+        "and the agent ran nothing — no turn of its own carries the brief"
     );
 
     let marker = rig
         .table()
-        .newest_for(&seat)
+        .newest_for(&id)
         .expect("the row stands")
         .first_turn
         .clone();
@@ -1455,6 +1699,11 @@ fn a_live_idle_row_is_fed_and_the_occupant_marker_moves() {
 
     let nudged = rig.events_of(events::SESSION_NUDGED);
     assert_eq!(nudged.len(), 1, "one line for one move: {nudged:?}");
+    assert_eq!(
+        nudged[0]["actor"],
+        serde_json::json!({ "kind": "seat", "id": id }),
+        "the line's actor is the seat, by its id"
+    );
     assert_eq!(
         nudged[0]["payload"]["prior_first_turn"],
         "the turn it came up with"
@@ -1464,8 +1713,9 @@ fn a_live_idle_row_is_fed_and_the_occupant_marker_moves() {
     assert_eq!(nudged[0]["payload"]["put_back"], false);
 }
 
-/// A delivery the adapter reports failed puts the marker back, says so in a
-/// SECOND line, and leaves the table byte-identical to before the feed.
+/// A turn typed and never taken puts the marker back — the paste returning is
+/// no delivery — says so in a SECOND line, and leaves the table byte-identical
+/// to before the feed.
 #[test]
 fn a_delivery_the_adapter_refuses_puts_the_occupant_marker_back() {
     let rig = Rig::new("feed-putback");
@@ -1474,12 +1724,17 @@ fn a_delivery_the_adapter_refuses_puts_the_occupant_marker_back() {
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
     let before = rig.table_bytes();
-    rig.seam(&rig.nudge_exit, "1\n");
+    rig.seam(&rig.never_taken, "");
 
     let refusal = transient::feed(&machine, &seat, "the turn that will not land")
-        .expect_err("a delivery the adapter refuses");
+        .expect_err("a turn the session never takes");
     assert_eq!(refusal.code, 1, "{}", refusal.message);
     assert!(refusal.message.contains("put back"), "{}", refusal.message);
+    assert!(
+        refusal.message.contains("typed and not taken"),
+        "{}",
+        refusal.message
+    );
 
     assert_eq!(
         rig.table_bytes(),
@@ -1489,6 +1744,13 @@ fn a_delivery_the_adapter_refuses_puts_the_occupant_marker_back() {
     let nudged = rig.events_of(events::SESSION_NUDGED);
     assert_eq!(nudged.len(), 2, "the attempt and the put-back: {nudged:?}");
     assert_eq!(nudged[0]["payload"]["put_back"], false);
+    assert!(
+        nudged[0]["payload"]["outcome"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("failed: typed and not taken"),
+        "{nudged:?}"
+    );
     assert_eq!(nudged[1]["payload"]["put_back"], true);
     assert_eq!(
         nudged[1]["payload"]["first_turn"], "the turn it came up with",
@@ -1498,7 +1760,7 @@ fn a_delivery_the_adapter_refuses_puts_the_occupant_marker_back() {
 
 // ---- AC4: the retire --------------------------------------------------------
 
-/// R32's happy path, verified from outside.
+/// The retire's happy path, verified from outside.
 #[test]
 fn a_retire_stops_removes_prunes_drops_both_rows_and_prints_the_reclaim() {
     let rig = Rig::new("retire");
@@ -1515,7 +1777,13 @@ fn a_retire_stops_removes_prunes_drops_both_rows_and_prints_the_reclaim() {
 
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
-    let reclaimed = transient::retire(&machine, &seat, false).expect("the retire lands");
+    let id = rig.id_of(&seat);
+    assert!(
+        rig.table().newest_for(&id).is_some(),
+        "the row stands before"
+    );
+    let reclaimed = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect("the retire lands");
 
     assert_eq!(reclaimed.pid, Some(pid));
     assert!(
@@ -1524,19 +1792,21 @@ fn a_retire_stops_removes_prunes_drops_both_rows_and_prints_the_reclaim() {
         reclaimed.bytes
     );
     assert_eq!(
-        reclaimed.removal.as_deref(),
-        Some("removed ab12"),
-        "the reclaim names the address the removal was issued against"
+        reclaimed.removal,
+        Some(format!("killed {id}")),
+        "the reclaim names the session the stop killed: the seat's own, by its id"
     );
 
+    // STOPPED ON THE HOST, BY THE SEAT: one interrupt into its session, then
+    // the kill, and nothing the agent issued addresses it.
+    let pressed = rig.host.fake.calls_of(FakeHost::KEYS);
+    assert_eq!(pressed.len(), 1, "{:?}", rig.host.fake.verbs());
+    assert_eq!(pressed[0].about, id);
     let calls = rig.calls();
+    assert!(calls.contains(&format!("kill {id}")), "{calls}");
     assert!(
-        calls.contains("stop ab12"),
-        "stopped BY ITS SHORT ID: {calls}"
-    );
-    assert!(
-        calls.contains("rm ab12"),
-        "and removed by the same: {calls}"
+        rig.host.fake.session(&id).is_none(),
+        "the host holds no session for the seat"
     );
 
     assert!(!worktree.exists(), "the worktree is gone");
@@ -1549,16 +1819,21 @@ fn a_retire_stops_removes_prunes_drops_both_rows_and_prints_the_reclaim() {
         .expect("the seat list parses")
         .seats;
     assert!(
-        !seats.iter().any(|row| row.name == seat),
+        !seats.iter().any(|row| row.machine_name() == seat),
         "the seat-list row is dropped"
     );
     assert!(
-        rig.table().newest_for(&seat).is_none(),
+        rig.table().newest_for(&id).is_none(),
         "and so is the session-table row"
     );
 
     let stopped = rig.events_of(events::SESSION_STOPPED);
     assert_eq!(stopped.len(), 1, "one line: {stopped:?}");
+    assert_eq!(
+        stopped[0]["actor"],
+        serde_json::json!({ "kind": "seat", "id": id }),
+        "the line's actor is the seat, by its id"
+    );
     assert_eq!(stopped[0]["payload"]["pid"], pid);
     assert_eq!(stopped[0]["payload"]["dead"], false);
     assert_eq!(stopped[0]["payload"]["bytes"], reclaimed.bytes.unwrap());
@@ -1570,22 +1845,63 @@ fn a_retire_stops_removes_prunes_drops_both_rows_and_prints_the_reclaim() {
     );
 }
 
-/// The per-row configuration directory (flights PRD R13, Q1e): the spawn makes
-/// one and the session row names it, every listing about the seat is asked UNDER
-/// it, and the retire takes it back — after the outside probes, which read
-/// through it.
+/// Spawn, retire, spawn again: the second seat is a new one. Its id and its
+/// machine name are not the retired seat's, so nothing the first left behind —
+/// an order, a branch name, a configuration directory — can be inherited by
+/// the second. Red on a counter that hands the lowest free name back out,
+/// under which both seats took the counter's first name.
+#[test]
+fn a_spawn_after_a_retire_mints_a_seat_the_retired_one_never_was() {
+    let rig = Rig::new("retire-then-spawn");
+    let policy = a_policy();
+    let (first, _) = a_spawned_seat(&rig, &policy, "idle");
+    let first_id = rig.row_of(&first)["id"].clone();
+
+    let agent = rig.agent();
+    let machine = machine_of(&rig, &agent, &policy);
+    transient::retire_with(&machine, &first, false, &withdraws_nothing).expect("the retire lands");
+
+    let second = spawned(&rig, &policy, 0.1, 8, "another turn").expect("the second spawn lands");
+    assert_ne!(
+        second.seat, first,
+        "the retired seat's name was handed out again"
+    );
+    assert_agent_name(&first);
+    assert_agent_name(&second.seat);
+    assert_eq!(second.worktree, rig.worktrees.join(&second.seat));
+
+    let second_id = rig.row_of(&second.seat)["id"].clone();
+    for id in [&first_id, &second_id] {
+        let id = id
+            .as_str()
+            .unwrap_or_else(|| panic!("the row carries an id: {id}"));
+        assert!(
+            fleet_core::seat::identity::SeatId::parse(id).is_ok(),
+            "{id} is a whole seat id"
+        );
+    }
+    assert_ne!(
+        second_id, first_id,
+        "the retired seat's id was handed out again"
+    );
+}
+
+/// The per-row configuration directory: the spawn makes one and the session row
+/// names it, every listing about the seat is asked UNDER it, and the retire
+/// takes it back — after the outside probes, which read through it.
 ///
-/// The two listings are made to DIFFER: the fleet's names no live row and the
-/// row's own names the session. On the fleet's answer alone the retire takes its
-/// no-live-session branch, never stops anything, and removes the worktree of a
-/// running session — so the assertions below are the difference and not a
-/// restatement.
+/// The two listings are made to DIFFER: the fleet's names no row and the row's
+/// own names the session by its pane's pid. A probe read under the fleet's
+/// finds no row whatever is still running, which is a probe that cannot fail —
+/// so the assertions below that every listing went through the row's own
+/// directory are the difference and not a restatement.
 #[test]
 fn a_retire_reads_and_acts_under_the_rows_own_configuration_directory() {
     let rig = Rig::new("retire-per-row-directory");
     let policy = a_policy();
     let (seat, pid) = a_spawned_seat(&rig, &policy, "idle");
     let config_dir = rig.config_dir_of(&seat);
+    let id = rig.id_of(&seat);
     let worktree = rig.worktrees.join(&seat).display().to_string();
 
     // The spawn made it, and the row names it.
@@ -1596,7 +1912,7 @@ fn a_retire_reads_and_acts_under_the_rows_own_configuration_directory() {
     );
     assert_eq!(
         rig.table()
-            .newest_for(&seat)
+            .newest_for(&rig.id_of(&seat))
             .and_then(|row| row.config_dir.clone())
             .as_deref(),
         Some(config_dir.display().to_string().as_str()),
@@ -1607,28 +1923,27 @@ fn a_retire_reads_and_acts_under_the_rows_own_configuration_directory() {
     rig.roster("[]");
     rig.roster_under(
         &config_dir,
-        &format!("[{}]", rig.row("a-session", "ab12", &worktree, pid, "idle")),
+        &format!("[{}]", rig.row("a-session", &worktree, pid, "idle")),
     );
 
-    // The listings the SPAWN already made — its belt reads the fleet's — so the
-    // assertion below is about this retire's own reads and not the fixture's.
+    // The listings the SPAWN already made — its start's watch read under the
+    // seat's own — so the assertion below is about this retire's own reads and
+    // not the fixture's.
     let before = rig.listing_dirs().len();
 
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
-    let reclaimed = transient::retire(&machine, &seat, false).expect("the retire lands");
+    let reclaimed = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect("the retire lands");
 
-    // It SAW the session, which the fleet's listing does not carry: the pid and
-    // the address both come off the row's own listing.
-    assert_eq!(
-        reclaimed.pid,
-        Some(pid),
-        "the live row was seen through the row's own directory"
+    // The pid is the host's pane, and the session was stopped there.
+    assert_eq!(reclaimed.pid, Some(pid), "the pid is the seat's pane's");
+    assert_eq!(reclaimed.removal, Some(format!("killed {id}")));
+    assert!(
+        rig.calls().contains(&format!("kill {id}")),
+        "and stopped on the host: {}",
+        rig.calls()
     );
-    assert_eq!(reclaimed.removal.as_deref(), Some("removed ab12"));
-    let calls = rig.calls();
-    assert!(calls.contains("stop ab12"), "and stopped: {calls}");
-    assert!(calls.contains("rm ab12"), "and removed: {calls}");
 
     // Every listing was asked UNDER that directory and none under the fleet's,
     // which is what the fold has to get right for the probes above to mean
@@ -1644,12 +1959,29 @@ fn a_retire_reads_and_acts_under_the_rows_own_configuration_directory() {
         "every listing this retire made was under {}: {mine:?}",
         config_dir.display()
     );
-    // The control on that: the spawn's own belt read DID go through the fleet's,
-    // so the two directories are distinguishable in this rig and the assertion
-    // above is a difference rather than a tautology.
+    // The control on that: the same seat asked about with no directory of its
+    // own IS read through the fleet's, and finds no session there — so the two
+    // directories are distinguishable in this rig and the assertion above is a
+    // difference rather than a tautology.
+    let unscoped = agent
+        .read(&[SeatRef {
+            seat: SeatId::parse(&id).expect("the seat's id parses"),
+            session_id: None,
+            pid: Some(pid),
+            config_dir: None,
+            worktree: worktree.clone(),
+            screen: None,
+        }])
+        .expect("the in-process read answers")
+        .remove(0);
+    assert_eq!(
+        unscoped.session_id, None,
+        "the fleet's listing names no row"
+    );
+    let after = rig.listing_dirs();
     assert!(
-        dirs[..before].iter().any(|d| Path::new(d) != config_dir),
-        "the fixture's own reads went through the fleet's directory: {dirs:?}"
+        after.last().is_some_and(|d| Path::new(d) != config_dir),
+        "the control's read went through the fleet's directory: {after:?}"
     );
 
     // And the directory goes with the seat.
@@ -1660,10 +1992,11 @@ fn a_retire_reads_and_acts_under_the_rows_own_configuration_directory() {
     );
 }
 
-/// R32's refusals: a named seat, an unreadable roster, and a row the stop does
-/// not clear — the last of which removes NOTHING.
+/// The retire's refusals: a named seat, an unreadable host, an unreadable
+/// roster, and a session the kill does not clear — the last of which removes
+/// NOTHING.
 #[test]
-fn retire_refuses_a_named_seat_an_unreadable_roster_and_a_row_the_stop_does_not_clear() {
+fn retire_refuses_a_named_seat_an_unreadable_host_or_roster_and_a_session_the_kill_leaves() {
     let rig = Rig::new("retire-refusals");
     let policy = a_policy();
     let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
@@ -1677,6 +2010,7 @@ fn retire_refuses_a_named_seat_an_unreadable_roster_and_a_row_the_stop_does_not_
         .as_array_mut()
         .expect("children is an array")
         .push(serde_json::json!({
+            "id": NAMED_ID,
             "name": "a-named-seat",
             "worktrees": { "a-project": rig.primary.display().to_string() },
         }));
@@ -1686,56 +2020,104 @@ fn retire_refuses_a_named_seat_an_unreadable_roster_and_a_row_the_stop_does_not_
     )
     .expect("the seat list is written");
 
-    let named = transient::retire(&machine, "a-named-seat", false)
+    let named = transient::retire_with(&machine, "a-named-seat", false, &withdraws_nothing)
         .expect_err("a named seat rests, it does not retire");
     assert_eq!(named.code, 6, "{}", named.message);
 
+    // A host nobody could read is a question about the session, and never an
+    // absence of one.
+    rig.host
+        .fake
+        .fail(FakeHost::LIST, Some("the arm blinded the host"));
+    let blind = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("an unreadable host");
+    assert_eq!(blind.code, 3, "{}", blind.message);
+    assert!(
+        blind.message.contains("the arm blinded the host"),
+        "{}",
+        blind.message
+    );
+    rig.host.fake.fail(FakeHost::LIST, None);
+
     rig.seam(&rig.roster_fails, "");
-    let unreadable =
-        transient::retire(&machine, &seat, false).expect_err("an unreadable roster is a question");
+    let unreadable = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("an unreadable roster is a question");
     assert_eq!(unreadable.code, 3, "{}", unreadable.message);
     let _ = std::fs::remove_file(&rig.roster_fails);
+    assert!(
+        rig.host.fake.calls_of(FakeHost::KILL).is_empty(),
+        "neither reading that could not be taken stopped anything: {:?}",
+        rig.host.fake.verbs()
+    );
 
-    // A stop the roster does not answer: the row stays, and nothing is removed.
-    //
-    // The ONE arm here that spends its whole start-watch window on purpose —
-    // the wait ends only at the deadline, because the roster never clears — so
-    // it runs on a one-second policy of its own rather than on `a_policy`'s ten.
-    // The window costs no wall clock under the rig's fake clock; what it does
-    // bound is the NUMBER OF ROSTER LISTINGS inside it, and each of those is a
-    // real child. One second is five; ten would be fifty.
-    let brief =
-        policy::parse("[controller]\nstart_watch_seconds = 1\n").expect("the policy parses");
-    let machine = machine_of(&rig, &agent, &brief);
+    // A kill the host answers and does not take: the session stays, and
+    // nothing is removed — the host's own reading after the kill is the
+    // witness, and it still names the session.
     let worktree = rig.worktrees.join(&seat);
     let config_before = rig.config_bytes();
     let table_before = rig.table_bytes();
-    rig.seam(&rig.stop_keeps_the_roster, "");
-    let stuck = transient::retire(&machine, &seat, false)
-        .expect_err("a row the stop does not clear is a refusal");
+    rig.host.fake.keep_kills(true);
+    let stuck = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("a session the kill does not clear is a refusal");
     assert_eq!(stuck.code, 1, "{}", stuck.message);
     assert!(
-        stuck.message.contains("nothing was removed"),
+        stuck.message.contains("nothing was removed")
+            && stuck.message.contains("still holds the session"),
         "{}",
         stuck.message
     );
     assert!(worktree.exists(), "the worktree stands");
     assert_eq!(rig.config_bytes(), config_before, "the seat list stands");
     assert_eq!(rig.table_bytes(), table_before, "the table stands");
+}
+
+/// A session the host holds again by the time the retire looks from outside
+/// FAILS THE HOST PROBE, even though the stop's own witness said it was gone.
+///
+/// The session is put back by the withdrawal, which is the one seam that runs
+/// between the stop and the probes: a start racing the retire, as a person or
+/// a second controller could make one. The refusal comes after both rows are
+/// dropped, and says so.
+#[test]
+fn a_session_back_on_the_host_after_the_stop_fails_the_host_probe() {
+    let rig = Rig::new("retire-host-probe");
+    let policy = a_policy();
+    let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
+    let id = rig.id_of(&seat);
+    let agent = rig.agent();
+    let machine = machine_of(&rig, &agent, &policy);
+
+    let refusal = transient::retire_with(&machine, &seat, false, &|_| {
+        rig.host
+            .fake
+            .new_session(
+                &id,
+                &rig.primary,
+                &["/nowhere/a-racing-start".to_string()],
+                &[],
+            )
+            .expect("the racing start lands");
+        Ok(Vec::new())
+    })
+    .expect_err("a session on the host after the retire");
+    assert_eq!(refusal.code, 1, "{}", refusal.message);
     assert!(
-        !rig.calls().contains("rm "),
-        "and the removal was never issued: {}",
-        rig.calls()
+        refusal
+            .message
+            .contains(&format!("the host still holds `{seat}`'s session {id}")),
+        "the host probe names what it found: {}",
+        refusal.message
     );
-    // The whole window, and not one slice more: five 200 ms slices against the
-    // one-second policy above. Fake time is the witness that the wait HAPPENED
-    // while costing none of the box's, so a wait that quietly stopped being
-    // spent — or one spent against the thread instead of the clock — reds here.
-    assert_eq!(
-        rig.clock.spent(),
-        Duration::from_secs(1),
-        "the refusal came at the end of the start-watch window"
+    assert!(
+        refusal.message.contains("ARE ALREADY DROPPED"),
+        "{}",
+        refusal.message
     );
+
+    // The control: the same retire with nothing racing it verifies.
+    let (other, _) = a_spawned_seat(&rig, &policy, "idle");
+    transient::retire_with(&machine, &other, false, &withdraws_nothing)
+        .expect("a host that holds nothing verifies");
 }
 
 /// The withdrawal seam, on both sides: the record's half of a retire is the
@@ -1743,8 +2125,8 @@ fn retire_refuses_a_named_seat_an_unreadable_roster_and_a_row_the_stop_does_not_
 /// the seat-list row — and the name — exactly where it was.
 ///
 /// The seam is driven with closures rather than a store, because what is under
-/// test here is the ORDER of two acts: this crate reaches no work graph, and
-/// what the withdrawal itself writes is the core suite's.
+/// test here is the ORDER of two acts: what the withdrawal itself writes is the
+/// core suite's.
 #[test]
 fn a_retire_whose_withdrawal_refuses_never_frees_the_name() {
     let rig = Rig::new("retire-withdrawal");
@@ -1771,7 +2153,7 @@ fn a_retire_whose_withdrawal_refuses_never_frees_the_name() {
     assert_eq!(
         rig.config_bytes(),
         listed,
-        "the seat list stands, so the name is not free for the next spawn"
+        "the seat list stands, so the seat's row is not dropped"
     );
 
     // The same seat again, with the cause cleared: the name goes now, and what
@@ -1793,29 +2175,24 @@ fn a_retire_whose_withdrawal_refuses_never_frees_the_name() {
     );
 }
 
-/// `--dead` licenses the removal by a COMPLETED roster read that names no live
-/// row, and refuses over one that does.
 /// The pid probe's THIRD answer: a reading the platform cannot take is
 /// could-not-tell and refuses at 3, never rounded to clean.
 ///
 /// The specimen is pid 0, which the process read answers `None` for on both
 /// platforms — 0 addresses the caller's own process group rather than a
-/// process. The row is live by the roster's rule (it carries a pid), so the
-/// retire runs its whole sequence and stops at the last probe.
+/// process. The seat's pane is live and carries it, so the retire runs its
+/// whole sequence and stops at the last probe.
 #[test]
 fn a_pid_the_platform_cannot_read_refuses_at_could_not_tell_and_never_clean() {
     let rig = Rig::new("retire-unknown-pid");
     let policy = a_policy();
     let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
-    let worktree = rig.worktrees.join(&seat).display().to_string();
-    rig.roster(&format!(
-        "[{}]",
-        rig.row("a-session", "ab12", &worktree, 0, "idle")
-    ));
+    rig.host.fake.set_pid(&rig.id_of(&seat), 0);
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
 
-    let refusal = transient::retire(&machine, &seat, false).expect_err("a probe nobody could take");
+    let refusal = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("a probe nobody could take");
     assert_eq!(refusal.code, 3, "{}", refusal.message);
     assert!(
         refusal.message.contains("pid 0") && refusal.message.contains("not verified"),
@@ -1826,19 +2203,24 @@ fn a_pid_the_platform_cannot_read_refuses_at_could_not_tell_and_never_clean() {
     // The control, one field down: the same sequence with a pid the platform CAN
     // read answers 0 — so the 3 above is the probe's and not this fixture's.
     let (other, _) = a_spawned_seat(&rig, &policy, "idle");
-    transient::retire(&machine, &other, false).expect("a readable pid verifies");
+    transient::retire_with(&machine, &other, false, &withdraws_nothing)
+        .expect("a readable pid verifies");
 }
 
+/// `--dead` licenses the retire by a COMPLETED host read that holds no live
+/// pane for the seat, and refuses over one that does. A dead pane is still
+/// killed: it is no session, and it holds the seat's name.
 #[test]
-fn dead_retires_without_a_stop_and_refuses_over_a_live_row() {
+fn dead_retires_a_dead_pane_and_refuses_over_a_live_one() {
     let rig = Rig::new("retire-dead");
     let policy = a_policy();
     let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
+    let id = rig.id_of(&seat);
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
 
-    let live = transient::retire(&machine, &seat, true)
-        .expect_err("--dead over a roster naming a live row");
+    let live = transient::retire_with(&machine, &seat, true, &withdraws_nothing)
+        .expect_err("--dead over a host holding the session live");
     assert_eq!(live.code, 1, "{}", live.message);
     assert!(
         live.message.contains("--dead was the wrong flag"),
@@ -1846,21 +2228,27 @@ fn dead_retires_without_a_stop_and_refuses_over_a_live_row() {
         live.message
     );
     assert!(rig.worktrees.join(&seat).exists(), "nothing was removed");
+    assert!(
+        rig.host.fake.calls_of(FakeHost::KEYS).is_empty(),
+        "and nothing was typed into the live session: {:?}",
+        rig.host.fake.verbs()
+    );
 
-    rig.roster("[]");
-    let reclaimed = transient::retire(&machine, &seat, true).expect("--dead over an empty roster");
+    rig.host.fake.end(&id, Some(0));
+    let reclaimed = transient::retire_with(&machine, &seat, true, &withdraws_nothing)
+        .expect("--dead over a dead pane");
     assert!(
         reclaimed.dead,
         "the reclaim records that --dead licensed it"
     );
     assert_eq!(
         reclaimed.pid, None,
-        "there was no live row to read one from"
+        "a dead pane's pid names a process that has already ended"
     );
+    assert_eq!(reclaimed.removal, Some(format!("killed {id}")));
     assert!(
-        !rig.calls().contains("stop "),
-        "and no stop was issued at all: {}",
-        rig.calls()
+        rig.host.fake.session(&id).is_none(),
+        "the dead pane is gone"
     );
     assert!(!rig.worktrees.join(&seat).exists(), "the worktree is gone");
     assert_eq!(
@@ -1897,7 +2285,8 @@ fn a_session_table_that_will_not_parse_refuses_on_every_verb_and_writes_nothing(
     );
     assert_eq!(rig.table_bytes(), planted, "the table is byte-identical");
 
-    let retired = transient::retire(&machine, &seat, false).expect_err("an unreadable table");
+    let retired = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("an unreadable table");
     assert_eq!(retired.code, 3, "{}", retired.message);
     assert_eq!(rig.table_bytes(), planted, "the table is byte-identical");
     assert!(
@@ -1913,8 +2302,9 @@ fn a_session_table_that_will_not_parse_refuses_on_every_verb_and_writes_nothing(
         "the spawn's refusal is below the rollback window, so it says what it undid: {}",
         spawn.message
     );
-    assert!(
-        !rig.worktrees.join("transient-2").exists(),
+    assert_eq!(
+        rig.worktree_entries(),
+        vec![seat.clone()],
         "and the worktree that spawn made is gone again"
     );
 
@@ -1925,7 +2315,8 @@ fn a_session_table_that_will_not_parse_refuses_on_every_verb_and_writes_nothing(
     std::fs::remove_file(rig.table_path()).expect("the table is removed");
     let spawn = spawned(&rig, &policy, 0.1, 8, "a turn")
         .expect("a table that was never written is not a defect");
-    assert_eq!(spawn.seat, "transient-2");
+    assert_agent_name(&spawn.seat);
+    assert_ne!(spawn.seat, seat);
 }
 
 /// A verb's read-modify-write of the session table WAITS on the table's lock.
@@ -1981,7 +2372,7 @@ fn a_verbs_write_of_the_session_table_waits_on_its_lock() {
 
     assert_eq!(
         rig.table()
-            .newest_for(&seat)
+            .newest_for(&rig.id_of(&seat))
             .map(|row| row.first_turn.as_str()),
         Some("the next turn"),
         "and the move it was waiting to make is on the file"
@@ -2008,14 +2399,12 @@ fn two_verbs_writing_the_session_table_lose_no_row() {
         "[{}, {}]",
         rig.row(
             "session-one",
-            "aa11",
             &rig.worktrees.join(&one).display().to_string(),
             4242,
             "idle"
         ),
         rig.row(
             "session-two",
-            "bb22",
             &rig.worktrees.join(&two).display().to_string(),
             4343,
             "idle"
@@ -2035,12 +2424,16 @@ fn two_verbs_writing_the_session_table_lose_no_row() {
 
     let table = rig.table();
     assert_eq!(
-        table.newest_for(&one).map(|row| row.first_turn.as_str()),
+        table
+            .newest_for(&rig.id_of(&one))
+            .map(|row| row.first_turn.as_str()),
         Some("the turn for one"),
         "the first seat's move survived the second's write"
     );
     assert_eq!(
-        table.newest_for(&two).map(|row| row.first_turn.as_str()),
+        table
+            .newest_for(&rig.id_of(&two))
+            .map(|row| row.first_turn.as_str()),
         Some("the turn for two"),
         "and the second's survived the first's"
     );
@@ -2055,7 +2448,7 @@ fn two_verbs_writing_the_session_table_lose_no_row() {
 /// A SPAWN'S critical section is its own write and not its start: a feed issued
 /// while a spawn sits in its start-watch window lands inside that window.
 ///
-/// The gate is what makes this a measurement rather than a race. The stub's
+/// The gate is what makes this a measurement rather than a race. The host's
 /// start blocks in the window until this arm lifts it, so the spawn is provably
 /// still inside it while the feed runs — the second assertion is that half, and
 /// without it a green would also be satisfied by a spawn that had already
@@ -2082,12 +2475,12 @@ fn a_spawn_in_its_watch_window_does_not_block_a_feed() {
         "the fixture's own spawn is the first start"
     );
 
-    // From here the stub's start blocks until the release below.
+    // From here the host's start blocks until the release below.
     rig.hold();
 
     let spawn_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let feed_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    std::thread::scope(|scope| {
+    let second = std::thread::scope(|scope| {
         let (rig, policy) = (&rig, &policy);
         let spawning_done = spawn_done.clone();
         let spawning = scope.spawn(move || {
@@ -2132,17 +2525,21 @@ fn a_spawn_in_its_watch_window_does_not_block_a_feed() {
             .join()
             .expect("the spawning thread finishes")
             .expect("the spawn lands once its window closes");
-        assert_eq!(spawn.seat, "transient-2");
+        assert_agent_name(&spawn.seat);
+        assert_ne!(spawn.seat, fed);
+        spawn.seat
     });
 
     let table = rig.table();
     assert_eq!(
-        table.newest_for(&fed).map(|row| row.first_turn.as_str()),
+        table
+            .newest_for(&rig.id_of(&fed))
+            .map(|row| row.first_turn.as_str()),
         Some("the next turn"),
         "the feed's move survived the spawn's write"
     );
     assert!(
-        table.newest_for("transient-2").is_some(),
+        table.newest_for(&rig.id_of(&second)).is_some(),
         "and the spawn's own row is on the same file: {:?}",
         table.sessions
     );
@@ -2151,8 +2548,8 @@ fn a_spawn_in_its_watch_window_does_not_block_a_feed() {
 /// A RETIRE'S critical section is its own write and not its stop: a feed issued
 /// while a retire sits in its stop lands inside it.
 ///
-/// The same gate, on the stub's `stop` and BEFORE the branch that empties the
-/// roster — so the feed this arm runs meanwhile still reads the roster the
+/// The same gate, on the host's kill and BEFORE the listing drops the going
+/// seat's rows — so the feed this arm runs meanwhile still reads the roster the
 /// fixture wrote, and what it is waiting on can only be the table's lock.
 ///
 /// The last two assertions are the re-read: the feed's move is on the file and
@@ -2164,12 +2561,15 @@ fn a_retire_in_its_stop_does_not_block_a_feed() {
     let policy = a_policy();
     let (going, pid) = a_spawned_seat(&rig, &policy, "idle");
     let (fed, _) = a_spawned_seat(&rig, &policy, "idle");
+    // Taken while both rows stand: the retire drops the going seat's.
+    let (going_id, fed_id) = (rig.id_of(&going), rig.id_of(&fed));
+    assert!(rig.table().newest_for(&going_id).is_some());
     let leaving = rig.worktrees.join(&going).display().to_string();
     let staying = rig.worktrees.join(&fed).display().to_string();
     rig.roster(&format!(
         "[{}, {}]",
-        rig.row("a-session", "ab12", &leaving, pid, "idle"),
-        rig.row("another-session", "cd34", &staying, pid, "idle"),
+        rig.row("a-session", &leaving, pid, "idle"),
+        rig.row("another-session", &staying, pid, "idle"),
     ));
 
     rig.hold();
@@ -2183,13 +2583,13 @@ fn a_retire_in_its_stop_does_not_block_a_feed() {
         let retiring = scope.spawn(move || {
             let agent = rig.agent();
             let machine = machine_of(rig, &agent, policy);
-            let out = transient::retire(&machine, &going, false);
+            let out = transient::retire_with(&machine, &going, false, &withdraws_nothing);
             retiring_done.store(true, Ordering::SeqCst);
             out
         });
 
         assert!(
-            rig.until(Duration::from_secs(10), || rig.calls().contains("stop ")),
+            rig.until(Duration::from_secs(10), || rig.calls().contains("kill ")),
             "the retire reached its stop: {}",
             rig.calls()
         );
@@ -2228,12 +2628,12 @@ fn a_retire_in_its_stop_does_not_block_a_feed() {
 
     let table = rig.table();
     assert_eq!(
-        table.newest_for(&fed).map(|row| row.first_turn.as_str()),
+        table.newest_for(&fed_id).map(|row| row.first_turn.as_str()),
         Some("the next turn"),
         "the feed's move survived the retire's write"
     );
     assert!(
-        table.newest_for(&going).is_none(),
+        table.newest_for(&going_id).is_none(),
         "and the retired seat's row is off the same file: {:?}",
         table.sessions
     );
@@ -2257,8 +2657,9 @@ fn a_feed_moves_the_newest_row_for_the_seat_and_not_the_first_in_file_order() {
     // `newest_for` answers the appended one. (With the rows the other way round
     // both rules give the same answer and the arm measures nothing.)
     let mut table = rig.table();
+    let id = rig.id_of(&seat);
     let older_first_turn = table
-        .newest_for(&seat)
+        .newest_for(&id)
         .expect("the spawn's row is there")
         .first_turn
         .clone();
@@ -2267,7 +2668,7 @@ fn a_feed_moves_the_newest_row_for_the_seat_and_not_the_first_in_file_order() {
         first_turn: "the turn the successor came up with".to_string(),
         dispatch_id: "a-later-dispatch".to_string(),
         ..table
-            .newest_for(&seat)
+            .newest_for(&id)
             .expect("the spawn's row is there")
             .clone()
     };
@@ -2302,53 +2703,6 @@ fn a_feed_moves_the_newest_row_for_the_seat_and_not_the_first_in_file_order() {
     );
 }
 
-// ---- the retire's two missing acts -----------------------------------------
-
-/// A retire over a roster that names no live row still issues the adapter's
-/// REMOVE, addressed by the short id the session table remembers.
-///
-/// A seat whose session is already gone still has a session row to delete, and
-/// a retire that skipped it would leave the agent holding one per dead seat.
-#[test]
-fn a_dead_seats_retire_removes_the_session_row_by_the_address_the_table_holds() {
-    let rig = Rig::new("retire-dead-removes");
-    let policy = a_policy();
-    let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
-
-    // The table's row gets the address a sighting would have written onto it.
-    let mut table = rig.table();
-    let row = table.newest_for_mut(&seat).expect("the row is there");
-    row.session_id = Some("a-session".to_string());
-    row.short_id = Some("ab12".to_string());
-    sessions::write(&rig.table_path(), &table).expect("the table is written");
-
-    rig.roster("[]");
-    let agent = rig.agent();
-    let machine = machine_of(&rig, &agent, &policy);
-    let reclaimed = transient::retire(&machine, &seat, true).expect("--dead over an empty roster");
-
-    let calls = rig.calls();
-    assert!(
-        calls.contains("rm ab12"),
-        "the removal is issued by the table's address: {calls}"
-    );
-    assert!(
-        !calls.contains("stop "),
-        "and no stop is issued, because there was nothing live to stop: {calls}"
-    );
-    assert_eq!(reclaimed.removal.as_deref(), Some("removed ab12"));
-
-    // The control: a seat whose table row carries NO address issues no removal
-    // at all and says so, rather than issuing one against an empty string.
-    let (bare, _) = a_spawned_seat(&rig, &policy, "idle");
-    rig.roster("[]");
-    let reclaimed = transient::retire(&machine, &bare, true).expect("--dead over an empty roster");
-    assert_eq!(
-        reclaimed.removal, None,
-        "no address anywhere is no removal, not a removal of nothing"
-    );
-}
-
 /// AC4's last clause: a worktree a forced removal cannot delete is exit 1
 /// NAMING IT, with both rows still standing.
 ///
@@ -2366,11 +2720,12 @@ fn a_worktree_a_forced_removal_cannot_delete_is_a_refusal_naming_it() {
 
     let config_before = rig.config_bytes();
     let table_before = rig.table_bytes();
+    let id = rig.id_of(&seat);
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
 
-    let refusal =
-        transient::retire(&machine, &seat, false).expect_err("a worktree git will not remove");
+    let refusal = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("a worktree git will not remove");
     assert_eq!(refusal.code, 1, "{}", refusal.message);
     // NAMED BY THE REFUSAL ITSELF, which is why this reads the FIRST characters
     // and not `contains`: git's own stderr for this failure echoes the path
@@ -2383,16 +2738,15 @@ fn a_worktree_a_forced_removal_cannot_delete_is_a_refusal_naming_it() {
         "the refusal opens by naming the worktree that survives: {}",
         refusal.message
     );
-    // WHAT IT SAYS IS GONE IS WHAT WENT: the stop ran and the session row was
-    // removed before the worktree was reached, so a refusal claiming nothing
-    // else was removed would be describing a machine in a state this one is not
-    // in. The removal's own answer is quoted, which is the line `rm ab12` in the
-    // stub's call log.
+    // WHAT IT SAYS IS GONE IS WHAT WENT: the session was stopped before the
+    // worktree was reached, so a refusal claiming nothing else was done would
+    // be describing a machine in a state this one is not in. The stop's own
+    // answer is quoted, which is the kill in the host's call log.
     assert!(
         refusal
             .message
-            .contains("the session is stopped and its session row is already gone (removed ab12)"),
-        "the refusal names the two acts that already landed: {}",
+            .contains(&format!("its session is already gone (killed {id})")),
+        "the refusal names the act that already landed: {}",
         refusal.message
     );
     assert!(
@@ -2403,8 +2757,8 @@ fn a_worktree_a_forced_removal_cannot_delete_is_a_refusal_naming_it() {
         refusal.message
     );
     assert!(
-        rig.calls().contains("rm ab12"),
-        "the removal it reports really was issued: {}",
+        rig.calls().contains(&format!("kill {id}")),
+        "the kill it reports really was issued: {}",
         rig.calls()
     );
     assert!(worktree.exists(), "and it is still there");
@@ -2423,14 +2777,12 @@ fn a_refusal_after_the_rows_are_dropped_says_they_are_gone_and_what_stands() {
     let worktree = rig.worktrees.join(&seat).display().to_string();
     // pid 0 is the probe the platform cannot answer, which lands in the
     // verification below the two drops.
-    rig.roster(&format!(
-        "[{}]",
-        rig.row("a-session", "ab12", &worktree, 0, "idle")
-    ));
+    rig.host.fake.set_pid(&rig.id_of(&seat), 0);
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
 
-    let refusal = transient::retire(&machine, &seat, false).expect_err("the probe cannot answer");
+    let refusal = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("the probe cannot answer");
     assert_eq!(refusal.code, 3, "{}", refusal.message);
     assert!(
         refusal
@@ -2448,16 +2800,17 @@ fn a_refusal_after_the_rows_are_dropped_says_they_are_gone_and_what_stands() {
 
     // The reading that makes it worth saying: the rows really are gone, so a
     // re-run meets the seat list rather than the probe.
-    let again = transient::retire(&machine, &seat, false).expect_err("the row is gone");
+    let again = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("the row is gone");
     assert_eq!(again.code, 1, "{}", again.message);
-    assert!(again.message.contains("is not a row"), "{}", again.message);
+    assert!(again.message.contains("names no seat"), "{}", again.message);
 }
 
 // ---- the ledger -------------------------------------------------------------
 
 /// A line that cannot reach the stream is REPORTED, never swallowed: the act it
 /// journals has already happened, so a silent failure leaves the machine moved
-/// and the ledger saying nothing (R23, R25).
+/// and the ledger saying nothing.
 #[test]
 fn a_journal_line_that_cannot_land_is_a_refusal_naming_the_event() {
     let rig = Rig::new("ledger-blocked");
@@ -2480,14 +2833,14 @@ fn a_journal_line_that_cannot_land_is_a_refusal_naming_the_event() {
     // 1: the marker is where the feed moved it.
     assert_eq!(
         rig.table()
-            .newest_for(&seat)
+            .newest_for(&rig.id_of(&seat))
             .map(|row| row.first_turn.as_str()),
         Some("the next turn"),
         "the marker moved, and the ledger is what could not be written"
     );
 
-    let retired =
-        transient::retire(&machine, &seat, false).expect_err("a retire whose journal cannot land");
+    let retired = transient::retire_with(&machine, &seat, false, &withdraws_nothing)
+        .expect_err("a retire whose journal cannot land");
     assert_eq!(retired.code, 3, "{}", retired.message);
     assert!(
         retired.message.contains(events::SESSION_STOPPED),
@@ -2496,83 +2849,40 @@ fn a_journal_line_that_cannot_land_is_a_refusal_naming_the_event() {
     );
 }
 
-mod lessons {
-    use super::*;
-
-    /// A8 — removing a session answers three ways, and one of them deletes a
-    /// checkout.
-    ///
-    /// The adapter's three answers are read from the exit AND the stdout,
-    /// because two of them share an exit status; the retire then carries each
-    /// one through to its own outcome. THE THIRD IS AN ALARM AND NOT A FAILURE:
-    /// no discard flag is ever passed, so it must not be reachable — and a
-    /// reader meets the deleted path in the report rather than meeting the
-    /// missing directory.
-    #[test]
-    fn remove_answers_three_ways() {
-        let rig = Rig::new("remove-three");
-        let policy = a_policy();
-        let agent = rig.agent();
-
-        // 1. Succeeds and keeps the worktree: rc 0, nothing printed.
-        assert!(matches!(agent.remove(None, "ab12"), RemoveAnswer::Removed));
-
-        // 2. Refuses: rc 1, both the row and the worktree left standing. The
-        //    cause travels, because "worktree has commits that are not pushed
-        //    anywhere" is what the operator has to act on.
-        rig.seam(&rig.rm_exit, "1\n");
-        let refused = agent.remove(None, "ab12");
-        let RemoveAnswer::Refused { cause } = &refused else {
-            panic!("a non-zero exit is a refusal: {refused:?}");
-        };
-        assert!(cause.contains("exited 1"), "{cause}");
-
-        // 3. Succeeds AND deletes the worktree: rc 0, printing the path. Told
-        //    apart from (1) by the stdout alone, which is why the answer is not
-        //    the exit status.
-        rig.seam(&rig.rm_exit, "0\n");
-        rig.seam(
-            &rig.rm_stdout,
-            "Removed session and its worktree at /some/checkout\n",
-        );
-        let deleted = agent.remove(None, "ab12");
-        let RemoveAnswer::RemovedAWorktree { path } = &deleted else {
-            panic!("a printed path is the third answer: {deleted:?}");
-        };
-        assert_eq!(path, "/some/checkout");
-
-        // And the retire carries that third answer through as an ALARM naming
-        // the path, rather than as a silent success.
-        let (seat, _) = a_spawned_seat(&rig, &policy, "idle");
-        let machine = machine_of(&rig, &agent, &policy);
-        let reclaimed = transient::retire(&machine, &seat, false).expect("the retire lands");
-        let removal = reclaimed.removal.expect("the removal answered");
-        assert!(
-            removal.starts_with("ALARM"),
-            "the third answer reaches the report as an alarm: {removal}"
-        );
-        assert!(removal.contains("/some/checkout"), "{removal}");
-        assert_eq!(
-            rig.events_of(events::SESSION_STOPPED)[0]["payload"]["removal"],
-            removal,
-            "and it is on the stream, where a person reading the morning's lines finds it"
-        );
-    }
-}
-
 /// The roster read every verb takes is the WHOLE-FLEET one, and an unreadable
-/// listing is a third answer rather than an empty fleet (lessons claude-code
-/// B4). The control is the same stub answering normally.
+/// listing is a third answer rather than an empty fleet
+/// (the claude-code pack's lessons B4). The control is the same agent
+/// answering normally.
 #[test]
 fn an_unreadable_listing_is_a_third_answer_on_every_verb_that_asks() {
     let rig = Rig::new("unreadable");
     let agent = rig.agent();
-    assert!(matches!(agent.status(None), RosterRead::Readable(_)));
+    let asked = SeatRef {
+        seat: SeatId::parse(NAMED_ID).expect("a hand-written seat id parses"),
+        session_id: None,
+        pid: Some(4242),
+        config_dir: None,
+        worktree: rig.primary.display().to_string(),
+        screen: None,
+    };
+    let read = |agent: &RigAgent| {
+        agent
+            .read(std::slice::from_ref(&asked))
+            .expect("the in-process read answers")
+            .remove(0)
+    };
+    assert_eq!(
+        read(&agent).activity,
+        Activity::Starting,
+        "a listing that answered, naming no row for the pane"
+    );
     rig.seam(&rig.roster_fails, "");
-    assert!(matches!(agent.status(None), RosterRead::Unreadable { .. }));
+    let unreadable = read(&agent);
+    assert_eq!(unreadable.activity, Activity::Unknown);
+    assert!(unreadable.cause.is_some(), "{unreadable:?}");
 }
 
-// ---- the priced retire (flights PRD R10, R12) --------------------------------
+// ---- the priced retire -------------------------------------------------------
 
 /// A transcript in the observe suite's own shape: four main-chain assistant
 /// entries carrying a usage block, one of them summing to zero, one sidechain
@@ -2590,8 +2900,8 @@ const A_TRANSCRIPT: &str = r#"
 {"type":"assistant","message":{"usage":{"input_tokens":40,"cache_read_input_tokens":20,"cache_creation_input_tokens":0}}}
 {"type":"assistant","message":{"usage":{"inp"#;
 
-/// R10 and R12: the cost, the branch and the commit all read BEFORE the
-/// reclaim, and `session.retired` carrying them beside the reclaim.
+/// The cost, the branch and the commit all read BEFORE the reclaim, and
+/// `session.retired` carrying them beside the reclaim.
 #[test]
 fn a_priced_retire_reads_the_cost_the_branch_and_the_commit_before_it_reclaims() {
     let rig = Rig::new("priced");
@@ -2599,7 +2909,7 @@ fn a_priced_retire_reads_the_cost_the_branch_and_the_commit_before_it_reclaims()
     let (seat, pid) = a_spawned_seat(&rig, &policy, "idle");
     let worktree = rig.worktrees.join(&seat).display().to_string();
     rig.sight(&seat, "a-session");
-    rig.plant_transcript(&seat, &worktree, "a-session", A_TRANSCRIPT);
+    rig.plant_transcript(&seat, "a-session", A_TRANSCRIPT);
 
     // A branch on the seat's own worktree, which is what the park a flight
     // raises records and what only a reading before the removal can take.
@@ -2623,7 +2933,9 @@ fn a_priced_retire_reads_the_cost_the_branch_and_the_commit_before_it_reclaims()
     let now = dispatched_at + 90_000;
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
-    let priced = transient::priced(&machine, &seat, "an-item", now).expect("the retire lands");
+    let id = rig.id_of(&seat);
+    let priced = transient::priced_with(&machine, &seat, "an-item", now, &withdraws_nothing)
+        .expect("the retire lands");
 
     assert_eq!(
         priced.cost.context_tokens,
@@ -2652,7 +2964,7 @@ fn a_priced_retire_reads_the_cost_the_branch_and_the_commit_before_it_reclaims()
     assert!(priced.reclaimed.bytes.is_some_and(|bytes| bytes > 0));
     assert!(!Path::new(&worktree).exists(), "the worktree is gone");
     assert!(
-        rig.table().newest_for(&seat).is_none(),
+        rig.table().newest_for(&id).is_none(),
         "and so is the session-table row"
     );
 
@@ -2663,7 +2975,13 @@ fn a_priced_retire_reads_the_cost_the_branch_and_the_commit_before_it_reclaims()
     let retired = rig.events_of(events::SESSION_RETIRED);
     assert_eq!(retired.len(), 1, "and the cost is another: {retired:?}");
     let payload = &retired[0]["payload"];
-    assert_eq!(payload["seat"], seat);
+    // The seat as its object: the id the stream keys it on, an agent's, and
+    // nameless — a spawned seat has no name of its own.
+    assert_eq!(
+        payload["seat"],
+        serde_json::json!({ "id": id, "kind": "agent" }),
+        "{payload}"
+    );
     assert_eq!(payload["item"], "an-item");
     assert_eq!(payload["context_tokens"], 60);
     assert_eq!(payload["turns"], 4);
@@ -2672,7 +2990,11 @@ fn a_priced_retire_reads_the_cost_the_branch_and_the_commit_before_it_reclaims()
     assert_eq!(payload["commit"], head);
     assert_eq!(payload["pid"], pid, "and the reclaim beside it");
     assert_eq!(payload["bytes"], priced.reclaimed.bytes.unwrap());
-    assert_eq!(retired[0]["actor"], seat);
+    assert_eq!(
+        retired[0]["actor"],
+        serde_json::json!({ "kind": "seat", "id": id }),
+        "the line's actor is the seat, by its id, and its payload names the machine name"
+    );
 }
 
 /// A transcript nobody can read prices nothing and the retire STILL RUNS: a
@@ -2692,8 +3014,14 @@ fn a_transcript_that_cannot_be_read_leaves_the_cost_null_and_reclaims_anyway() {
     let dispatched_at = rig.dispatched_at(&seat);
     let agent = rig.agent();
     let machine = machine_of(&rig, &agent, &policy);
-    let priced = transient::priced(&machine, &seat, "an-item", dispatched_at + 1_000)
-        .expect("the retire lands whether or not the seat could be priced");
+    let priced = transient::priced_with(
+        &machine,
+        &seat,
+        "an-item",
+        dispatched_at + 1_000,
+        &withdraws_nothing,
+    )
+    .expect("the retire lands whether or not the seat could be priced");
 
     assert_eq!(priced.cost.context_tokens, None);
     assert_eq!(priced.cost.turns, None);
@@ -2719,11 +3047,12 @@ fn a_transcript_that_cannot_be_read_leaves_the_cost_null_and_reclaims_anyway() {
 /// A RUN'S CLEANUP RETIRES THROUGH HERE, and the seat it retires can still hold
 /// an open ordered item — a park leaves the order standing — so the priced
 /// retire owes the record the same withdrawal the hand verb owes it: the leak
-/// that left a parked item carrying an order naming a freed `transient-N`.
+/// that left a parked item carrying an order naming a seat that no longer
+/// exists.
 ///
-/// The seam is driven with a closure rather than a store, because this crate
-/// reaches no work graph: what the withdrawal itself writes onto an item is the
-/// core suite's, what the cleanup hands in is the cli's, and what is under test
+/// The seam is driven with a closure rather than a store, because what the
+/// withdrawal itself writes onto an item is the core suite's, what the cleanup
+/// hands in is the run engine's (`runs.rs`), and what is under test
 /// here is that the priced path RUNS what it was handed. The mutant is the
 /// defect itself — the priced path handing `withdraws_nothing` — and it reds
 /// the recorded call and the answer below it.
@@ -2770,7 +3099,7 @@ fn a_priced_retire_runs_the_withdrawal_the_cleanup_hands_it() {
     );
 }
 
-// ---- the base: a seat cut from a named commit (R11, R14) ---------------------
+// ---- the base: a seat cut from a named commit --------------------------------
 
 /// A spawn carrying a base cuts the worktree AT THAT COMMIT, and the base it
 /// answers with is read back off the worktree's own HEAD.
@@ -2852,8 +3181,9 @@ fn a_base_that_does_not_resolve_refuses_naming_it_and_makes_nothing() {
         before,
         "the seat list is byte-identical: no name was claimed"
     );
-    assert!(
-        !rig.worktrees.join("transient-1").exists(),
+    assert_eq!(
+        rig.worktree_entries(),
+        Vec::<String>::new(),
         "and no worktree was made"
     );
     assert!(
@@ -2867,19 +3197,19 @@ fn a_base_that_does_not_resolve_refuses_naming_it_and_makes_nothing() {
         .expect("the refusal above is the base's and not this fixture's");
 }
 
-/// The Order's model reaches the adapter's start, read off the stub's own argv,
+/// The Order's model reaches the adapter's start, read off the start's own argv,
 /// and it is the value the caller passed rather than the policy's default.
 #[test]
 fn a_spawn_passes_the_callers_model_to_the_start_over_the_policys_default() {
     let rig = Rig::new("base-model");
     let policy = a_policy();
     assert_eq!(
-        policy.model_for(None),
+        policy.model_for(None, &test_support::capabilities()),
         "a-model",
         "the fixture's default is the value this arm must not read back"
     );
 
-    spawned_at(&rig, &policy, None, Some("a-named-model")).expect("the spawn lands");
+    let spawn = spawned_at(&rig, &policy, None, Some("a-named-model")).expect("the spawn lands");
 
     let argv = rig.start_argv();
     let flag = argv
@@ -2896,7 +3226,7 @@ fn a_spawn_passes_the_callers_model_to_the_start_over_the_policys_default() {
         .expect("the seat list parses")
         .seats
         .into_iter()
-        .find(|seat| seat.name == "transient-1")
+        .find(|seat| seat.machine_name() == spawn.seat)
         .expect("the row is on the file");
     assert_eq!(
         row.model.as_deref(),

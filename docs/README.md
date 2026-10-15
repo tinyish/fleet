@@ -1,0 +1,52 @@
+# docs/
+
+What fleet does, as a user sees it: the commands, what they print, the files
+you write and read, what fleet refuses and the codes it exits with. One file
+per area.
+
+This README is scaffolding, not product documentation. It states the rules the
+area files are held to and lists them, and it is excluded from any site
+rendered from this directory. The procedure behind every rule is the docs
+skill, `.claude/skills/docs/SKILL.md`.
+
+## Rules
+
+1. **Behaviour, not implementation.** An area file says what a user observes.
+   What fleet must do is specified in `brain/specs/`; where the code does it
+   is the map, `brain/specs/mod.md`; why fleet is shaped this
+   way is the rest of `brain/`. Shipped behaviour only: design nobody has
+   built is not here.
+2. **Agent-written only.** A session writes these files through the docs
+   skill. A person never edits them.
+3. **Corrections are beads.** Spot an error, file a bead labelled `docs`
+   quoting the sentence and naming the file. The session that takes it
+   verifies the claim against the area's feature specs, or against the code
+   while the area is not converted (`CONTRIBUTING.md` § Moving to this
+   method), and fixes the file.
+4. **Every claim verified when written.** In a converted area, against the
+   feature spec's clauses; in one not yet converted, against the code or by
+   a command run against a built binary. The citations, clause ids or
+   `file:line` per claim, go in a review note on the bead that carried the
+   change, never in the file.
+5. **Reconciled at release.** A release pass walks the items landed since the
+   last release and updates the areas they touched.
+6. **This directory is canonical.** A published site is a rendering of it,
+   built one way from here and never edited. The renderer is not chosen yet.
+7. **A manual, never a source.** These files are generated from the specs
+   for people learning fleet. A builder never takes intended behaviour from
+   them; the specs are the source (`CONTRIBUTING.md` § How fleet is built).
+
+## Areas
+
+| File | Area | Covers | Status |
+| --- | --- | --- | --- |
+| `getting-started.md` | Getting started | building and installing fleet, what fleet runs on, `fleet create` and the agent's and store's packs it installs, `fleet start`, the plugin a seat's session loads from its agent's pack | drafted |
+| `packs.md` | Packs | installing and removing a pack, how packs layer and shadow, the defaults every fleet gets, pack settings in `fleet.toml` | drafted |
+| `items.md` | Items and the record | `dispatch`, `brief`, `deliver`, `hold`, `clear`, `review`, `land`, the entry each one appends to the item's timeline, and `fleet item show` | drafted |
+| `runs.md` | Runs and workflows | `fleet run`, `fleet cancel`, the workflow SDK, the takeoff workflow and the preboard skill, a run's holds and what licenses its landings, the runs section of `fleet status` | drafted |
+| `seats.md` | The controller and seats | seat ids, names and machine names, `fleet seat add`, this machine's identity, starting and stopping the controller, `observe`, named and transient seats, rest, `nudge` | drafted |
+| `guards.md` | Guards | the four guard classes: shell-trap, record, release-ref, production-write | drafted |
+| `status.md` | Status and the event stream | `fleet status`, `fleet event tail`, `fleet event show` | drafted |
+| `conventions.md` | Exit codes and conventions | the exit table every command shares, full item ids | drafted |
+| `store.md` | The store contract | the store contract an adapter implements: choosing an adapter, the call, the envelope, the exit table, the types, the verbs and what they mean, writing an adapter as a pack, `fleet store schema` and `fleet store check` | drafted |
+| `agent.md` | The agent contract | the agent contract an adapter implements: choosing an adapter, the call, the envelope, the exit table, the types, the six verbs and what they mean, `fleet agent schema`, `fleet agent check` | drafted |

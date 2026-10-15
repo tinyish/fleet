@@ -1,10 +1,10 @@
-//! The file-access gate AS THE LOOP READS IT (R33, lessons claude-code D4).
+//! The file-access gate AS THE LOOP READS IT (lessons claude-code D4).
 //!
-//! A test binary of its own, because these arms drive `run::observe_with` and
-//! that reads the PROCESS's environment for the machine directory and the agent
-//! binary: an arm setting those beside arms that do not would be setting them
-//! for every thread in the binary. Inside this one they are serialized on the
-//! lock below, which each rig holds for its whole life.
+//! A test binary of its own, because these arms drive `run::observe_runs` and
+//! that reads the PROCESS's environment for the machine directory and the
+//! host's binary: an arm setting those beside arms that do not would be setting
+//! them for every thread in the binary. Inside this one they are serialized on
+//! the lock below, which each rig holds for its whole life.
 //!
 //! What it measures is the thing a pure reading of `projection::effects_of`
 //! cannot: that the loop's per-seat effects AND its routines pass are both behind
@@ -13,6 +13,7 @@
 
 use fleet_controller::platform::{self, Grant, Listing};
 use fleet_controller::run::{self, Options};
+use fleet_controller::test_support::{agent_stub, FakeServer};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,29 +33,30 @@ fn write(path: &Path, body: &str) {
     std::fs::write(path, body).expect("the fixture file is written");
 }
 
-fn executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("the stub is executable");
-}
-
 fn projection(machine: &Path) -> serde_json::Value {
     let body = std::fs::read_to_string(machine.join("projection.json"))
         .expect("a projection is published");
     serde_json::from_str(&body).expect("the projection parses")
 }
 
-/// The rig: a machine directory naming one seat in a worktree that exists, and
-/// an agent stub that records every call it is given.
+/// The rig: a machine directory naming one seat in a worktree that exists,
+/// `fleet-agent-stub` as the agent `[agent] adapter` names, and
+/// `fleet-tmux-stub` as the host every session is started on and every turn
+/// typed into.
 struct Rig {
     root: PathBuf,
     machine: PathBuf,
     worktree: PathBuf,
     /// The second seat's worktree, where the roster's one live row stands.
     live: PathBuf,
-    argv: PathBuf,
+    /// The tmux stub's state, beside the link `FLEET_TMUX_BIN` names.
+    host_state: PathBuf,
     _held: MutexGuard<'static, ()>,
 }
+
+/// The two seats' ids: `a-seat` is absent, `b-seat` live.
+const A_SEAT: &str = "01a0d1f1-0aec-765f-9abe-5c21e8a04b17";
+const B_SEAT: &str = "01a0d1f1-0aec-765f-9abe-d4f993b9739a";
 
 impl Rig {
     fn new(label: &str) -> Rig {
@@ -65,7 +67,7 @@ impl Rig {
             machine: root.join("machine"),
             worktree: root.join("wt/a-seat"),
             live: root.join("wt/b-seat"),
-            argv: root.join("agent-argv"),
+            host_state: root.join("tmux").join("tmux-stub.json"),
             root,
             _held: held,
         };
@@ -74,7 +76,10 @@ impl Rig {
 
         write(
             &rig.root.join("fleet.toml"),
-            "[controller]\npoll_seconds = 1\n",
+            &format!(
+                "[controller]\npoll_seconds = 1\n\n[agent]\nadapter = \"{}\"\n",
+                agent_stub::path().display()
+            ),
         );
         // A routine that rings the seat and is due on every tick. The routines pass
         // is the SECOND place the loop issues an effect, and it reads its own
@@ -94,8 +99,10 @@ impl Rig {
             &rig.machine.join("config.json"),
             &format!(
                 "{{\"fleet_toml\": \"{}\", \"children\": [\
-                 {{\"name\": \"a-seat\", \"worktrees\": {{\"a-project\": \"{}\"}}}}, \
-                 {{\"name\": \"b-seat\", \"worktrees\": {{\"a-project\": \"{}\"}}}}]}}\n",
+                 {{\"id\": \"{A_SEAT}\", \"name\": \"a-seat\", \
+                   \"worktrees\": {{\"a-project\": \"{}\"}}}}, \
+                 {{\"id\": \"{B_SEAT}\", \"name\": \"b-seat\", \
+                   \"worktrees\": {{\"a-project\": \"{}\"}}}}]}}\n",
                 rig.root.join("fleet.toml").display(),
                 rig.worktree.display(),
                 rig.live.display()
@@ -109,36 +116,63 @@ impl Rig {
         // `b-seat` is live, so the routine's ring has somebody to reach — the
         // routines pass's effect. A ring at an absent seat fails for its own
         // reason and would say nothing about the gate.
-        let stub = rig.root.join("agent.sh");
+        //
+        // `b-seat`'s session is a live pane on the tmux stub, and its row carries
+        // that pane's pid, MID-TURN, so a ring is typed and queued without a
+        // wait. The second row is the pane `a-seat`'s start will be given, so
+        // the start is believed on its first read.
+        let tmux = rig.root.join("tmux").join("tmux");
+        std::fs::create_dir_all(tmux.parent().expect("the link has a directory"))
+            .expect("the tmux stub's directory is made");
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fleet-tmux-stub"), &tmux)
+            .expect("the link to the tmux stub is made");
+        let mut server = FakeServer::default();
+        server
+            .start(
+                B_SEAT,
+                &rig.live.display().to_string(),
+                &["/bin/agent".to_string()],
+                &[],
+            )
+            .expect("b-seat's pane starts on the fake server");
+        server
+            .save(&rig.host_state)
+            .expect("the tmux stub's state is written");
+        let b_pid = server.sessions[B_SEAT].pid;
         let roster = format!(
-            "[{{\"id\":\"bb\",\"sessionId\":\"b-session\",\"cwd\":\"{}\",\
-             \"kind\":\"background\",\"pid\":4242,\"status\":\"idle\",\"startedAt\":1000}}]",
-            rig.live.display()
+            "[{{\"sessionId\":\"b-session\",\"cwd\":\"{}\",\"kind\":\"interactive\",\
+             \"pid\":{b_pid},\"status\":\"busy\",\"startedAt\":1000}}, \
+             {{\"sessionId\":\"a-session\",\"cwd\":\"/nowhere/arrived\",\
+             \"kind\":\"interactive\",\"pid\":{},\"status\":\"idle\"}}]",
+            rig.live.display(),
+            b_pid + 1
         );
-        write(
-            &stub,
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {argv}\ncase \"$*\" in\n  \
-                 *--version*) echo 2.1.261 ;;\n  *) printf '%s' '{roster}' ;;\nesac\nexit 0\n",
-                argv = rig.argv.display(),
-            ),
-        );
-        executable(&stub);
-        for (key, value) in common::hermetic::vars(&rig.root, &rig.machine, Some(&stub)) {
-            std::env::set_var(key, value);
-        }
+        agent_stub::script(&rig.root, |a| {
+            a.listing = Ok(roster);
+            a.version = Some(String::from("2.1.261"));
+        });
+        common::hermetic::export(common::hermetic::vars(&rig.root, &rig.machine));
+        common::hermetic::export(vec![(
+            common::hermetic::TMUX_BIN,
+            Some(tmux.into_os_string()),
+        )]);
         rig
     }
 
-    /// The agent calls that are EFFECTS, told from the observation calls the
-    /// loop makes every poll whatever the gate says: a start names the model
-    /// and the permission posture, and a roster read names neither.
+    /// The host calls that are EFFECTS, told from the listing the loop reads
+    /// every poll whatever the gate says: a session started (the per-seat
+    /// effect) and a turn pasted into one (the routine's ring). Both are the
+    /// host's now — a start's argv is the pane's, and a ring is typed.
     fn effect_calls(&self) -> Vec<String> {
-        std::fs::read_to_string(&self.argv)
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains("--model") || line.contains("--permission-mode"))
-            .map(str::to_string)
+        FakeServer::load(&self.host_state)
+            .expect("the tmux stub's state reads")
+            .invocations
+            .iter()
+            .filter(|args| {
+                args.iter()
+                    .any(|arg| arg == "new-session" || arg == "paste-buffer")
+            })
+            .map(|args| args.join(" "))
             .collect()
     }
 
@@ -223,7 +257,7 @@ fn a_worktree_the_person_has_not_made_yet_leaves_the_grant_ok_and_the_effects_on
     assert!(read.is_ok(), "an absent directory is not pending: {read:?}");
     assert_eq!(read.detail, None);
 
-    assert_eq!(run::observe_with(&Options { once: true }, gate), 0);
+    assert_eq!(run::observe_runs(&Options { once: true }, gate, None), 0);
     let document = projection(&rig.machine);
     assert_eq!(document["grant"], platform::GRANT_OK, "{document}");
     assert!(document.get("grant_detail").is_none(), "{document}");
@@ -272,7 +306,7 @@ fn a_pending_grant_holds_every_effect_and_an_answered_one_releases_them() {
         // and the loop below is then the control's half alone.
         assert!(read.is_ok());
         blocked.store(false, Ordering::SeqCst);
-        assert_eq!(run::observe_with(&Options { once: true }, gate), 0);
+        assert_eq!(run::observe_runs(&Options { once: true }, gate, None), 0);
         let document = projection(&rig.machine);
         assert_eq!(document["grant"], platform::GRANT_OK);
         assert_eq!(document["effects"]["state"], "on");
@@ -284,7 +318,7 @@ fn a_pending_grant_holds_every_effect_and_an_answered_one_releases_them() {
     }
     assert_eq!(read.state, platform::GRANT_PENDING);
 
-    assert_eq!(run::observe_with(&Options { once: true }, gate), 0);
+    assert_eq!(run::observe_runs(&Options { once: true }, gate, None), 0);
 
     let document = projection(&rig.machine);
     assert_eq!(document["grant"], platform::GRANT_PENDING);
@@ -318,7 +352,7 @@ fn a_pending_grant_holds_every_effect_and_an_answered_one_releases_them() {
     // THE ORDERS PASS IS THE SECOND EFFECT PATH and it is behind the same gate.
     // A due routine that rings the LIVE seat reaches no agent: it is answered
     // could-not-tell with the grant as the cause, exactly as it is answered
-    // when the agent binary cannot be resolved.
+    // when the agent cannot issue effects at all.
     assert!(
         rig.routine_events()
             .iter()
@@ -347,7 +381,7 @@ fn a_pending_grant_holds_every_effect_and_an_answered_one_releases_them() {
     blocked.store(false, Ordering::SeqCst);
     let mut gate = Grant::new(listing, Duration::from_secs(5));
     assert!(gate.poll(&[rig.worktree.clone(), rig.live.clone()]).is_ok());
-    assert_eq!(run::observe_with(&Options { once: true }, gate), 0);
+    assert_eq!(run::observe_runs(&Options { once: true }, gate, None), 0);
 
     let document = projection(&rig.machine);
     assert_eq!(document["grant"], platform::GRANT_OK);

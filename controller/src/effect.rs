@@ -1,40 +1,42 @@
-//! Carrying a verdict out (PRD R16, R18, R19, R21).
+//! Carrying a verdict out.
 //!
-//! Every act here writes its own event, once, at the layer that did the thing
-//! (R25) — so a person reading the stream in the morning sees the request, its
+//! Every act here writes its own event, once, at the layer that did the thing —
+//! so a person reading the stream in the morning sees the request, its
 //! collection and its outcome as three lines rather than as silence.
 //!
 //! Every verdict the table reaches is acted on here. `halt` is the one whose act
 //! is to dispatch nothing: it is published as its own outcome, and its line and
 //! its event are written once, at the transition into the hold.
 
-use crate::adapter::{Agent, RemoveAnswer, StartOutcome, StartSpec};
-use crate::events::{self, EventLog};
+use crate::events::{self, ActorRef, EventLog};
+use crate::host::{self, Host, HostRead, PaneState};
 use crate::policy::Policy;
 use crate::sessions::{SessionRow, Table};
-use std::path::Path;
-use std::time::Duration;
+use fleet_core::agent::{
+    self, Activity, Agent, Argv, Launch, Permissions, Posture, Resume, SeatActivity, SeatRef,
+};
+use fleet_core::seat::actor::Actor;
+use fleet_core::seat::identity::SeatId;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// What an effect DID, for the projection's row. Never a liveness claim: a
-/// start that returned OK is a start that did not fail, and arrival is the
-/// roster's answer on the next poll (lessons claude-code A7).
+/// start that returned OK is one the listing showed as it came up, and whether
+/// it is still there is the next poll's answer, not this one's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     None,
     Spawned,
     Rested,
     Nudged,
-    /// An attach was DISPATCHED against a pid-less row. Never a claim the row
-    /// came back: the call exits 0 either way (lessons claude-code A7).
+    /// The seat's ended session was resumed as a new session on the host, and
+    /// the listing showed the pane's own process carrying the SAME session id.
+    /// Never a claim it is still up: that is the next poll's answer.
     Revived,
     /// The seat is held down by the blind guard, and this poll did nothing
     /// about it on purpose.
     Halted,
-    /// The verdict was reached and deliberately not carried out, because its
-    /// effect belongs to a later slice. Distinct from `None`, which is a policy
-    /// that chose to do nothing: a reader has to be able to tell a quiet fleet
-    /// from one nobody is acting on.
-    Deferred,
     Failed,
 }
 
@@ -47,7 +49,6 @@ impl Outcome {
             Outcome::Nudged => "nudged",
             Outcome::Revived => "revived",
             Outcome::Halted => "halted",
-            Outcome::Deferred => "deferred",
             Outcome::Failed => "failed",
         }
     }
@@ -56,74 +57,76 @@ impl Outcome {
 /// Everything one seat's effect needs to know about that seat, gathered by the
 /// caller so this layer reads nothing for itself.
 pub struct Target<'a> {
-    pub seat_dir: &'a str,
-    /// The name a person addresses the seat by, lowercased, falling back to the
-    /// seat directory — never an empty string, which would put an empty element
-    /// in argv and make `--name` swallow the flag after it.
-    pub display_name: String,
+    /// The seat, and the actor every line this effect writes carries.
+    pub seat: SeatId,
+    /// The name the seat's session answers to: the one its newest session row
+    /// recorded at start, and the seat's machine name where no row names one
+    /// (`sessions::Table::session_name`). It is the start's `--name`, the first
+    /// turn's argument and the address of every nudge — never an empty string,
+    /// which would put an empty element in argv and make `--name` swallow the
+    /// flag after it.
+    pub session_name: String,
     pub project: &'a str,
     pub worktree: &'a str,
     pub model: String,
-    pub posture: String,
+    /// Fleet's own word, which every line this effect writes carries and the
+    /// adapter maps to its agent's mode.
+    pub posture: Posture,
     pub first_turn: String,
     pub transient: bool,
     /// The configuration directory this start comes up under, when it comes up
-    /// under its own (flights PRD R13). `None` takes the fleet's.
+    /// under its own. `None` takes the fleet's.
     pub config_dir: Option<String>,
     /// The work item this dispatch gave the seat, where an order named one.
     pub item: Option<String>,
-    /// What the start's permission document did, where the caller wrote one:
-    /// `written` where the worktree carried none, `merged` where it carried a
-    /// document of the project's own that the pack's rules were folded into.
-    /// `None` is a start that wrote no permission document at all.
-    pub settings: Option<String>,
+    /// What the seat may run without asking, in fleet's own words, which the
+    /// launch hands the adapter to render into its agent's format. Empty is a
+    /// start that names no command, which is every start the loop makes.
+    pub permissions: Permissions,
     /// The load belt's own readings, where the caller ran one, as
     /// `transient::Belt::payload` shapes them. It rides as a value and not as a
     /// belt: the caller that measured the machine is the one that knows the
     /// shape, and this layer only carries what it was handed onto the stream.
     /// `None` is a start no belt was run for, and writes `null`.
     pub belt: Option<serde_json::Value>,
-    /// The run that spawned this seat, where one did (controller PRD R37).
+    /// The run that spawned this seat, where one did.
     /// `None` is a seat spawned outside a run, and the run's own cleanup passes
     /// over it — which is what makes the key a selector and not a label.
     pub run: Option<String>,
-    /// The live session's id and its ADDRESS, when there is one (A6).
+    /// The seat's session, when there is one: the live row's id, or the id the
+    /// table recorded for a session whose pane has died.
     pub session_id: Option<&'a str>,
-    pub short_id: Option<&'a str>,
     pub context_tokens: Option<u64>,
+    /// The machine directory the process starting this session resolved,
+    /// which the session is handed as `FLEET_DIR` (shared.locations R29) so
+    /// the verbs the seat runs act on this machine.
+    pub machine_dir: &'a Path,
 }
 
 impl Target<'_> {
     /// The directory every act about this session is made under: the one the
-    /// start named, or the fleet's (flights PRD R13).
+    /// start named, or the fleet's.
     fn config_dir(&self) -> Option<&Path> {
         self.config_dir.as_deref().map(Path::new)
     }
 }
 
-/// The seat's display name: the chosen one lowercased, else the directory.
-pub fn display_name(chosen: Option<&str>, seat_dir: &str) -> String {
-    match chosen.map(str::trim) {
-        Some(name) if !name.is_empty() => name.to_lowercase(),
-        _ => seat_dir.to_string(),
-    }
-}
-
 /// Start a woken session for this seat, and open its row.
 ///
-/// On a failed start there is NO ROW. A row for a session that never came up is
-/// a dispatch the arrival window then waits on forever, which is the false
-/// success A14 is about — so the failure is an event and nothing else, and the
-/// next poll finds the seat absent and eligible again.
+/// On a failed start there is NO ROW and NO SESSION. A row for a session that
+/// never came up is a dispatch the arrival window then waits on forever — so
+/// the failure is an event and nothing else, the session is killed on the
+/// host, and the next poll finds the seat absent and eligible again.
 pub fn spawn_woken(
     agent: &dyn Agent,
+    host: &dyn Host,
     policy: &Policy,
     target: &Target,
     events_log: &mut EventLog,
     table: &mut Table,
     now_ms: u64,
 ) -> Outcome {
-    match start_once(agent, policy, target, events_log) {
+    match start_once(agent, host, policy, target, events_log) {
         Ok(dispatch_id) => {
             open_row(table, target, dispatch_id, now_ms);
             Outcome::Spawned
@@ -136,12 +139,12 @@ pub fn spawn_woken(
 /// sighting fields stay absent until the roster shows the session (A7).
 fn open_row(table: &mut Table, target: &Target, dispatch_id: String, now_ms: u64) {
     table.push(SessionRow {
-        seat: target.seat_dir.to_string(),
+        seat: target.seat.to_string(),
         project: target.project.to_string(),
         worktree: target.worktree.to_string(),
-        name: target.display_name.clone(),
+        name: target.session_name.clone(),
         model: target.model.clone(),
-        posture: target.posture.clone(),
+        posture: target.posture.into(),
         first_turn: target.first_turn.clone(),
         transient: target.transient,
         config_dir: target.config_dir.clone(),
@@ -149,183 +152,548 @@ fn open_row(table: &mut Table, target: &Target, dispatch_id: String, now_ms: u64
         dispatch_id,
         dispatched_at: now_ms,
         session_id: None,
-        short_id: None,
         first_seen_at: None,
         last_seen_at: None,
         adopted: None,
+        ended: None,
     });
 }
 
-/// The sentence one nudge carries (PRD R21, lessons claude-code C5).
+/// The sentence one nudge carries (lessons claude-code C5).
 ///
 /// It names the reading, the threshold it crossed and the command that answers
 /// it, because a suggestion whose recipient has to go and look up all three is
 /// one that costs more attention than it saves. It suggests and never enforces:
-/// there is deliberately no path from the threshold to an automatic rest.
-pub fn nudge_text(display_name: &str, tokens: u64, threshold: u64, seat_dir: &str) -> String {
-    format!(
-        "{display_name}: context at {tokens} tokens, over the rest threshold {threshold} — \
-         rest when your work allows: fleet event rest {seat_dir} --reason <why>"
-    )
-}
-
-/// The turn that carries it: one message, to one session, verbatim.
+/// there is deliberately no path from the threshold to an automatic rest. It is
+/// the whole of what is typed into the seat's session ([`type_turn`]): no turn
+/// of anybody else's carries it.
 ///
-/// The nudge runs as a print-mode turn in the seat's own worktree, so the
-/// session it addresses is one the agent can already see; the instruction is to
-/// send EXACTLY ONE message and nothing else, because a turn that takes
-/// initiative here is a second voice in a seat's session that nobody asked for.
-pub fn nudge_prompt(display_name: &str, text: &str) -> String {
+/// The seat is named by its session's name in both places. The command's
+/// argument resolves through the machine-name rule, which matches on the id
+/// part alone, so it names the seat even after the seat is renamed.
+pub fn nudge_text(session_name: &str, tokens: u64, threshold: u64, seat: &str) -> String {
     format!(
-        "Send exactly one message to the session named `{display_name}` through the \
-         cross-session send tool, with this text verbatim and nothing added:\n\n{text}\n\n\
-         Send that one message and then stop. Do not act on the message yourself, do not \
-         open any file, and do not reply here with anything but whether the send returned."
+        "{session_name}: context at {tokens} tokens, over the rest threshold {threshold} — \
+         rest when your work allows: fleet event rest {seat} --reason <why>"
     )
 }
 
 /// What a rest did, so the caller can log the half that failed.
 pub enum Rested {
-    /// The predecessor was stopped, the successor started and the predecessor's
-    /// row removed. The rest is collected and the event is consumed.
+    /// The predecessor's session was stopped and the successor started. The
+    /// rest is collected and the event is consumed.
     Collected,
-    /// The stop did not exit 0. Nothing was started and nothing was removed, the
-    /// rest stays pending, and the next poll retries — the alarm the PRD names
-    /// is exactly this: a `seat.resting` with no `session.rested` after it.
+    /// The host still holds the predecessor's session, or could not say that it
+    /// does not. Nothing was started, the rest stays pending, and the next poll
+    /// retries. A `seat.resting` with no `session.rested` after it is the
+    /// alarm, and this is exactly that.
     StopFailed(String),
-    /// The stop exited 0 and the successor's start failed. The predecessor is
-    /// down, its row still stands, nothing was removed and the rest stays pending.
+    /// The predecessor is gone from the host and the successor's start failed.
+    /// Its row still stands and the rest stays pending.
     StartFailed(String),
-    /// There was nothing to stop: a rest is defined on a live row and this seat
-    /// has no address to issue against.
-    NoAddress,
 }
 
 pub const PHASE_START: &str = "start";
 
-/// A `session.crashed` payload, written by the layer that met the failure.
-pub fn crashed_payload(phase: &str, cause: &str, log: &str) -> serde_json::Value {
-    serde_json::json!({ "phase": phase, "cause": cause, "output": log })
+/// The phase a failed revive's `session.crashed` names: the resume did not
+/// come up as the session it resumed, and nothing of it is left on the host.
+pub const PHASE_REVIVE: &str = "revive";
+
+/// A `session.crashed` payload, written by the layer that met the failure:
+/// the cause, the file holding the session's last screen where one was kept,
+/// and the pane's exit status where it died with one.
+pub fn crashed_payload(
+    phase: &str,
+    cause: &str,
+    output: Option<&str>,
+    status: Option<i32>,
+) -> serde_json::Value {
+    serde_json::json!({ "phase": phase, "cause": cause, "output": output, "status": status })
 }
 
-/// Names the event types an EFFECT writes, so a reader of the stream and a
-/// reader of this file agree on the vocabulary.
-///
-/// `session.stopped` is on the list and is written by `crate::transient`, which
-/// is the other caller of this module's `spawn_woken`: a retire is an effect
-/// carried out the same way, and a list that named only this file's own appends
-/// would leave the one end-of-life line a reader could not find here.
-/// `session.retired` is on it for the same reason, one writer over: it is the
-/// priced retire's own line and the cost half of the same act.
-pub const WRITES: [&str; 9] = [
-    events::SESSION_SPAWNED,
-    events::SESSION_RESTED,
-    events::SESSION_NUDGED,
-    events::SESSION_CRASHED,
-    events::SESSION_REVIVED,
-    events::SESSION_HALTED,
-    events::SESSION_STOPPED,
-    events::SESSION_RETIRED,
-    events::DISPATCH_BLIND,
-];
+/// Where a start's capture goes, under the machine directory: the pane's text
+/// as it stood when the start was given up on, which is the only account of
+/// why a session that never listed did not.
+pub const STARTS_DIR: &str = "starts";
 
+/// How often a start's watch reads the pane and the listing. The listing
+/// answered in 100–160 ms (the claude-code pack's lessons B10) and an
+/// interactive row was listed 0.5–0.75 s after the session was made, carrying
+/// its status half a second later (measured on 2.1.280, 2026-09-26), so a
+/// quarter second believes a start within one read of its row and costs a
+/// handful of reads.
+pub const WATCH_TICK: Duration = Duration::from_millis(250);
+
+/// What a start's watch saw.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Watched {
+    /// The agent's `read` found a session for the pane and says what it is
+    /// doing (the claude-code pack's lessons B10): the agent is up, and up as
+    /// this pane's process.
+    Started,
+    /// The pane died, the session went, or the window closed with no row. The
+    /// session HAS BEEN KILLED — a failed start leaves nothing on the host — and
+    /// `screen` is its last capture where one could be taken.
+    Failed {
+        cause: String,
+        /// The pane's exit status where it died with one.
+        status: Option<i32>,
+        screen: Option<String>,
+    },
+}
+
+/// The seat a start's watch asks the agent about: the pane the host has just
+/// started for it, and what the agent needs to find that pane's session.
+pub struct Watch<'a> {
+    pub seat: &'a SeatId,
+    /// The worktree the session was started in.
+    pub worktree: &'a str,
+    /// The configuration directory the session came up under, `None` for the
+    /// adapter's own.
+    pub config_dir: Option<&'a Path>,
+    pub window: Duration,
+    /// The session a REVIVE resumed, which the pane must come up as.
+    pub resumes: Option<&'a str>,
+}
+
+/// Watch a session the host has just started until the agent's own `read`
+/// finds it, reading the pane and asking the agent every [`WATCH_TICK`] until
+/// the window closes.
+///
+/// A DEAD PANE is a failed start carrying its exit status (the pane keeps it,
+/// remain-on-exit), which replaces the in-band exit a background start used to
+/// report (lessons claude-code A14, retired). A LIVE PANE is believed only when
+/// the agent names a session for the pane and says it is idle, busy or blocked
+/// — the pane, because its process IS the agent (E2) and a session in the same
+/// worktree proves nothing (B5); the activity, because a session is found half
+/// a second before it reports one and a start is not taken until it does
+/// (B10). Neither inside the window is a failure too: a session that runs and
+/// never lists is one no read will ever see.
+///
+/// A REVIVE is believed only where the agent names THE RESUMED SESSION for the
+/// pane: a session under any other id is a fork — a new session that holds
+/// none of the old one's context — and is failed and killed like any start
+/// that did not come up (reviewer call 2026-09-25, E3). A fresh start's id
+/// nobody knows until the agent names it.
+///
+/// Every `Failed` kills the session first: its capture is taken, then the
+/// session ended, so a failed start's rollback finds nothing left on the host.
+pub fn watch_start(agent: &dyn Agent, host: &dyn Host, watch: &Watch) -> Watched {
+    let session = host::session_for(watch.seat);
+    let window = watch.window;
+    let deadline = Instant::now() + window;
+    let failed = |cause: String, status: Option<i32>| {
+        let screen = host.capture(&session).ok();
+        let _ = host.kill(&session);
+        Watched::Failed {
+            cause,
+            status,
+            screen,
+        }
+    };
+    loop {
+        // An unreadable host listing concludes nothing: the pane may be fine
+        // and the read not, and the window is what bounds the wait.
+        if let HostRead::Readable(panes) = host.list() {
+            match host::pane(&panes, &session) {
+                None => {
+                    return failed(format!("the session {session} is gone from the host"), None)
+                }
+                Some(pane) => match pane.state {
+                    PaneState::Dead { status } => {
+                        return failed(
+                            format!(
+                                "the session exited {} inside its {}s watch window",
+                                status
+                                    .map(|code| code.to_string())
+                                    .unwrap_or_else(|| "on a signal".to_string()),
+                                window.as_secs()
+                            ),
+                            status,
+                        )
+                    }
+                    PaneState::Alive => {
+                        if let Some(pid) = pane.pid {
+                            let asked = SeatRef {
+                                seat: *watch.seat,
+                                session_id: watch.resumes.map(str::to_string),
+                                pid: Some(pid),
+                                config_dir: watch.config_dir.map(|dir| dir.display().to_string()),
+                                worktree: watch.worktree.to_string(),
+                                screen: None,
+                            };
+                            let reading = agent::readings(agent, &[asked]).remove(0);
+                            let up = matches!(
+                                reading.activity,
+                                Activity::Idle | Activity::Busy | Activity::Blocked
+                            );
+                            if let (true, Some(found)) = (up, &reading.session_id) {
+                                return match watch.resumes {
+                                    Some(resumed) if found != resumed => failed(
+                                        format!(
+                                            "the resume of {resumed} came up as {found}, a fork \
+                                             and not the session it resumed"
+                                        ),
+                                        None,
+                                    ),
+                                    _ => Watched::Started,
+                                };
+                            }
+                        }
+                    }
+                },
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return failed(format!("no listed row within {}s", window.as_secs()), None);
+        }
+        std::thread::sleep(WATCH_TICK.min(deadline - now));
+    }
+}
 /// One start, its event, and the id the row is keyed on.
+///
+/// The adapter answers what to run ([`Agent::launch`]), the host runs it as the
+/// seat's own session ([`host::session_for`]), and [`watch_start`] decides
+/// whether it came up. A session already on the host under the seat's name is
+/// looked at first: a DEAD one — a pane kept after its agent ended — is
+/// cleared, because it is no session and it holds the name; a LIVE one is a
+/// start refused, never a session killed, because this start did not make it.
 pub fn start_once(
     agent: &dyn Agent,
+    host: &dyn Host,
     policy: &Policy,
     target: &Target,
     events_log: &mut EventLog,
 ) -> Result<String, String> {
-    // The plugin root comes off POLICY and not off the target: every start the
-    // controller makes goes through this one construction, so a second builder
-    // of a target cannot forget it and the two cannot disagree.
-    let spec = StartSpec {
-        seat_dir: target.seat_dir.to_string(),
-        worktree: target.worktree.to_string(),
-        name: target.display_name.clone(),
-        model: target.model.clone(),
-        posture: target.posture.clone(),
-        first_turn: target.first_turn.clone(),
-        plugin_dir: policy
-            .plugin_dir
-            .as_ref()
-            .map(|dir| dir.display().to_string()),
-        config_dir: target.config_dir.clone(),
-    };
-    match agent.start(&spec, Duration::from_secs(policy.start_watch_seconds)) {
-        StartOutcome::Started { log } => {
+    let session = host::session_for(&target.seat);
+    match bring_up(agent, host, policy, target, None) {
+        Watched::Started => {
             let payload = serde_json::json!({
                 "worktree": target.worktree,
                 "project": target.project,
-                "name": target.display_name,
+                "name": target.session_name,
                 "model": target.model,
                 "posture": target.posture,
                 "first_turn": target.first_turn,
                 "transient": target.transient,
                 "config_dir": target.config_dir,
                 "item": target.item,
-                "settings": target.settings,
                 "belt": target.belt,
                 "run": target.run,
-                "output": log,
+                // The session's words are in its pane, so the output a reader
+                // is pointed at is the session itself, on fleet's own server.
+                "output": format!("-L {} -t {session}", host::SOCKET),
             });
             Ok(append(
                 events_log,
                 events::SESSION_SPAWNED,
-                target.seat_dir,
+                &ActorRef::seat(target.seat),
                 payload,
             ))
         }
-        StartOutcome::Failed { cause, log } => {
+        Watched::Failed {
+            cause,
+            status,
+            screen,
+        } => {
+            let output = screen
+                .and_then(|screen| keep_capture(events_log.dir()?, &target.session_name, &screen));
             append(
                 events_log,
                 events::SESSION_CRASHED,
-                target.seat_dir,
-                crashed_payload(PHASE_START, &cause, &log),
+                &ActorRef::seat(target.seat),
+                crashed_payload(PHASE_START, &cause, output.as_deref(), status),
             );
             Err(cause)
         }
     }
 }
 
-/// The rest collection, in the order the PRD fixes: stop, start the successor,
-/// then remove the predecessor (R16).
+// ---- what fleet sets for a seat's session -----------------------------------
+
+/// The variable the plugin's shim runs its binary from, which every seat's
+/// session is handed.
+pub use fleet_core::item::run::ENV_BIN as FLEET_BIN_VAR;
+
+/// The variable a started session's verbs read their actor from, set to the
+/// seat's own `seat:<id>`.
+pub use fleet_core::item::run::ENV_ACTOR as FLEET_ACTOR_VAR;
+
+/// The variable a started session's verbs resolve their machine directory
+/// from, set to the directory the starting process resolved.
+pub use fleet_core::item::run::ENV_DIR as FLEET_DIR_VAR;
+
+/// This process's own executable, as the absolute path the shim requires.
 ///
-/// THE ORDER IS LOAD-BEARING AND THE REMOVAL IS ONLY EVER AFTER A SUCCESSFUL
-/// STOP. A remove aimed at a live row neither refuses nor spares it, and a stop
-/// addressed by the full session id exits 1 with the row untouched — so a
-/// removal that follows an unread stop deletes a row whose session is still
-/// running (lessons claude-code A6, A8).
+/// Whatever the operating system answers, and nothing when it answers nothing
+/// or something relative: the shim refuses a relative seam, so handing one over
+/// would block every Bash command of the session it reached rather than let the
+/// shim look under its own root.
+pub fn own_executable() -> Option<PathBuf> {
+    std::env::current_exe().ok().filter(|exe| exe.is_absolute())
+}
+
+/// The variables fleet sets for a seat's session, whatever agent runs in it
+/// (D1, D7): the constructed `PATH`, the four a shell needs
+/// ([`crate::platform::PASSED_THROUGH`]), this process's own
+/// executable as `FLEET_BIN`, the machine directory it resolved as `FLEET_DIR`
+/// (never its own variable, so a controller resolved from `FLEET_HOME` hands the
+/// directory all the same), and WHO THE SESSION ACTS AS — `actor`, so its own
+/// bare verbs are the seat's.
 ///
-/// The successor is started BEFORE the predecessor's row is removed, so a
-/// removal that refuses leaves the seat with a successor rather than with
-/// nothing.
+/// NOTHING IS INHERITED (lessons claude-code D1). A service-launched process
+/// carries a minimal `PATH`, and a session that inherits it hands the collapsed
+/// search path to every tool call it makes, long after the start that caused
+/// it; so the `PATH` is the platform's, built off the home, and the process's
+/// own contributes nothing. What an agent's adapter adds for its own agent it
+/// answers in its [`Argv`]'s environment, and core sets both, exactly.
+pub fn seat_environment(actor: &str, machine_dir: &Path) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert(
+        "PATH".to_string(),
+        crate::platform::child_path(&crate::platform::home_dir()),
+    );
+    for pass in crate::platform::PASSED_THROUGH {
+        if let Ok(value) = std::env::var(pass) {
+            env.insert(pass.to_string(), value);
+        }
+    }
+    if let Some(bin) = own_executable() {
+        env.insert(FLEET_BIN_VAR.to_string(), bin.display().to_string());
+    }
+    env.insert(FLEET_DIR_VAR.to_string(), machine_dir.display().to_string());
+    env.insert(FLEET_ACTOR_VAR.to_string(), actor.to_string());
+    env
+}
+
+/// The environment a session's pane runs with: fleet's own for the seat, with
+/// the adapter's answered variables over it — the pairs the host is handed,
+/// and nothing of its own.
+pub fn pane_environment(fleet: &BTreeMap<String, String>, argv: &Argv) -> Vec<(String, String)> {
+    let mut env = fleet.clone();
+    for (key, value) in &argv.env {
+        env.insert(key.clone(), value.clone());
+    }
+    env.into_iter().collect()
+}
+
+/// Bring one session up for the seat on the host, and watch it: a fresh start
+/// from [`Agent::launch`], or — where `resumes` names the session a revive
+/// takes back — the resume of that session from [`Agent::resume`].
+///
+/// Both go the one way. The seat's name is cleared on the host and the adapter
+/// answers what to run, the host runs it as the seat's own session under
+/// fleet's environment for the seat with the adapter's over it
+/// ([`pane_environment`]), and [`watch_start`] decides whether it came
+/// up — as that session, for a resume.
+fn bring_up(
+    agent: &dyn Agent,
+    host: &dyn Host,
+    policy: &Policy,
+    target: &Target,
+    resumes: Option<&str>,
+) -> Watched {
+    let session = host::session_for(&target.seat);
+    let refused = |cause: String| Watched::Failed {
+        cause,
+        status: None,
+        screen: None,
+    };
+    // WHO THE SESSION ACTS AS [ASSUMES D7], among the variables fleet sets for
+    // every seat's session: its own bare verbs are the seat's.
+    let fleets = seat_environment(&Actor::seat(target.seat).to_string(), target.machine_dir);
+    // A start clears the name before the launch writes its seed, so a live
+    // session refuses it before anything is written. A resume writes nothing,
+    // and is asked for FIRST: one the adapter will not build leaves the dead
+    // pane — the seat's last screen and its exit status — where the next poll
+    // reads it.
+    let launched = match resumes {
+        Some(session_id) => agent
+            .resume(&Resume {
+                session_id: session_id.to_string(),
+                worktree: target.worktree.to_string(),
+                config_dir: target.config_dir.clone(),
+                model: target.model.clone(),
+                posture: target.posture,
+            })
+            .map_err(|why| why.to_string())
+            .and_then(|argv| cleared(host, &session).map(|()| argv)),
+        None => cleared(host, &session).and_then(|()| {
+            agent
+                .launch(&Launch {
+                    seat: target.seat,
+                    worktree: target.worktree.to_string(),
+                    name: target.session_name.clone(),
+                    model: target.model.clone(),
+                    posture: target.posture,
+                    first_turn: target.first_turn.clone(),
+                    config_dir: target.config_dir.clone(),
+                    env: fleets.clone(),
+                    permissions: target.permissions.clone(),
+                })
+                .map_err(|why| why.to_string())
+        }),
+    };
+    match launched.and_then(|argv| {
+        host.new_session(
+            &session,
+            Path::new(target.worktree),
+            &argv.argv,
+            &pane_environment(&fleets, &argv),
+        )
+        .map_err(|cause| format!("the host did not start the session: {cause}"))
+    }) {
+        // Nothing was started, so nothing is killed: a refusal here may be
+        // over a live session that is not this start's to end.
+        Err(cause) => refused(cause),
+        Ok(()) => watch_start(
+            agent,
+            host,
+            &Watch {
+                seat: &target.seat,
+                worktree: target.worktree,
+                config_dir: target.config_dir(),
+                window: Duration::from_secs(policy.start_watch_seconds),
+                resumes,
+            },
+        ),
+    }
+}
+/// The seat's name on the host made free for a start, or why it cannot be.
+///
+/// A dead pane under it is killed — its agent is gone and the pane is only its
+/// last screen — and a live one refuses the start. An unreadable host listing
+/// is left to the start itself, which fails at the host in the host's own
+/// words if the name is taken.
+fn cleared(host: &dyn Host, session: &str) -> Result<(), String> {
+    let HostRead::Readable(panes) = host.list() else {
+        return Ok(());
+    };
+    match host::pane(&panes, session) {
+        None => Ok(()),
+        Some(pane) if pane.state == PaneState::Alive => Err(format!(
+            "the session {session} is already running on the host, and this start did not \
+             start it"
+        )),
+        Some(_) => host
+            .kill(session)
+            .map_err(|cause| format!("the dead session {session} could not be cleared: {cause}")),
+    }
+}
+
+/// Write a start's last capture under the machine directory and answer where,
+/// or `None` where it could not be kept — the start has failed either way, and
+/// a capture that could not be written is not a second failure.
+fn keep_capture(machine_dir: &Path, session_name: &str, screen: &str) -> Option<String> {
+    // Where a start's capture is kept: `<machine>/starts/<name>-<ms>.log`,
+    // named by the session and the moment, so two calls for one seat never
+    // write over each other and an operator reading the directory can tell
+    // which is which.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let safe: String = session_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let path = machine_dir
+        .join(STARTS_DIR)
+        .join(format!("{safe}-{stamp}.log"));
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::write(&path, screen).ok()?;
+    Some(path.display().to_string())
+}
+
+/// How long a stop waits, after its interrupt, for the session to end on its
+/// own before it is killed.
+///
+/// Through the claude-code pack, on 2.1.280, the interrupt ends a turn in hand
+/// and never the session — a busy one read idle half a second after it, an
+/// idle one only asked for a second press — so the wait runs out on every stop
+/// of that agent and the kill is what ends it (measured 2026-09-26,
+/// fleet-rge6.4). It stays, agent-neutral, for an agent whose interrupt does
+/// end it.
+pub const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// End the seat's session `name` on the host, and answer `Ok` only when the
+/// host no longer holds it.
+///
+/// In order: one interrupt (`C-c`), so a turn in hand is ended rather than cut
+/// off; up to [`STOP_GRACE`] for the pane to read dead or the session to be
+/// gone; then the session killed, which ends it whatever it is doing
+/// (the claude-code pack's lessons D8; the listing dropped its row by the next
+/// read, B10).
+///
+/// THE WITNESS IS THE HOST, NEVER THE ACT'S OWN RETURN — the rule the daemon's
+/// stop and attach taught (lessons claude-code A6, A7, retired). A listing read
+/// after the kill that names no session under `name` is the only `Ok`; one that
+/// still names it, or cannot be read, is a stop that did not land, carrying why.
+/// A session already gone is stopped: the ask is that it not be there.
+///
+/// Agent-neutral: it types a key every terminal program reads and reads nothing
+/// but the host, so no adapter is asked anything.
+pub fn stop_session(host: &dyn Host, name: &str) -> Result<(), String> {
+    // A session already gone refuses the keys, and that is no failed stop:
+    // the listing below is what says whether one is left.
+    let _ = host.keys(name, &["C-c"]);
+    let deadline = Instant::now() + STOP_GRACE;
+    loop {
+        // An unreadable listing concludes nothing: the grace bounds the wait,
+        // and the kill below is taken either way.
+        if let HostRead::Readable(panes) = host.list() {
+            match host::pane(&panes, name) {
+                None => break,
+                Some(pane) if matches!(pane.state, PaneState::Dead { .. }) => break,
+                Some(_) => {}
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep(WATCH_TICK.min(deadline - now));
+    }
+    host.kill(name)
+        .map_err(|cause| format!("the session {name} could not be killed: {cause}"))?;
+    match host.list() {
+        HostRead::Readable(panes) if host::pane(&panes, name).is_some() => Err(format!(
+            "the host still holds the session {name} after it was killed"
+        )),
+        HostRead::Readable(_) => Ok(()),
+        HostRead::Unreadable { cause } => Err(format!(
+            "whether the session {name} is gone could not be read off the host: {cause}"
+        )),
+    }
+}
+
+/// The rest collection, in a fixed order: stop the predecessor, then start the
+/// successor.
+///
+/// THE ORDER IS LOAD-BEARING. The seat's session is named by the seat
+/// ([`host::session_for`]), so the successor's start takes the name the
+/// predecessor holds and is refused while it is still there — which is why the
+/// stop has to have landed, witnessed by the host, first. Nothing is removed
+/// after: the predecessor's session was the host's, and the stop took it.
 pub fn rest(
     agent: &dyn Agent,
+    host: &dyn Host,
     policy: &Policy,
     target: &Target,
     events_log: &mut EventLog,
     table: &mut Table,
     now_ms: u64,
 ) -> Rested {
-    let Some(short_id) = target.short_id else {
-        return Rested::NoAddress;
-    };
-    if let Err(cause) = agent.stop(target.config_dir(), short_id) {
+    if let Err(cause) = stop_session(host, &host::session_for(&target.seat)) {
         return Rested::StopFailed(cause);
     }
-    let started = start_once(agent, policy, target, events_log);
-    let dispatch_id = match started {
+    let dispatch_id = match start_once(agent, host, policy, target, events_log) {
         Ok(id) => id,
         // The stop landed and the start did not. The predecessor is down, its
-        // row still stands, and the crash event says so; the removal is not
-        // taken, because a row nothing replaced is the only trace of the seat.
+        // row still stands, and the crash event says so: a row nothing
+        // replaced is the only trace of the seat.
         Err(cause) => return Rested::StartFailed(cause),
-    };
-    let removed = match agent.remove(target.config_dir(), short_id) {
-        RemoveAnswer::Removed => "removed".to_string(),
-        RemoveAnswer::Refused { cause } => format!("refused: {cause}"),
-        RemoveAnswer::RemovedAWorktree { path } => format!("removed a worktree at {path}"),
     };
     open_row(table, target, dispatch_id.clone(), now_ms);
     if let Some(session_id) = target.session_id {
@@ -334,104 +702,113 @@ pub fn rest(
     append(
         events_log,
         events::SESSION_RESTED,
-        target.seat_dir,
+        &ActorRef::seat(target.seat),
         serde_json::json!({
             "predecessor": target.session_id,
-            "predecessor_address": short_id,
             "successor_dispatch": dispatch_id,
-            "removed": removed,
         }),
     );
     Rested::Collected
 }
 
-/// Bring a hibernated row back in place (R10).
+/// Bring a seat's ended session back, context intact, as a NEW session on the
+/// host whose command is the resume of the session's full id (reviewer call
+/// 2026-09-25, E2, E3).
 ///
-/// The attach is addressed by the row's SHORT ID, so the session continues under
-/// the same id with its context intact — a flagged resume would fork it (lessons
-/// claude-code A9). The row is then RE-OPENED as a fresh dispatch: an attach
-/// exits 0 whether it revived the row or did nothing (A7), so the arrival window
-/// has to be keyed to this act and answered by a sighting, or the revive would be
-/// issued again on every poll.
+/// The session id is the one the table recorded: a dead pane's row is gone from
+/// the listing with its process (the claude-code pack's lessons B10), so the
+/// caller fills `target.session_id` from the seat's newest row.
+/// [`Agent::resume`] answers what to run, the dead session is cleared off the
+/// host, and the watch believes the new one only when the pane's own process is
+/// listed under THAT id — a row under any other is a fork, which is failed and
+/// killed.
 ///
-/// A pid-less row with no short id cannot be revived and says so, doing nothing:
-/// the row is left to the next poll rather than spawned over here.
+/// A revive that came up writes `session.revived` and RE-OPENS the row as a
+/// fresh dispatch, so the arrival window is keyed to this act and a sighting
+/// closes it. One that did not writes `session.crashed` in the revive phase,
+/// leaves nothing on the host and moves no row; the next poll finds the seat
+/// absent and decides again, and the blind counter counts the revive either
+/// way.
+///
+/// A seat whose table names no session cannot be revived and says so, doing
+/// nothing: it is left to the next poll rather than started over here.
 pub fn revive(
     agent: &dyn Agent,
+    host: &dyn Host,
+    policy: &Policy,
     target: &Target,
     events_log: &mut EventLog,
     table: &mut Table,
     now_ms: u64,
 ) -> Outcome {
-    let (Some(short_id), Some(session_id)) = (target.short_id, target.session_id) else {
+    let Some(session_id) = target.session_id else {
         eprintln!(
-            "fleet observe: {} is due a revive and its row carries no short id, which is the \
-             address an attach takes; nothing is done and the row is left to the next poll",
-            target.seat_dir
+            "fleet observe: {} is due a revive and no row of the session table names the \
+             session it stood on, which is what a resume takes; nothing is done and the seat is \
+             left to the next poll",
+            target.session_name
         );
         return Outcome::None;
     };
-    let attached = agent.revive(target.config_dir(), short_id);
-    let outcome = match &attached {
-        Ok(()) => "dispatched".to_string(),
-        Err(cause) => format!("failed: {cause}"),
-    };
-    let dispatch_id = append(
-        events_log,
-        events::SESSION_REVIVED,
-        target.seat_dir,
-        serde_json::json!({
-            "session": session_id,
-            "address": short_id,
-            "worktree": target.worktree,
-            "project": target.project,
-            // The identity fields every other row-opening line carries: an
-            // attach is its own dispatch, so a rebuild that meets this line
-            // with no row to match — a trimmed stream — opens one from these
-            // rather than from empty strings.
-            "name": target.display_name,
-            "model": target.model,
-            "posture": target.posture,
-            "first_turn": target.first_turn,
-            "transient": target.transient,
-            "outcome": outcome,
-        }),
-    );
-    match attached {
-        Ok(()) => {
-            // A row this controller did not open — a session it adopted, or one
-            // it met on the roster — gets one now: the attach is its own
+    match bring_up(agent, host, policy, target, Some(session_id)) {
+        Watched::Started => {
+            let dispatch_id = append(
+                events_log,
+                events::SESSION_REVIVED,
+                &ActorRef::seat(target.seat),
+                serde_json::json!({
+                    "session": session_id,
+                    "worktree": target.worktree,
+                    "project": target.project,
+                    // The identity fields every other row-opening line
+                    // carries: a revive is its own dispatch, so a rebuild that
+                    // meets this line with no row to match — a trimmed stream
+                    // — opens one from these rather than from empty strings.
+                    "name": target.session_name,
+                    "model": target.model,
+                    "posture": target.posture,
+                    "first_turn": target.first_turn,
+                    "transient": target.transient,
+                    "output": format!("-L {} -t {}", host::SOCKET, host::session_for(&target.seat)),
+                }),
+            );
+            // A row this controller did not open — a session it adopted, or
+            // one it met on the roster — gets one now: the revive is its own
             // dispatch either way, and a dispatch with no row is a window that
-            // never opens and a revive re-issued every poll.
+            // never opens.
             if !table.redispatch(session_id, dispatch_id.clone(), now_ms) {
                 open_row(table, target, dispatch_id, now_ms);
             }
             Outcome::Revived
         }
-        // A failed attach opened no window and moved no row, exactly as a failed
-        // start opens none: the next poll finds the same pid-less row and
-        // decides about it again.
-        Err(_) => Outcome::Failed,
+        Watched::Failed {
+            cause,
+            status,
+            screen,
+        } => {
+            let output = screen
+                .and_then(|screen| keep_capture(events_log.dir()?, &target.session_name, &screen));
+            let mut payload = crashed_payload(PHASE_REVIVE, &cause, output.as_deref(), status);
+            payload["session"] = serde_json::Value::from(session_id);
+            append(
+                events_log,
+                events::SESSION_CRASHED,
+                &ActorRef::seat(target.seat),
+                payload,
+            );
+            Outcome::Failed
+        }
     }
 }
 
-/// Claim, at startup, every session the table names that the roster still LISTS
-/// (R17).
+/// Claim, at startup, every session the table names that the agent still
+/// names LIVE.
 ///
-/// LISTED AND NOT ENDED, and never the pid: a row the daemon carries without one
-/// is a session it still holds — hibernated, or between hosts — and a session
-/// the table already names is this controller's to claim whichever of the two it
-/// is, because adoption issues nothing and costs nothing. Only the agent's own
-/// end-of-life marker puts a row out of reach, which leaves a session that has
-/// finished to the discriminator. Claiming on the pid instead hands every
-/// pid-less row of a session the fleet already owns to the revive arm, which
-/// spends a dispatch re-attaching to a session that is already there.
-///
-/// BY SESSION ID, never by name and never by re-issuing a start: a controller
-/// that resumed with its own flags would fork the session it meant to reclaim
-/// and then hold a row pointing at a dead twin (lessons claude-code A9). Nothing
-/// is dispatched here — the row is marked sighted from the roster this poll
-/// already read, so the seat's first verdict is taken against a session the
+/// BY SESSION ID, never by name and never by re-issuing a start: a claimed
+/// session is one already running, and a start or a resume issued at it would
+/// be a second session beside it rather than a claim on it. Nothing
+/// is dispatched here — the row is marked sighted from the reading this poll
+/// already took, so the seat's first verdict is taken against a session the
 /// controller knows it owns.
 ///
 /// One `session.adopted` each, which is the line the reference engine adopts
@@ -440,17 +817,14 @@ pub fn revive(
 /// restart — or a `--once` poll, which is a process per poll — writes nothing
 /// for a session an earlier start claimed.
 ///
-/// A row is claimed when it is LIVE and never by its state (R17, gas-city G7:
-/// "adopts every live session it names"). The state word cannot carry the
-/// question — a live idle session reads `done` (lessons claude-code A3), so a
-/// claim gated on it takes no idle seat at all — and liveness is a sighting
-/// this controller made: what is claimed is a session observed running, which
-/// is then held through the pid-less stretches that follow it. A session the
-/// roster no longer carries, and one it carries pid-less with no sighting
-/// behind it, are both left alone: those rows fall to the discriminator on this
-/// same poll.
+/// `live` is every session id the agent named this poll for a seat whose pane
+/// the host holds alive — a session observed running, never a word on it
+/// (gas-city G7: "adopts every live session it names"). A claim holds nothing
+/// past the session's end: a session the agent no longer names is one whose
+/// pane is dead or gone, and the seat's verdict on this same poll is the
+/// host's reading of that.
 pub fn adopt(
-    rows: &[crate::adapter::AgentRow],
+    live: &[String],
     table: &mut Table,
     events_log: &mut EventLog,
     now_ms: u64,
@@ -463,17 +837,11 @@ pub fn adopt(
         if row.adopted.as_ref() == Some(&session_id) {
             continue;
         }
-        let Some(listed) = rows
-            .iter()
-            .find(|listed| listed.session_id == session_id && listed.is_live())
-        else {
+        if !live.contains(&session_id) {
             continue;
-        };
+        }
         row.first_seen_at.get_or_insert(now_ms);
         row.last_seen_at = Some(now_ms);
-        if row.short_id.is_none() {
-            row.short_id = listed.id.clone();
-        }
         row.adopted = Some(session_id);
         claimed.push(row.clone());
     }
@@ -483,10 +851,9 @@ pub fn adopt(
         append(
             events_log,
             events::SESSION_ADOPTED,
-            &row.seat,
+            &ActorRef::seat(&row.seat),
             serde_json::json!({
                 "session": session_id,
-                "short_id": row.short_id,
                 "worktree": row.worktree,
                 "project": row.project,
                 "name": row.name,
@@ -501,37 +868,45 @@ pub fn adopt(
     ids
 }
 
-/// The one line and the one event a halt transition writes (R14).
+/// The one line and the one event a halt transition writes.
 ///
 /// Announced ONCE per transition into the halt and never once per poll: the
-/// caller writes this only when the latch moved.
-pub fn halted(seat_dir: &str, blind: u32, events_log: &mut EventLog) {
+/// caller writes this only when the latch moved. The line names the seat by its
+/// machine name, which is what a person types back; the event's actor is the
+/// seat, by its id.
+pub fn halted(seat: &SeatId, machine_name: &str, blind: u32, events_log: &mut EventLog) {
     eprintln!(
-        "fleet observe: {seat_dir} has gone blind on {blind} consecutive dispatches and is HELD \
-         DOWN; nothing further is dispatched for it until `fleet event clear-halt {seat_dir}`"
+        "fleet observe: {machine_name} has gone blind on {blind} consecutive dispatches and is \
+         HELD DOWN; nothing further is dispatched for it until `fleet event clear-halt \
+         {machine_name}`"
     );
     append(
         events_log,
         events::SESSION_HALTED,
-        seat_dir,
+        &ActorRef::seat(seat),
         serde_json::json!({ "blind": blind }),
     );
 }
 
 /// The event a counted blind dispatch writes, carrying the count it moved to —
 /// which is what a rebuild folds the counter back out of.
-pub fn blind_dispatch(seat_dir: &str, blind: u32, verdict: &str, events_log: &mut EventLog) {
+pub fn blind_dispatch(seat: &SeatId, blind: u32, verdict: &str, events_log: &mut EventLog) {
     append(
         events_log,
         events::DISPATCH_BLIND,
-        seat_dir,
+        &ActorRef::seat(seat),
         serde_json::json!({ "blind": blind, "verdict": verdict }),
     );
 }
 
 /// One nudge, its event, and the session id that must never be nudged again.
+///
+/// The sentence is TYPED into the seat's own session ([`type_turn`]) under the
+/// policy's bound. `sent` is written only where the listing witnessed the turn
+/// taken; every other outcome says what it was instead.
 pub fn nudge(
     agent: &dyn Agent,
+    host: &dyn Host,
     policy: &Policy,
     target: &Target,
     events_log: &mut EventLog,
@@ -541,45 +916,229 @@ pub fn nudge(
         return Outcome::None;
     };
     let text = nudge_text(
-        &target.display_name,
+        &target.session_name,
         tokens,
         policy.rest_threshold_tokens,
-        target.seat_dir,
+        &target.session_name,
     );
-    let sent = agent.nudge(
-        target.config_dir(),
-        target.seat_dir,
-        target.worktree,
-        &policy.nudge_model,
-        &nudge_prompt(&target.display_name, &text),
+    let typed = type_turn(
+        agent,
+        host,
+        &TurnTarget {
+            seat: &target.seat,
+            config_dir: target.config_dir(),
+        },
+        &text,
         Duration::from_secs(policy.nudge_timeout_seconds),
     );
-    let outcome = match &sent {
-        Ok(()) => "sent".to_string(),
-        Err(cause) => format!("failed: {cause}"),
-    };
-    // The session is marked WHETHER OR NOT the turn landed. The budget is one
+    // The session is marked WHATEVER BECAME OF THE TURN. The budget is one
     // nudge per session and a retry loop against a session that cannot be
-    // reached is the noise R21 exists to prevent; the event carries the failure
-    // for the person who reads the stream.
-    table.mark_nudged(target.seat_dir, session_id);
+    // reached is the noise that budget exists to prevent; the event carries the
+    // outcome for the person who reads the stream.
+    let seat = target.seat.to_string();
+    table.mark_nudged(&seat, session_id);
     append(
         events_log,
         events::SESSION_NUDGED,
-        target.seat_dir,
+        &ActorRef::seat(&seat),
         serde_json::json!({
             "session": session_id,
             "context_tokens": tokens,
             "threshold": policy.rest_threshold_tokens,
-            "outcome": outcome,
+            "outcome": typed.recorded(),
         }),
     );
-    match sent {
-        Ok(()) => Outcome::Nudged,
-        Err(_) => Outcome::Failed,
+    match typed {
+        Typed::Delivered | Typed::Queued => Outcome::Nudged,
+        Typed::Blocked(_) | Typed::Absent | Typed::Failed(_) => Outcome::Failed,
     }
 }
 
+// ---- typing a turn ----------------------------------------------------------
+
+/// The seat a turn is typed for: its session on the host is named by its id
+/// ([`host::session_for`]), and its row is listed under `config_dir`, the
+/// directory its session was started under (`None` for the adapter's own).
+pub struct TurnTarget<'a> {
+    pub seat: &'a SeatId,
+    pub config_dir: Option<&'a Path>,
+}
+
+/// What typing one turn into a seat's session came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Typed {
+    /// The row was idle, the turn was typed, and the row turned busy on the
+    /// same pid inside the bound: the session took it.
+    Delivered,
+    /// The row was already busy, so the turn was typed and WAITS behind the one
+    /// in hand. Never called delivered (reviewer call 2026-09-25, E5): a busy
+    /// row after the send cannot tell the queued turn from the one ahead of it.
+    /// Through the claude-code pack, on 2.1.280, a turn typed into a busy
+    /// session ran as its own turn once the first had ended (measured
+    /// 2026-09-26).
+    Queued,
+    /// The row stood in front of a human, carrying what on, and NOTHING WAS
+    /// TYPED: keys sent at a dialog answer it
+    /// (the claude-code pack's lessons B8, B10). On 2.1.280 a paste and a
+    /// submit at a permission prompt lost the text and approved the tool call
+    /// (measured 2026-09-26).
+    Blocked(String),
+    /// No live pane under the seat's session, or no listed row carrying the
+    /// pane's pid: there is no session to type into, and nothing was.
+    Absent,
+    /// Why the turn was not taken: a reading that could not be made, a host
+    /// that refused the text, or a row that never turned busy.
+    Failed(String),
+}
+
+impl Typed {
+    /// What a `session.nudged` line records for this outcome: `sent` for a
+    /// witnessed turn and for nothing else.
+    pub fn recorded(&self) -> String {
+        match self {
+            Typed::Delivered => "sent".to_string(),
+            Typed::Queued => "queued: the seat was mid-turn".to_string(),
+            Typed::Blocked(cause) => format!("refused: blocked on {cause}"),
+            Typed::Absent => "failed: the seat has no live session to type into — no live pane, \
+                              or no listed row carrying its pid"
+                .to_string(),
+            Typed::Failed(cause) => format!("failed: {cause}"),
+        }
+    }
+}
+
+/// How often a typed turn's listing is read for the row turning busy. Through
+/// the claude-code pack, on 2.1.280, the row read busy on the first read after
+/// the submit, 0.14 s on, and a one-word turn held busy for half a second and
+/// more (measured 2026-09-26), so a quarter second meets even the shortest
+/// turn.
+pub const TURN_TICK: Duration = WATCH_TICK;
+
+/// The seat's live pane and the agent's reading of it, read FRESH: the host's
+/// listing, then one `read` asking about the pane's pid under the seat's own
+/// directory.
+///
+/// The session is found BY THE PANE and by nothing else — the pane's process
+/// IS the agent (E2), and a session in the same worktree proves nothing (B5).
+/// No pane, a dead one, or no session the agent names for it is
+/// [`Typed::Absent`]; a reading that could not be made is [`Typed::Failed`]
+/// naming why, never an absence.
+pub fn seat_row(agent: &dyn Agent, host: &dyn Host, target: &TurnTarget) -> Result<Live, Typed> {
+    let session = host::session_for(target.seat);
+    let panes = match host.list() {
+        HostRead::Readable(panes) => panes,
+        HostRead::Unreadable { cause } => {
+            return Err(Typed::Failed(format!(
+                "the host's listing could not be read: {cause}"
+            )))
+        }
+    };
+    let Some((pid, path)) =
+        host::live_pane(&panes, &session).and_then(|pane| Some((pane.pid?, pane.path.clone())))
+    else {
+        return Err(Typed::Absent);
+    };
+    let asked = SeatRef {
+        seat: *target.seat,
+        session_id: None,
+        pid: Some(pid),
+        config_dir: target.config_dir.map(|dir| dir.display().to_string()),
+        worktree: path,
+        screen: None,
+    };
+    let reading = agent::readings(agent, std::slice::from_ref(&asked)).remove(0);
+    match (&reading.session_id, reading.activity) {
+        (Some(_), _) => Ok(Live {
+            pid,
+            asked,
+            reading,
+        }),
+        (None, Activity::Unknown) => {
+            Err(Typed::Failed(reading.cause.unwrap_or_else(|| {
+                "the agent could not read the seat".to_string()
+            })))
+        }
+        (None, _) => Err(Typed::Absent),
+    }
+}
+
+/// A seat's live pane as [`seat_row`] found it: the pane's process, what the
+/// agent was asked about it, and what the agent answered.
+#[derive(Clone, Debug)]
+pub struct Live {
+    pub pid: u32,
+    pub asked: SeatRef,
+    pub reading: SeatActivity,
+}
+
+/// Type one turn into a seat's own session and say whether it was taken — the
+/// one path the controller's rest suggestion, `fleet seat nudge`, a routine's
+/// ring and `fleet seat feed` all take.
+///
+/// In order: the pane and the agent's reading of it are taken fresh
+/// ([`seat_row`]); a seat stopped in front of a human is refused BEFORE ANY
+/// BYTE; the text goes to the host as one paste and a separate submit
+/// ([`Host::send`]); and a seat that was idle is then read every [`TURN_TICK`]
+/// for `busy` on the same pane until `bound` closes. The host's `Ok` is a
+/// dispatch and never a witness: only the agent's reading says the turn was
+/// taken (the claude-code pack's lessons D8). A seat that was busy already is
+/// [`Typed::Queued`] at once.
+pub fn type_turn(
+    agent: &dyn Agent,
+    host: &dyn Host,
+    target: &TurnTarget,
+    text: &str,
+    bound: Duration,
+) -> Typed {
+    let live = match seat_row(agent, host, target) {
+        Ok(live) => live,
+        Err(typed) => return typed,
+    };
+    if let Some(cause) = agent::waiting_on(&live.reading) {
+        return Typed::Blocked(cause);
+    }
+    if let Err(cause) = host.send(&host::session_for(target.seat), text) {
+        return Typed::Failed(format!("the host did not take the text: {cause}"));
+    }
+    if live.reading.activity == Activity::Busy {
+        return Typed::Queued;
+    }
+    // The pane asked about again, under the session the first reading named.
+    let asked = SeatRef {
+        session_id: live.reading.session_id.clone(),
+        ..live.asked
+    };
+    let deadline = Instant::now() + bound;
+    let mut last = activity_word(&live.reading);
+    loop {
+        let reading = agent::readings(agent, std::slice::from_ref(&asked)).remove(0);
+        // A reading that could not be made concludes nothing: the turn may have
+        // been taken and the read not, and the bound is what ends the wait.
+        if reading.session_id.is_some() || reading.activity != Activity::Unknown {
+            if reading.activity == Activity::Busy {
+                return Typed::Delivered;
+            }
+            last = activity_word(&reading);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Typed::Failed(format!(
+                "typed and not taken: still {last} after {}s",
+                bound.as_secs()
+            ));
+        }
+        std::thread::sleep(TURN_TICK.min(deadline - now));
+    }
+}
+
+/// The word a turn that was not taken names its seat by: the activity the
+/// agent read, or why there is none to name.
+fn activity_word(reading: &SeatActivity) -> String {
+    match reading.session_id {
+        Some(_) => reading.activity.word().to_string(),
+        None => "unlisted".to_string(),
+    }
+}
 /// Append one event and answer with its id, which is what a row is keyed on. A
 /// stream that cannot be written is stated and does not stop the loop: the
 /// effect happened either way, and a controller that refused to act because it
@@ -587,14 +1146,10 @@ pub fn nudge(
 fn append(
     events_log: &mut EventLog,
     kind: &str,
-    actor: &str,
+    actor: &ActorRef,
     payload: serde_json::Value,
 ) -> String {
-    match events_log.append_id(kind, actor, payload) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("fleet observe: could not append {kind} for {actor}: {e}");
-            String::new()
-        }
-    }
+    events_log.append_or_say(kind, actor, payload, |e| {
+        format!("fleet observe: could not append {kind} for {actor}: {e}")
+    })
 }

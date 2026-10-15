@@ -11,8 +11,8 @@
 //! order in the same act, so no refusal leaves an ordered item nobody holds.
 //!
 //! `brief` renders the first thing a dispatched seat reads: the item, its order
-//! note, the delivery-note template it will fill, the guards in force, the
-//! project's suite and the every-turn rules. Whole or not at all — every value
+//! note, the schema of the delivery it will hand in, the guards in force, the
+//! builder's checks its dispatch was handed and the every-turn rules. Whole or not at all — every value
 //! is resolved into memory before a byte reaches stdout, because a seat that
 //! read half a contract cannot tell it read half.
 //!
@@ -23,41 +23,38 @@
 //! seat wrote, reassigns to the reviewer, reads both back and rings. A ring
 //! nobody answers is still exit 0: the reassignment recorded the handoff.
 //!
-//! `gate` is the pair that needs a person: `ask` and `answer`. `ask` is the
+//! `hold` is the pair that needs a person: `hold` and `clear`. `hold` is the
 //! seat's, run from inside its worktree, and it is how work stops on a question
 //! without anybody waiting for one — everything the tree holds committed on the
-//! work branch, the store's own gate raised carrying the question and its
+//! work branch, the store's own hold raised carrying the question and its
 //! lettered options, the park written on the item with the branch, the commit
-//! and the gate, and `item.parked` on the stream. It commits EVERYTHING, staged
+//! and the hold, and its signal on the stream. It commits EVERYTHING, staged
 //! or not, tracked or not, because a question asked mid-work must lose nothing
 //! and the seat is about to be retired; a tree with nothing to commit parks on
-//! HEAD. It refuses the trunk, a worktree holding no ordered item and a note
-//! the question grammar does not read, all three before the commit. `answer` is
-//! a person's reply and the one act that empties the store's gate list: the
-//! answer written on the item, the gate resolved and `gate.resolved` written,
-//! each read back. A letter the options do not name is still an answer with
-//! `--text`, because the person deciding may see a third way the seat did not.
-//! Neither verb rings anybody and neither dispatches: the flight retires the
-//! asking seat, and the next flight that lists the item is what resumes it —
-//! cut from the parked commit, its brief carrying a RESUME section with the
-//! question, the options and the answer. An item whose park is answered and
-//! whose verdict already accepted the parked commit reads accepted in the fold
-//! and goes to the landing with no seat at all.
+//! HEAD. It refuses the trunk, a worktree holding no ordered item and a
+//! question file that does not read as its schema, all three before the
+//! commit. `clear` is a person's clearance and the one act that empties the
+//! store's hold list: the answer written on the item, the hold cleared and
+//! the answer's signal written, each read back. A letter the options do not name is
+//! still an answer with `--text`, because the person deciding may see a third
+//! way the seat did not. Neither verb rings anybody and neither dispatches:
+//! what resumes a held item is whatever dispatches it next.
 //!
 //! `review` is the reviewer's read and the verdict it writes. It prints a size
 //! line that is a measurement and carries no tier — core is one reviewer's read
-//! at every size — walks the calls the delivery numbered, and writes ACCEPTED
-//! or RETURNED WITH FINDINGS from the pack's verdict grammar. It never lands:
-//! the accept verdict is what the landing verb reads.
+//! at every size — walks the calls the delivery numbered, and appends the
+//! `reviewed` entry, accepted or returned with its findings, as the item's
+//! holder. It never lands: the accept is what the landing verb reads.
 //!
 //! `land` is the reviewer's, and it lands a REVIEW: the licence to squash
-//! anything is the item's last verdict, an ACCEPTED naming the exact commit it
-//! was given. It takes a commit and never a branch name, runs from a linked
-//! worktree and never the primary, squashes onto the trunk, runs the one suite
-//! the project names (or lands on the review alone where it names none), counts
+//! anything is the item's last verdict, an accept of the exact commit it was
+//! given, written by the landing's own reviewer. It takes a commit and never a branch name, runs from a linked
+//! worktree and never the primary, squashes onto the trunk, runs the one test
+//! command it is handed (or lands on the review alone, NOT TESTED, where it is
+//! handed none), counts
 //! the trunk's distance in the same act as the push, and reads the landed sha
 //! off the push's own range line — never off a rev-parse, which answers the tip
-//! a push that did nothing leaves behind. Every gate row reaches stdout as it is
+//! a push that did nothing leaves behind. Every check row reaches stdout as it is
 //! read and the note renders the same rows again. A refusal before the push puts
 //! the checkout back; nothing is put back after it.
 //!
@@ -66,58 +63,89 @@
 //! at `[core.flight] lanes`, cut from the trunk on first use and kept between
 //! landings, so its build cache is its own by construction and no person's
 //! checkout is ever touched by a flight. Beside it — never inside it, where a
-//! landing's own tree gate would meet it — sits one lock file, the standard
+//! landing's own tree check would meet it — sits one lock file, the standard
 //! library's file lock and no crate, blocking with no deadline because a
 //! landing is bounded by its own suite and not by a timeout this layer could
 //! pick. `land` takes it before its first fetch and holds it until it returns,
 //! whatever the exit, so the tick's landings and a person's `fleet land` queue
 //! on one object; a landing that finds it held prints the holder and the stamp
-//! it wrote there and waits. The module also carries the one wait a gate's
-//! rerun takes — the box's five-minute load against the belt's ceiling, read
-//! through a seam the caller fills, bounded by `[core.flight]
-//! rerun_wait_seconds`, whose expiry reruns anyway and says so on the row.
+//! it wrote there and waits. The module also carries the one wait a suite
+//! check's rerun takes — the box's five-minute load against the belt's
+//! ceiling, read through a seam the caller fills, bounded by
+//! `[core.flight] rerun_wait_seconds`, whose expiry reruns anyway and says so
+//! on the row.
 //!
 //! `run` is the whole run lifecycle over a workflow a pack carries: the
 //! resolution through the layers, the run directory with every input pinned and
 //! hashed onto the record, the pack's bundle and run commands, and the exit
-//! table its process answers on. `fleet plan`, `fleet fly`, `fleet autopilot`
-//! and the flight advance left core with it (fleet-layers.md § What moves,
-//! workflows-formula-fate): composition is a workflow's, and what a flight
-//! pinned, locked, capped and resumed is what a run pins, locks, caps and
-//! re-runs.
+//! table its process answers on.
+//!
+//! `doctor` is the doctor slot as a runner: every `doctor/<name>/` entry the
+//! layers resolve, its `doctor.toml`'s script run bounded, and the verdict its
+//! exit gives.
 //!
 //! `seat` is the record half of the verbs that end a seat, and `retire` is
 //! the one it carries: the orders the seat still holds are withdrawn — the
-//! assignee cleared, the order index unset, one note saying so, both writes
-//! read back — before the seat list gives its name away. The name is the
-//! reason: the next spawn takes the lowest free transient one, and an order
-//! left standing against a retired seat is inherited by whoever gets that
-//! name next. The session, the worktree and the row are the controller's,
-//! and the cli is where the two halves meet.
+//! item reopened, the assignee cleared, the order index unset, one note saying
+//! so, all three read back — before its row goes. The reason is the work: an
+//! item still ordered to a seat that no longer exists is one nobody will
+//! deliver and nothing will dispatch again. The session, the worktree and the
+//! row are the controller's, and the controller and the cli are where the two
+//! halves meet.
 //!
 //! `guard` is the four classes a pre-tool hook judges through, and it is the one
 //! module here that no verb calls: `shell-trap` and `record` are core's, because
 //! every seat has a shell and every fleet has a record, while `release-ref` and
 //! `production-write` are compiled in beside them and belong to a PACK — the
-//! class lives here, the wiring and the targets are the pack's and the project's
-//! (packs PRD § The guards). Every one of them is a pure function from a
-//! command's text and a resolved policy to a verdict, so a second agent runtime
-//! adds a reader of its own payload in the caller and reuses all four unchanged.
+//! class lives here, the wiring and the targets are the pack's and the
+//! project's. Every one of them is a pure function from a command's text and a
+//! resolved policy to a verdict, so a second agent runtime adds a reader of its
+//! own payload in the caller and reuses all four unchanged.
+//!
+//! `adapter` is the one call every adapter executable is spoken to through —
+//! the verb, the envelope, the bound and its group kill, the exit table and
+//! the last line the adapter said — and it knows no contract: it answers the
+//! row an exit is, and words that row, and every refusal of an adapter
+//! setting, naming the contract its caller passes.
+//!
+//! `agent` is the agent contract written down as types: the six verbs fleet
+//! asks the program a seat runs through its adapter — what it is, which
+//! version, the argv a session launches or resumes under, what each seat is
+//! doing and how full its window is — each verb's request and answer, and
+//! the reasons an adapter refuses by. Beside them are the trait fleet drives
+//! an agent through, the executable that answers it and its opener, speaking
+//! these types over the same `adapter` call the store's contract does.
+//!
+//! `schema` is what both contracts' JSON Schema documents are built with and
+//! checked by: the generator's helpers the store's and the agent's documents
+//! share, so their shapes cannot drift apart, and the one validator every
+//! suite holds an instance to either document with.
 
+pub mod adapter;
 pub mod add;
+pub mod agent;
 pub mod defaults;
 pub mod digest;
 pub mod embedded;
+pub mod entry;
+pub mod fs;
 pub mod guard;
+pub mod input;
 pub mod item;
 pub mod lock;
+mod os_litter;
 pub mod pack;
 pub mod policy;
+pub mod process;
 pub mod registry;
 pub mod remove;
 pub mod resolve;
+pub mod runtime;
+pub mod schema;
 pub mod seat;
+pub mod settings;
 pub mod store;
+pub mod supported;
 
 /// What a suite drives these verbs with — the applying fake store and the board
 /// over it. Compiled into this crate's own tests always, and into the library

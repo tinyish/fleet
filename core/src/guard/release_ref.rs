@@ -1,10 +1,10 @@
 //! The release-ref class: one check over one command's text.
 //!
 //! A release ref deploys, so the act it refuses is a push whose parsed
-//! destination matches the glob the project declares (packs PRD § The guards,
-//! the release-ref row). The glob is the whole of the target: this class reads
-//! no branch naming convention and evidences nothing from the tree, so a
-//! project that declares no glob is a project where this class refuses nothing.
+//! destination matches the glob the project declares. The glob is the whole of
+//! the target: this class reads no branch naming convention and evidences
+//! nothing from the tree, so a project that declares no glob is a project where
+//! this class refuses nothing.
 //!
 //! IT HAS NO ESCAPE, and that is the row's own wording — "none at this layer; a
 //! git hook beneath it holds the override". A leading assignment would put a
@@ -46,7 +46,7 @@ const REF_VALUE_FLAGS: [&str; 4] = [
 ];
 
 pub fn judge(command: &str, policy: &Policy) -> Option<Denial> {
-    let glob = policy.release_ref_glob.as_deref()?;
+    let glob = policy.targets.release_ref_glob.as_deref()?;
     if glob.is_empty() {
         return None;
     }

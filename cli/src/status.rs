@@ -1,42 +1,51 @@
-//! `fleet status` — the projection printed (cli PRD § `fleet status`).
+//! `fleet status` — the projection printed.
 //!
-//! IT READS FILES AND WRITES NOTHING. The projection the controller published
-//! and the policy in force are the two instruments; the process table is not
-//! one of them, because a running process is not what makes a seat one of this
-//! fleet's.
+//! IT READS, AND IT WRITES NOTHING. The projection the controller published,
+//! the policy in force, the event stream the runs are read off and the store of
+//! every project this machine registers, which the open holds are read off, are
+//! the four instruments; the process table is not one of them, because a
+//! running process is not what makes a seat one of this fleet's.
 //!
 //! THE PROJECTION IS THE ONE INSTRUMENT THIS VERB REFUSES WITHOUT (exit 5).
-//! The policy prints what it could not read in its own sections and the page
-//! around them still prints, with the exit table's could-not-tell at the end
-//! — a page that stopped at its second section would hide the ones that had
-//! answers.
+//! The policy, the stream and the stores print what they could not read in
+//! their own sections and the page around them still prints, with the exit
+//! table's could-not-tell at the end — a page that stopped at its second
+//! section would hide the ones that had answers.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fleet_controller::events;
 use fleet_controller::policy::{self as controller_policy, Policy};
+use fleet_controller::project::{open_store, resolve_from};
 use fleet_controller::projection::{self, Projection, SeatRow};
 use fleet_controller::routines::RoutineRow;
-use fleet_controller::seat::COLLECTOR_STALE_POLLS;
+use fleet_controller::runs::{self, registered_roots, CapHold, Engine, Reading, Runs, Standing};
 use fleet_controller::{clock, config, platform};
 use fleet_core::item::{rules, Stop};
 use fleet_core::policy as core_policy;
 
-use crate::exit::Exit;
+use crate::envelope;
+use crate::exit::{refuse_stop, Exit};
 
-/// The published document, under the machine directory.
-const PROJECTION: &str = "projection.json";
+/// The verb's name, as its refusal line and its document both spell it.
+const VERB: &str = "status";
 
-/// The machine's own file, whose `[controller]` object overrides the policy
-/// file's keys — read here so the threshold this page measures against is the
-/// one the controller fires `suggest-rest` at.
-const CONFIG: &str = "config.json";
+/// How far back the runs section lists a failed run, in hours.
+///
+/// A WINDOW AND NOT A LAST-READ MARK. "Failed since you last looked" needs a
+/// mark of when somebody last looked, and that mark is a file this verb would
+/// write — and it writes nothing. A day covers a night's flight and the morning
+/// that reads it; a failure older than that is counted on the page and left to
+/// the stream to list.
+const FAILED_WINDOW_HOURS: u64 = 24;
 
 /// What `status` takes. The two flags are mutually exclusive at the parser, so
 /// the pair refuses with clap's own usage line and the exit table's row 2.
 #[derive(clap::Args)]
 pub struct StatusArgs {
-    /// print the projection document verbatim
+    /// print the projection as one JSON document, in the envelope
     #[arg(long)]
     pub json: bool,
 
@@ -49,30 +58,28 @@ pub fn status_command(args: &StatusArgs) -> Exit {
     let mut out = std::io::stdout();
     match run(args, &mut out) {
         Ok(exit) => exit,
-        Err(stop) => {
-            eprintln!("fleet status: {}", stop.message);
-            Exit::from_status(stop.code).unwrap_or(Exit::CouldNotTell)
-        }
+        Err(stop) => refuse_stop(VERB, &stop, args.json),
     }
 }
 
 fn run(args: &StatusArgs, out: &mut dyn Write) -> Result<Exit, Stop> {
     let machine_dir = platform::machine_dir();
-    let path = machine_dir.join(PROJECTION);
+    let path = projection::path_in(&machine_dir);
     let body = read_projection(&path)?;
 
-    // --json is the document and not a rendering of it, so the bytes go out
-    // whole. The parse above still ran: an unparsable document is the same
-    // could-not-tell whichever flag asked for it.
+    // --json is the document and not a rendering of it: the projection as
+    // published, whole, as the envelope's data on one line. The parse above
+    // still ran, so a document the page would refuse is refused here too, and
+    // nothing past the projection is read.
     if args.json {
-        out.write_all(body.text.as_bytes())
-            .map_err(|e| wrote_nothing(&e))?;
+        let data = as_data(&body.text, &path)?;
+        writeln!(out, "{}", envelope::ok(VERB, &data)).map_err(|e| wrote_nothing(&e))?;
         return Ok(Exit::Done);
     }
 
     let read = Read::taken(&machine_dir, &body.document);
     if let Some(seat) = args.seat.as_deref() {
-        one_seat(out, &body.document, &read, seat)?;
+        one_seat(out, &machine_dir, &body.document, &read, seat)?;
         return Ok(said(&read.unread()));
     }
 
@@ -128,6 +135,19 @@ fn read_projection(path: &Path) -> Result<Body, Stop> {
     Ok(Body { text, document })
 }
 
+/// The published projection as the envelope's `data`: the file's own JSON
+/// value, every key it holds, whatever this binary's type reads of it. The
+/// text has already parsed once, so this refusal is the same one
+/// [`read_projection`] would say.
+fn as_data(text: &str, path: &Path) -> Result<serde_json::Value, Stop> {
+    serde_json::from_str(text).map_err(|e| {
+        Stop::could_not_tell(format!(
+            "the projection at {} does not parse: {e}",
+            path.display()
+        ))
+    })
+}
+
 /// Everything the page needs beside the projection, each instrument's failure
 /// kept as its own answer rather than folded into an absence.
 struct Read {
@@ -135,32 +155,45 @@ struct Read {
     stale: bool,
     policy: Result<Policy, String>,
     rules: Result<Vec<RuleRow>, String>,
+    runs: Result<RunsRead, String>,
 }
 
 impl Read {
     fn taken(machine_dir: &Path, document: &Projection) -> Read {
         let age = clock::seconds_since_stamp(&document.generated_at);
-        let window = document.fleet.poll_seconds * COLLECTOR_STALE_POLLS;
         // A stamp nobody can date is NOT fresh: the collector's own rule, so a
         // page and a refused `rest` cannot disagree about the same document.
-        let stale = age.map(|age| age > window).unwrap_or(true);
+        let stale = !projection::is_fresh(age, document.fleet.poll_seconds);
         let policy_file = PathBuf::from(&document.fleet.path);
         Read {
             age,
             stale,
             policy: effective_policy(&policy_file, machine_dir),
             rules: read_rules(&policy_file),
+            runs: read_runs(&events::path_in(machine_dir), machine_dir),
         }
     }
 
     /// Every instrument here that would not answer. The page names each of
     /// them in its own section too; this is what stderr and the exit read.
     fn unread(&self) -> Vec<&str> {
-        [self.policy.as_ref().err(), self.rules.as_ref().err()]
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect()
+        [
+            self.policy.as_ref().err(),
+            self.rules.as_ref().err(),
+            self.runs.as_ref().err(),
+            self.runs
+                .as_ref()
+                .ok()
+                .and_then(|runs| runs.capped.as_ref().err()),
+            self.runs
+                .as_ref()
+                .ok()
+                .and_then(|runs| runs.holds.as_ref().err()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect()
     }
 }
 
@@ -175,7 +208,7 @@ fn effective_policy(policy_file: &Path, machine_dir: &Path) -> Result<Policy, St
             policy_file.display()
         )
     })?;
-    let Ok(machine) = config::read(&machine_dir.join(CONFIG)) else {
+    let Ok(machine) = config::read(&config::path_in(machine_dir)) else {
         return Ok(file);
     };
     let over = controller_policy::overrides_in(machine.controller.as_ref());
@@ -184,7 +217,7 @@ fn effective_policy(policy_file: &Path, machine_dir: &Path) -> Result<Policy, St
 
 /// One `[[core.flight.rules]]` entry as the page prints it.
 struct RuleRow {
-    /// The match clause, in the words the matcher reads it by.
+    /// The match clause, in words a person reads it by.
     clause: String,
     /// The keys this rule sets, in [`rules::KEYS`] order.
     sets: Vec<String>,
@@ -205,12 +238,11 @@ fn rule_rows(value: Option<&core_policy::Value>) -> Vec<RuleRow> {
     entries
         .iter()
         // An entry that is not a table declares no clause and no value, which
-        // is the matcher's own reading of one, so neither counts a rule.
+        // is nothing to print, so neither counts a rule.
         .filter_map(|entry| entry.as_table())
         .map(|rule| {
             let filled = rules::Effective {
                 review: string_of(rule.get("review")),
-                gate: string_of(rule.get("gate")),
             };
             RuleRow {
                 clause: clause_of(rule.get("match")),
@@ -224,8 +256,8 @@ fn rule_rows(value: Option<&core_policy::Value>) -> Vec<RuleRow> {
         .collect()
 }
 
-/// The clause in the same two halves the matcher tests: the item's own type and
-/// its own labels, both optional, neither inherited.
+/// The clause in its two halves: the item's own type and its own labels, both
+/// optional, neither inherited.
 fn clause_of(value: Option<&core_policy::Value>) -> String {
     let Some(clause) = value else {
         return String::from("every item");
@@ -249,6 +281,119 @@ fn clause_of(value: Option<&core_policy::Value>) -> String {
 
 fn string_of(value: Option<&core_policy::Value>) -> Option<String> {
     value?.as_str().map(str::to_string)
+}
+
+/// Every run the stream holds, whether each one at could-not-tell is parked,
+/// and the holds the stores still call open.
+///
+/// THE RUNS ARE THE STREAM'S AND NOT THE RUN'S RECORD OR ITS DIRECTORY. The
+/// directory holds the pins and the logs and never how the run ended; the
+/// record is open or closed, which cannot tell a failure from a close or a
+/// wait from a crash. The stream carries one row of the exit table per
+/// execution, and it is what the run pass decides every re-run on — so the
+/// page and the pass read one fold.
+///
+/// THE PARK IS THE RECORD'S, as the pass reads it: a run whose last line is
+/// `run.could_not_tell` is asked through the pass's own seam whether its record
+/// carries a `max_crashes` hold, and whether that hold is cleared. A run that
+/// could not be asked leaves the section not all read.
+///
+/// THE HOLDS ARE THE STORES' AND NOT THE STREAM'S. A hold raised or cleared on
+/// another machine, or by hand, outside fleet, wrote no line here, and the
+/// store's own open-hold listing is the one that sees those; a fold of the
+/// park and clearance lines counts them wrong.
+struct RunsRead {
+    readings: Vec<Reading>,
+    /// Why a run at could-not-tell could not be asked whether it is parked.
+    capped: Result<(), String>,
+    holds: Result<BTreeSet<String>, String>,
+}
+
+fn read_runs(path: &Path, machine_dir: &Path) -> Result<RunsRead, String> {
+    // A stream that is not there is a machine nobody has run anything on, and
+    // every count is zero. One that is there and will not open is not that, and
+    // the fold's reader would answer it as empty all the same.
+    if path.exists() {
+        std::fs::File::open(path).map_err(|e| {
+            format!(
+                "the stream at {} could not be read for the runs section: {e}",
+                path.display()
+            )
+        })?;
+    }
+    let stream = events::read_after(path, 0);
+    let (capped, unread) = capped_on(machine_dir, &stream);
+    Ok(RunsRead {
+        readings: runs::readings(&stream, &capped),
+        capped: unread,
+        holds: open_holds_on(machine_dir),
+    })
+}
+
+/// Every run whose last lifecycle line is `run.could_not_tell`, asked whether
+/// its record carries the park — the stream's fold with no park read in names
+/// exactly those — and the runs that could not be asked, as one sentence.
+fn capped_on(
+    machine_dir: &Path,
+    stream: &[events::Record],
+) -> (BTreeMap<String, CapHold>, Result<(), String>) {
+    let engine = Engine::on(machine_dir.to_path_buf());
+    let mut capped = BTreeMap::new();
+    let mut unread: Vec<String> = Vec::new();
+    for reading in runs::readings(stream, &BTreeMap::new()) {
+        if reading.standing != Standing::CouldNotTell {
+            continue;
+        }
+        match engine.capped(&reading.run) {
+            Ok(Some(park)) => {
+                capped.insert(reading.run, park);
+            }
+            Ok(None) => {}
+            Err(why) => unread.push(format!(
+                "whether {} is held could not be read: {why}",
+                reading.run
+            )),
+        }
+    }
+    let unread = match unread.is_empty() {
+        true => Ok(()),
+        false => Err(format!(
+            "the runs were not all read — {}",
+            unread.join("; ")
+        )),
+    };
+    (capped, unread)
+}
+
+/// Every hold the store of each project this machine registers still calls
+/// open, as one set.
+///
+/// MACHINE-LEVEL, because the runs are: a machine's runs span its projects, so
+/// every registered project is asked, over the roots the run pass looks a
+/// run's record up across. A root that will not resolve is skipped, as the
+/// pass skips it — a machine is not broken because one of its roots moved.
+/// A registered declared project is skipped where `config.json` names no
+/// fleet (shared.locations.R26), so the count covers only the projects this
+/// machine can act in. A store that will not answer is not skipped: a count
+/// without it is a count of some of the holds, printed as all of them.
+fn open_holds_on(machine_dir: &Path) -> Result<BTreeSet<String>, String> {
+    let mut open = BTreeSet::new();
+    for root in registered_roots(machine_dir) {
+        let Ok(here) = resolve_from(&root, machine_dir.to_path_buf(), None) else {
+            continue;
+        };
+        let holds = open_store(&here)
+            .map_err(|stop| stop.message)
+            .and_then(|store| store.holds_open().map_err(|e| e.to_string()))
+            .map_err(|e| {
+                format!(
+                    "the holds were not counted — {}'s store did not answer: {e}",
+                    root.display()
+                )
+            })?;
+        open.extend(holds.into_iter().map(|hold| hold.to_string()));
+    }
+    Ok(open)
 }
 
 // ---- the page ----------------------------------------------------------------
@@ -280,7 +425,7 @@ fn whole_page(out: &mut dyn Write, document: &Projection, read: &Read) -> Result
         out,
         "\nin flight  {}",
         match &document.in_flight {
-            Some(held) => format!("{} — {}", held.seat, held.effect),
+            Some(held) => format!("{} — {}", held.seat.machine_name(), held.effect),
             None => String::from("nothing"),
         }
     ))?;
@@ -297,6 +442,7 @@ fn whole_page(out: &mut dyn Write, document: &Projection, read: &Read) -> Result
     write(context_section(out, &document.seats, read))?;
     write(rules_section(out, read))?;
     write(routines_section(out, &document.orders))?;
+    write(runs_section(out, &read.runs))?;
     Ok(())
 }
 
@@ -323,12 +469,18 @@ fn first_line(out: &mut dyn Write, document: &Projection, read: &Read) -> std::i
     )
 }
 
+/// A seat's line, opening on its machine name [ASSUMES D13]: the name a person
+/// reads and types back, which carries the seat's own name and the tail of its
+/// id. `--json` is where the id is spelled whole.
 fn roster_row(row: &SeatRow) -> String {
-    let mut line = row.seat_dir.clone();
-    if let Some(name) = &row.chosen_name {
-        line.push_str(&format!(" ({name})"));
-    }
+    let mut line = row.seat.machine_name();
     line.push_str(&format!("  {}", row.roster_state));
+    // An unknown seat says WHY on its own line: the cause names what the host
+    // holds and what the listing names where the two disagree, and a bare
+    // `unknown` leaves the person to go and read the projection for it.
+    if let Some(cause) = &row.roster_unknown_cause {
+        line.push_str(&format!(" — {cause}"));
+    }
     if let Some(waiting) = &row.waiting_for {
         line.push_str(&format!(", waiting for {waiting}"));
     }
@@ -373,14 +525,14 @@ fn context_section(out: &mut dyn Write, seats: &[SeatRow], read: &Read) -> std::
 /// A seat with no reading prints a dash: null in the document is a measured
 /// absence and never a zero, and a zero here would read as a fresh session.
 fn context_row(row: &SeatRow, threshold: Option<u64>) -> String {
+    let seat = row.seat.machine_name();
     let Some(tokens) = row.context_tokens else {
-        return format!("{}  —", row.seat_dir);
+        return format!("{seat}  —");
     };
     match threshold {
-        None => format!("{}  {tokens} tokens", row.seat_dir),
+        None => format!("{seat}  {tokens} tokens"),
         Some(threshold) => format!(
-            "{}  {tokens} tokens, {}% of the threshold, {} left",
-            row.seat_dir,
+            "{seat}  {tokens} tokens, {}% of the threshold, {} left",
             percent_of(tokens, threshold),
             threshold.saturating_sub(tokens)
         ),
@@ -435,21 +587,152 @@ fn routines_section(out: &mut dyn Write, routines: &[RoutineRow]) -> std::io::Re
     Ok(())
 }
 
+/// The runs a person has to know about, in the order they answer them: the
+/// failures inside the window, the parks, the executions nothing could
+/// classify, the waits, and the runs still executing. A closed run is not
+/// listed, nor a cancelled one, which a person ended themselves; a failure
+/// before the window is counted and not listed. Then the holds the stores
+/// still call open, runs' and items' alike, because a park is what the
+/// morning's first read is of.
+fn runs_section(out: &mut dyn Write, read: &Result<RunsRead, String>) -> std::io::Result<()> {
+    let read = match read {
+        Ok(read) => read,
+        Err(why) => {
+            writeln!(out, "\nruns")?;
+            writeln!(out, "  {why}")?;
+            return writeln!(out, "\nholds  not counted — the stream did not read");
+        }
+    };
+    let window = FAILED_WINDOW_HOURS * 60 * 60;
+    // A stamp nobody can date is listed: a failure hidden because its line was
+    // torn is the one this section exists not to hide.
+    let recent = |reading: &&Reading| {
+        clock::seconds_since_stamp(&reading.stamp).is_none_or(|age| age <= window)
+    };
+    let of = |standing: Standing| -> Vec<&Reading> {
+        read.readings
+            .iter()
+            .filter(|reading| reading.standing == standing)
+            .collect()
+    };
+    let failed = of(Standing::Failed);
+    let listed: Vec<&Reading> = failed.iter().copied().filter(recent).collect();
+    let earlier = failed.len() - listed.len();
+    let held = of(Standing::Held);
+    let unread = of(Standing::CouldNotTell);
+    let waiting = of(Standing::Waiting);
+    let open = of(Standing::Open);
+
+    writeln!(
+        out,
+        "\nruns  {} failed in the last {FAILED_WINDOW_HOURS} hours, {} held, {} could not tell, \
+         {} waiting, {} open",
+        listed.len(),
+        held.len(),
+        unread.len(),
+        waiting.len(),
+        open.len()
+    )?;
+    for reading in [listed, held, unread, waiting, open].concat() {
+        writeln!(out, "  {}", run_row(reading))?;
+    }
+    match earlier {
+        0 => {}
+        1 => writeln!(
+            out,
+            "  1 earlier failure is not listed — `fleet event tail --type run.failed` lists it"
+        )?,
+        n => writeln!(
+            out,
+            "  {n} earlier failures are not listed — `fleet event tail --type run.failed` lists \
+             them"
+        )?,
+    }
+    // A run nobody could ask about its park is counted where the stream puts
+    // it, and the section says it is not all read.
+    if let Err(why) = &read.capped {
+        writeln!(out, "  {why}")?;
+    }
+    match &read.holds {
+        Ok(open) => writeln!(out, "\nholds  {} open", open.len()),
+        Err(why) => writeln!(out, "\nholds  not counted — {why}"),
+    }
+}
+
+/// A parked run's hold reads cleared where its record's store no longer lists
+/// it open, as the pass's own read answered.
+fn run_row(reading: &Reading) -> String {
+    let said = |key: &str| said_of(reading.said.get(key));
+    let what = match reading.standing {
+        Standing::Failed => format!("FAILED at {} — {}", reading.stamp, said("reason")),
+        Standing::Held => format!(
+            "HELD at {} on hold {}{} — nothing could classify {} execution(s)",
+            reading.stamp,
+            reading.hold.as_deref().unwrap_or("—"),
+            if reading.cleared { ", cleared" } else { "" },
+            reading.crashes
+        ),
+        // The last line quoted, as it stood: it is what could not be read, and
+        // bare it runs into the prose around it.
+        Standing::CouldNotTell => format!(
+            "could not tell at {}, {} execution(s) so far — exit {}, read {}",
+            reading.stamp,
+            reading.crashes,
+            match reading.said.get("exit").and_then(|exit| exit.as_i64()) {
+                Some(code) => code.to_string(),
+                None => String::from("on a signal"),
+            },
+            match reading.said.get("read") {
+                None | Some(serde_json::Value::Null) => String::from("nothing"),
+                Some(line) => line.to_string(),
+            }
+        ),
+        Standing::Waiting => format!("waiting since {} for {}", reading.stamp, said("wake")),
+        Standing::Open => format!("open since {}", reading.stamp),
+        Standing::Closed => format!("closed at {}", reading.stamp),
+        Standing::Cancelled => format!("cancelled, last line at {}", reading.stamp),
+    };
+    format!(
+        "{}  {}  {what}",
+        reading.run,
+        reading.workflow.as_deref().unwrap_or("—")
+    )
+}
+
+/// A payload value as one line: a string as itself, an absence as `nothing`,
+/// and anything else as the compact JSON the workflow wrote.
+fn said_of(value: Option<&serde_json::Value>) -> String {
+    match value {
+        None | Some(serde_json::Value::Null) => String::from("nothing"),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+    }
+}
+
 /// `--seat <name>`: the roster row and the context row, and nothing else.
+///
+/// The argument goes through the seat list's resolver, as every seat argument
+/// does — so it matches a name without regard to case, a machine name and the
+/// id — and the projection's row is the one keyed by the id it resolved to.
 fn one_seat(
     out: &mut dyn Write,
+    machine_dir: &Path,
     document: &Projection,
     read: &Read,
     seat: &str,
 ) -> Result<(), Stop> {
-    let Some(row) = document
-        .seats
-        .iter()
-        .find(|row| row.seat_dir == seat || row.chosen_name.as_deref() == Some(seat))
-    else {
+    let machine = config::read(&config::path_in(machine_dir)).map_err(|why| {
+        Stop::could_not_tell(format!(
+            "the seat list could not be read, so no seat can be named: {why}"
+        ))
+    })?;
+    let named = machine.resolve(seat).map_err(Stop::from)?;
+    let key = named.id.to_string();
+    let Some(row) = document.seats.iter().find(|row| row.seat.id == key) else {
         return Err(Stop::refused(format!(
-            "the projection carries no row for `{seat}` — the collector is what makes a seat one \
-             of this fleet's"
+            "the projection carries no row for `{}` — the collector is what makes a seat one \
+             of this fleet's",
+            named.machine_name()
         )));
     };
     let threshold = read

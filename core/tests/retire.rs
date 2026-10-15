@@ -1,42 +1,84 @@
 //! The record's half of `fleet seat retire`: the orders a retiring seat still
-//! holds, withdrawn before its name goes back on the pile.
+//! holds, withdrawn before its row is dropped.
 //!
-//! The applying fake store and nothing else. What is under test is which items
-//! the query names and what the three writes leave on them — no session, no
-//! worktree and no seat list, all three of which are the controller's and are
-//! asserted in its own suite.
+//! The applying fake store, and a stub adapter for the arms over `Exec`. What
+//! is under test is which items the query names and what the three writes
+//! leave on them — no session, no worktree and no seat list, all three of
+//! which are the controller's and are asserted in its own suite.
 
-use fleet_core::item::COULD_NOT_TELL;
-use fleet_core::seat::retire::{self, WITHDRAWN};
-use fleet_core::store::{Item, Orders, Row, Store};
+mod common;
+
+use common::adapter::Adapter;
+use fleet_core::entry::{self, Body, Entry, OrderWithdrawn, Withdrawal};
+use fleet_core::item::{COULD_NOT_TELL, REFUSED};
+use fleet_core::seat::actor::Actor;
+use fleet_core::seat::identity::SeatId;
+use fleet_core::seat::retire;
+use fleet_core::store::{
+    Filter, Item, ItemId, ItemSummary, Order, OrderKind, OrderState, Stamp, Status, Store,
+};
 use fleet_core::test_support::FakeStore;
 
-/// The name the incident wore: a transient seat retired while an item it was
-/// given stayed open, and handed out again to the next spawn.
-const SEAT: &str = "transient-3";
-const BY: &str = "an-architect";
+/// A transient seat's full id, which is what an order assigns to: the incident
+/// was one retired while an item it was given stayed ordered to it.
+const SEAT: &str = "018f6a2c-1d3e-7a4b-9c5d-00000c3a5e71";
+/// That seat's machine name, which is how every sentence names it.
+const LABEL: &str = "agent-0c3a5e71";
+/// Who retires it, in the typed form the entry and every write carry.
+const BY: &str = "seat:018f6a2c-1d3e-7a4b-9c5d-0000a1b2c3d4";
+/// A seat the board holds nothing against.
+const NOBODY: &str = "018f6a2c-1d3e-7a4b-9c5d-00004a8c1e37";
+
+fn seat() -> SeatId {
+    SeatId::parse(SEAT).expect("the seat's id parses")
+}
+
+fn by() -> Actor {
+    Actor::typed(BY)
+        .expect("typed")
+        .expect("the retirer is a seat")
+}
 
 const HELD: &str = "fx-held";
+
+/// The seat that takes the held item after the listing, by its full id.
+const TAKER: &str = "018f6a2c-1d3e-7a4b-9c5d-00009d2b4f60";
 const UNORDERED: &str = "fx-unordered";
 const CLOSED: &str = "fx-closed";
 const ANOTHER: &str = "fx-another-seat";
+const EPIC: &str = "fx-epic";
+
+/// The order a dispatch gave this seat, as the index reads it.
+fn an_order() -> OrderState {
+    OrderState::Ordered(Order {
+        kind: OrderKind::Dispatch,
+        by: Actor::typed("run:an-architect")
+            .expect("typed")
+            .expect("a run"),
+        seat: Some(seat()),
+        at: Stamp::parse("2026-09-14T10:40:39Z").expect("a stamp"),
+    })
+}
 
 fn item(id: &str, status: &str, assignee: &str, ordered: bool) -> Item {
     Item {
-        id: id.to_string(),
+        id: id.into(),
         title: format!("{id} · an item"),
-        status: status.to_string(),
-        assignee: Some(assignee.to_string()),
-        orders: ordered.then(|| Orders {
-            by: Some(String::from("an-architect")),
-            kind: Some(String::from("dispatch")),
-            seat: Some(SEAT.to_string()),
-            at: Some(String::from("2026-09-14T10:40:39Z")),
-            ordinal: None,
-        }),
-        has_orders_key: ordered,
+        status: Status::from(status),
+        assignee: Some(SeatId::parse(assignee).expect("the holder's id parses")),
+        order: if ordered {
+            an_order()
+        } else {
+            OrderState::None
+        },
         ..Item::default()
     }
+}
+
+/// Whether a read carries an order index — any of the two answers that are
+/// not none.
+fn ordered(read: &Item) -> bool {
+    read.order != OrderState::None
 }
 
 /// One board holding the four items the query has to tell apart: the ordered
@@ -47,7 +89,7 @@ fn board() -> FakeStore {
     store.seed(item(HELD, "open", SEAT, true));
     store.seed(item(UNORDERED, "open", SEAT, false));
     store.seed(item(CLOSED, "closed", SEAT, true));
-    store.seed(item(ANOTHER, "open", "transient-9", true));
+    store.seed(item(ANOTHER, "open", TAKER, true));
     store
 }
 
@@ -55,75 +97,276 @@ fn read(store: &FakeStore, id: &str) -> Item {
     store.show(id).expect("the store answers about the item")
 }
 
+fn timeline(store: &dyn Store, id: &str) -> Vec<Entry> {
+    store
+        .timeline(&ItemId::from(id))
+        .expect("the store answers the item's timeline")
+}
+
+/// The entry a retire leaves on each item it withdraws.
+fn withdrawn_at_retire() -> Body {
+    Body::OrderWithdrawn(OrderWithdrawn {
+        why: Withdrawal::Retire,
+        seat: Some(seat()),
+        cause: None,
+    })
+}
+
+/// The ids of the rows `held` answered, in the order it answered them.
+fn ids_of(held: &[ItemSummary]) -> Vec<String> {
+    held.iter().map(|row| row.id.to_string()).collect()
+}
+
 #[test]
 fn a_retire_withdraws_every_open_ordered_item_the_seat_still_holds() {
     let store = board();
 
-    let held = retire::held(&store, SEAT).expect("the board answers");
-    assert_eq!(held, vec![HELD.to_string()], "the query names one item");
+    let held = retire::held(&store, &seat()).expect("the board answers");
+    assert_eq!(
+        ids_of(&held),
+        vec![HELD.to_string()],
+        "the query names one item"
+    );
 
-    retire::withdraw(&store, &held, SEAT, BY).expect("the withdrawal lands");
+    retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect("the withdrawal lands");
 
     let after = read(&store, HELD);
-    assert!(
-        !after.has_orders_key,
-        "no orders key survives the withdrawal: {}",
-        after.document
+    assert_eq!(
+        after.order,
+        OrderState::None,
+        "no order index survives the withdrawal: {}",
+        after.proof.as_str()
     );
     assert!(
-        after.assignee.as_deref().unwrap_or("").trim().is_empty(),
+        after.assignee.is_none(),
         "the item reads unassigned: {:?}",
         after.assignee
     );
     assert_eq!(after.status, "open", "the item stays open");
-    let notes = after.notes.unwrap_or_default();
+    let entries = timeline(&store, HELD);
     assert_eq!(
-        notes,
-        format!("{WITHDRAWN}: {SEAT} retired by {BY}; the item stays open, unassigned"),
-        "one note, naming the seat and who retired it"
+        entries.iter().map(|entry| &entry.body).collect::<Vec<_>>(),
+        vec![&withdrawn_at_retire()],
+        "one entry, the withdrawal naming the seat"
+    );
+    assert_eq!(entries[0].by, by(), "by the retiring actor");
+}
+
+/// fleet-3e6: AN ITEM THE SEAT MARKED `in_progress` GOES BACK TO OPEN. Left
+/// `in_progress` with nobody holding it, it is out of the ready set, and no
+/// dispatch reaches it until somebody reopens it by hand — so the withdrawal
+/// reopens it, and it reads open, unassigned, unordered and ready.
+#[test]
+fn a_retire_reopens_an_item_the_seat_marked_in_progress() {
+    let store = board();
+    store.seed(item(HELD, "in_progress", SEAT, true));
+    assert!(
+        !store
+            .list(&Filter::Ready)
+            .expect("the store answers")
+            .iter()
+            .any(|row| row.id == HELD),
+        "an in_progress item is not ready, which is the whole defect"
+    );
+
+    let held = retire::held(&store, &seat()).expect("the board answers");
+    assert_eq!(ids_of(&held), vec![HELD.to_string()], "the query names it");
+    retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect("the withdrawal lands");
+
+    let after = read(&store, HELD);
+    assert_eq!(after.status, "open", "the claimed item reads open");
+    assert!(
+        after.assignee.is_none() && !ordered(&after),
+        "and unassigned and unordered: {}",
+        after.proof.as_str()
+    );
+    assert!(
+        store
+            .list(&Filter::Ready)
+            .expect("the store answers")
+            .iter()
+            .any(|row| row.id == HELD),
+        "and back in the ready set"
     );
 }
 
-/// Read beside the arm above: the three items the query must NOT name are
-/// exactly the three shapes a wider query would sweep up — an item held under
-/// no order, a closed one, and another seat's.
+/// A CLOSED ITEM IS NEVER REOPENED. The listing read the item `in_progress`,
+/// and its own seat closed it before the write — a landing keeps the assignee
+/// and the order on the item it closes — so the fence on the listed status
+/// refuses the withdrawal with nothing written, and the item stays closed.
+#[test]
+fn a_retire_whose_item_was_closed_after_the_listing_is_refused_and_reopens_nothing() {
+    let store = board();
+    store.seed(item(HELD, "in_progress", SEAT, true));
+    let held = retire::held(&store, &seat()).expect("the board answers");
+    store
+        .close(
+            &fleet_core::store::ItemId::from(HELD),
+            "landed",
+            &Actor::seat(seat()),
+        )
+        .expect("the seat lands its item after the listing");
+
+    let stop =
+        retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect_err("the item was closed");
+
+    assert_eq!(
+        stop.code, REFUSED,
+        "an item closed since the listing is the record's answer: {}",
+        stop.message
+    );
+    assert!(
+        stop.message.contains(HELD) && stop.message.contains("closed"),
+        "the refusal names the item and what it reads now: {}",
+        stop.message
+    );
+    let after = read(&store, HELD);
+    assert_eq!(after.status, "closed", "the item stays closed");
+    assert!(
+        ordered(&after) && after.assignee == Some(seat()),
+        "nothing was written: {}",
+        after.proof.as_str()
+    );
+    assert!(
+        timeline(&store, HELD).is_empty(),
+        "and no withdrawal entry either"
+    );
+}
+
+/// A ROW THE CALLER HANDS IN CLOSED is refused before any write: the fence
+/// would take the status it names, so the one guard against reopening a closed
+/// item that no listing produced is the withdrawal's own.
+#[test]
+fn a_retire_handed_a_closed_row_writes_nothing() {
+    let store = board();
+    let row = ItemSummary {
+        id: CLOSED.into(),
+        status: Status::Closed,
+        order: an_order(),
+        ..ItemSummary::default()
+    };
+
+    let stop = retire::withdraw(&store, &[row], &seat(), LABEL, &by()).expect_err("a closed row");
+
+    assert!(
+        stop.message.contains(CLOSED) && stop.message.contains("listed closed"),
+        "{}",
+        stop.message
+    );
+    assert!(store.wrote().is_empty(), "{:?}", store.wrote());
+    assert_eq!(read(&store, CLOSED).status, "closed");
+}
+
+/// Read beside `a_retire_withdraws_every_open_ordered_item_the_seat_still_holds`:
+/// the three items the query must NOT name are exactly the three shapes a
+/// wider query would sweep up — an item held under no order, a closed one, and
+/// another seat's.
 #[test]
 fn a_retire_leaves_what_the_seat_does_not_hold_under_an_open_order() {
     let store = board();
 
-    let held = retire::held(&store, SEAT).expect("the board answers");
-    retire::withdraw(&store, &held, SEAT, BY).expect("the withdrawal lands");
+    let held = retire::held(&store, &seat()).expect("the board answers");
+    retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect("the withdrawal lands");
 
     for untouched in [UNORDERED, CLOSED, ANOTHER] {
         let after = read(&store, untouched);
         assert_eq!(
-            after.assignee.as_deref(),
-            Some(if untouched == ANOTHER {
-                "transient-9"
-            } else {
-                SEAT
-            }),
+            after.assignee.map(|held| held.to_string()).as_deref(),
+            Some(if untouched == ANOTHER { TAKER } else { SEAT }),
             "{untouched} keeps its assignee"
         );
         assert!(
-            after.notes.is_none(),
-            "{untouched} carries no withdrawal note: {:?}",
-            after.notes
+            timeline(&store, untouched).is_empty(),
+            "{untouched} carries no withdrawal entry"
         );
     }
     assert!(
-        read(&store, CLOSED).has_orders_key && read(&store, ANOTHER).has_orders_key,
+        ordered(&read(&store, CLOSED)) && ordered(&read(&store, ANOTHER)),
         "the two ordered items this seat does not hold open keep their order"
     );
+}
+
+/// ANOTHER WRITER'S `orders` IS NOT AN ORDER: an item the retiring seat is
+/// assigned that carries a bare `orders` and no `fleet.orders` is neither
+/// named nor written, and the withdrawal of an item carrying both unsets
+/// fleet's key alone (fleet-4j6 AC2).
+#[test]
+fn a_retire_leaves_another_writers_orders_key_untouched() {
+    const THEIRS: &str = "fx-theirs";
+    let store = board();
+    store.seed(item(THEIRS, "open", SEAT, false));
+    for held in [THEIRS, HELD] {
+        store.plant_metadata(held, common::FOREIGN_ORDERS);
+    }
+    let before = [
+        common::foreign_of(&store, THEIRS),
+        common::foreign_of(&store, HELD),
+    ];
+
+    let held = retire::held(&store, &seat()).expect("the board answers");
+    assert_eq!(
+        ids_of(&held),
+        vec![HELD.to_string()],
+        "the query names fleet's order alone"
+    );
+    retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect("the withdrawal lands");
+
+    let theirs = read(&store, THEIRS);
+    assert_eq!(theirs.assignee, Some(seat()), "{THEIRS} keeps its assignee");
+    assert!(timeline(&store, THEIRS).is_empty(), "and carries no entry");
+    assert!(
+        !ordered(&read(&store, HELD)),
+        "fleet's own order is withdrawn"
+    );
+    assert_eq!(
+        [
+            common::foreign_of(&store, THEIRS),
+            common::foreign_of(&store, HELD),
+        ],
+        before,
+        "the other writer's key is byte-identical on both"
+    );
+}
+
+/// AN EPIC IS NEVER HELD, AND ITS ORDER IS STILL WITHDRAWN: dispatch and
+/// deliver do not count an epic as work the seat carries, but an order left
+/// on one is still an order standing against a seat that will no longer
+/// exist, and nothing would dispatch it again.
+#[test]
+fn a_retire_withdraws_an_ordered_epic_the_seat_still_names() {
+    let store = board();
+    store.seed(Item {
+        item_type: String::from("epic"),
+        ..item(EPIC, "open", SEAT, true)
+    });
+
+    let mut held = retire::held(&store, &seat()).expect("the board answers");
+    held.sort_by(|a, b| a.id.cmp(&b.id));
+    assert_eq!(
+        ids_of(&held),
+        vec![EPIC.to_string(), HELD.to_string()],
+        "the query names the ordered epic beside the ordered task"
+    );
+
+    retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect("the withdrawal lands");
+
+    let after = read(&store, EPIC);
+    assert!(
+        !ordered(&after) && after.assignee.is_none(),
+        "the epic reads unordered and unassigned: {}",
+        after.proof.as_str()
+    );
+    assert_eq!(after.status, "open", "the epic stays open");
 }
 
 #[test]
 fn a_retire_of_a_seat_holding_nothing_ordered_writes_nothing() {
     let store = board();
 
-    let held = retire::held(&store, "transient-4").expect("the board answers");
+    let nobody = SeatId::parse(NOBODY).expect("the id parses");
+    let held = retire::held(&store, &nobody).expect("the board answers");
     assert!(held.is_empty(), "the seat holds nothing: {held:?}");
-    retire::withdraw(&store, &held, "transient-4", BY).expect("nothing to withdraw");
+    retire::withdraw(&store, &held, &nobody, "agent-4a8c1e37", &by()).expect("nothing to withdraw");
 
     assert!(
         store.wrote().is_empty(),
@@ -138,14 +381,15 @@ fn a_retire_of_a_seat_holding_nothing_ordered_writes_nothing() {
 ///
 /// The reading is the write log plus the reads the query cannot make: `held`
 /// answers off ONE listing, so the only calls a withdrawal of one item makes
-/// are the combined update and the note — the read-back is `show`, which this
-/// log does not carry and which happens once per item written.
+/// are the combined update and the entry's append — the read-backs are the
+/// timeline and `show`, which this log does not carry and which happen once per
+/// item written.
 #[test]
-fn a_retire_withdrawing_one_item_makes_one_update_and_one_note() {
+fn a_retire_withdrawing_one_item_makes_one_update_and_one_append() {
     let store = board();
 
-    let held = retire::held(&store, SEAT).expect("the board answers");
-    retire::withdraw(&store, &held, SEAT, BY).expect("the withdrawal lands");
+    let held = retire::held(&store, &seat()).expect("the board answers");
+    retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect("the withdrawal lands");
 
     let wrote = store.wrote();
     assert_eq!(
@@ -153,18 +397,20 @@ fn a_retire_withdrawing_one_item_makes_one_update_and_one_note() {
         2,
         "two writes and no more for one withdrawn item: {wrote:?}"
     );
-    assert!(
-        wrote[0].starts_with(&format!("withdraw_order {HELD}")),
-        "the assignee and the index move together: {wrote:?}"
+    assert_eq!(
+        wrote[0],
+        format!("order_withdraw {HELD} if_assignee {SEAT} if_status open reopen {BY}"),
+        "the assignee, the index and the status move together, fenced on the seat and the \
+         status it was listed in: {wrote:?}"
     );
     assert!(
-        wrote[1].starts_with(&format!("note {HELD}")),
-        "then the one note: {wrote:?}"
+        wrote[1].starts_with(&format!("append {HELD} order_withdrawn")),
+        "then the one entry: {wrote:?}"
     );
 }
 
 /// The second half of the acceptance: a write the store will not apply stops
-/// the retire, so the CALLER never reaches the act that frees the name.
+/// the retire, so the CALLER never reaches the act that drops the seat's row.
 ///
 /// The disagreement is the one a real store will not produce on demand — the
 /// writes are recorded and thrown away — and it is what the read-back after
@@ -172,10 +418,11 @@ fn a_retire_withdrawing_one_item_makes_one_update_and_one_note() {
 #[test]
 fn a_retire_whose_withdrawal_does_not_land_refuses_and_names_the_item() {
     let store = board();
-    let held = retire::held(&store, SEAT).expect("the board answers");
+    let held = retire::held(&store, &seat()).expect("the board answers");
     store.ignore_writes();
 
-    let stop = retire::withdraw(&store, &held, SEAT, BY).expect_err("the read-back disagrees");
+    let stop = retire::withdraw(&store, &held, &seat(), LABEL, &by())
+        .expect_err("the read-back disagrees");
 
     assert_eq!(
         stop.code, COULD_NOT_TELL,
@@ -183,31 +430,84 @@ fn a_retire_whose_withdrawal_does_not_land_refuses_and_names_the_item() {
         stop.message
     );
     assert!(
-        stop.message.contains(HELD) && stop.message.contains("orders key"),
+        stop.message.contains(HELD) && stop.message.contains("order index"),
         "the stop names the item and what is still on it: {}",
         stop.message
     );
     let after = read(&store, HELD);
     assert!(
-        after.has_orders_key && after.assignee.as_deref() == Some(SEAT),
-        "the item is as it was, so the name must not be freed: {}",
-        after.document
+        ordered(&after) && after.assignee == Some(seat()),
+        "the item is as it was, so the seat's row must not be dropped: {}",
+        after.proof.as_str()
+    );
+}
+
+/// fleet-reb: an item another seat took between the listing and the write is
+/// the record's answer. The withdrawal is fenced on the retiring seat — the
+/// contract's `if_assignee`, which this fake keeps — so it is REFUSED with
+/// nothing written, and the new holder's claim and order stand.
+#[test]
+fn a_retire_whose_item_moved_to_another_seat_is_refused_and_writes_nothing() {
+    let store = board();
+    let held = retire::held(&store, &seat()).expect("the board answers");
+    store
+        .update(
+            &fleet_core::store::ItemId::from(HELD),
+            &fleet_core::store::Update::assignee(
+                SeatId::parse(TAKER).expect("the other seat's id parses"),
+            ),
+            &fleet_core::test_support::the_test(),
+        )
+        .expect("another seat takes the item after the listing");
+
+    let stop =
+        retire::withdraw(&store, &held, &seat(), LABEL, &by()).expect_err("the holder moved");
+
+    assert_eq!(
+        stop.code, REFUSED,
+        "an item somebody else holds is the record's answer: {}",
+        stop.message
+    );
+    assert!(
+        stop.message.contains(HELD)
+            && stop
+                .message
+                .contains(&format!("`{LABEL}` no longer holds it"))
+            && stop.message.contains(&format!("`{TAKER}`")),
+        "the refusal names the item, the retiring seat and the holder now: {}",
+        stop.message
+    );
+    let after = read(&store, HELD);
+    assert!(
+        ordered(&after) && after.assignee == SeatId::parse(TAKER).ok(),
+        "nothing was written: {}",
+        after.proof.as_str()
+    );
+    assert!(
+        timeline(&store, HELD).is_empty(),
+        "and no withdrawal entry either"
     );
 }
 
 /// A board nobody could read is a QUESTION and never an empty hold: a retire
-/// that took silence for "this seat holds nothing" would free the name with the
+/// that took silence for "this seat holds nothing" would drop the row with the
 /// order still standing, which is the whole defect.
 #[test]
 fn a_retire_that_cannot_read_the_board_refuses_rather_than_reading_no_hold() {
     let store = FakeStore {
-        unreadable: Some(String::from("`bd` could not be run")),
+        unreadable: Some(String::from("`tracker` could not be run")),
         held: [(
             SEAT.to_string(),
-            vec![Row {
-                id: HELD.to_string(),
-                status: String::from("open"),
-                has_orders_key: true,
+            vec![ItemSummary {
+                id: HELD.into(),
+                title: String::new(),
+                status: Status::Open,
+                order: an_order(),
+                item_type: String::from("task"),
+                labels: Vec::new(),
+                assignee: None,
+                run: None,
+                foreign: Vec::new(),
             }],
         )]
         .into_iter()
@@ -215,7 +515,7 @@ fn a_retire_that_cannot_read_the_board_refuses_rather_than_reading_no_hold() {
         ..FakeStore::default()
     };
 
-    let stop = retire::held(&store, SEAT).expect_err("an unreadable board is no reading");
+    let stop = retire::held(&store, &seat()).expect_err("an unreadable board is no reading");
 
     assert_eq!(stop.code, COULD_NOT_TELL, "{}", stop.message);
     assert!(
@@ -223,4 +523,106 @@ fn a_retire_that_cannot_read_the_board_refuses_rather_than_reading_no_hold() {
         "the store's own cause reaches the caller: {}",
         stop.message
     );
+}
+
+// ---- over an adapter ---------------------------------------------------------
+
+/// The row the listing answered for the held item, `in_progress` as its seat
+/// left it.
+fn an_in_progress_row() -> ItemSummary {
+    ItemSummary {
+        id: HELD.into(),
+        title: format!("{HELD} · an item"),
+        status: Status::InProgress,
+        item_type: String::from("task"),
+        order: an_order(),
+        ..ItemSummary::default()
+    }
+}
+
+/// OVER AN ADAPTER THE RETIRE IS ONE `order.withdraw` PER ITEM, carrying its
+/// fences and the reopen as the verb's own fields: the seat it retires, the
+/// status the listing read, and `reopen: true`. No read of the holder comes
+/// before it, and nothing is written after it but the entry.
+///
+/// RED-PROOF: with the retire on a withdrawal that reads the holder, reopens
+/// and then withdraws unfenced, the first call is a `show` and the item the
+/// adapter answers held by nobody is refused as moved.
+#[test]
+fn a_retire_over_an_adapter_sends_one_fenced_withdrawal_that_reopens() {
+    let adapter = Adapter::new("retire-exec");
+    let entry = Entry {
+        id: String::from("e-1"),
+        at: String::from("2026-09-25T10:00:00Z"),
+        by: by(),
+        body: withdrawn_at_retire(),
+    };
+    let after = Item {
+        id: HELD.into(),
+        title: format!("{HELD} · an item"),
+        status: Status::Open,
+        item_type: String::from("task"),
+        ..Item::default()
+    };
+    let timeline = serde_json::json!({ "schema_version": 1, "entries": [entry::to_json(&entry)] });
+    let shown = serde_json::json!({ "schema_version": 1, "item": after });
+    adapter
+        .answers("order.withdraw", &[(r#"{"schema_version":1}"#, 0)])
+        .answers("append", &[(r#"{"schema_version":1,"entry":"e-1"}"#, 0)])
+        .answers("timeline", &[(&timeline.to_string(), 0)])
+        .answers("show", &[(&shown.to_string(), 0)]);
+
+    retire::withdraw(
+        &adapter.exec(),
+        &[an_in_progress_row()],
+        &seat(),
+        LABEL,
+        &by(),
+    )
+    .expect("the withdrawal lands");
+
+    assert_eq!(
+        adapter.verbs(),
+        ["order.withdraw", "append", "timeline", "show"],
+        "one write of the item, then its entry and the two read-backs"
+    );
+    let request = adapter.request("order.withdraw", 1);
+    assert_eq!(request["id"], HELD);
+    assert_eq!(request["by"], BY);
+    assert_eq!(request["if_assignee"], SEAT, "{request}");
+    assert_eq!(request["if_status"], "in_progress", "{request}");
+    assert_eq!(request["reopen"], true, "{request}");
+}
+
+/// An item that moved between the listing and the write is the adapter's
+/// `moved` refusal, which the retire reads as the record's answer: refused,
+/// naming the item and carrying the adapter's words, and nothing after it is
+/// sent.
+#[test]
+fn a_retire_over_an_adapter_whose_row_moved_is_refused_and_sends_nothing_more() {
+    let adapter = Adapter::new("retire-exec-moved");
+    let refused = serde_json::json!({
+        "schema_version": 1,
+        "refused": { "reason": "moved", "message": format!("{HELD} is held by {TAKER}") },
+    });
+    adapter.answers("order.withdraw", &[(&refused.to_string(), 1)]);
+
+    let stop = retire::withdraw(
+        &adapter.exec(),
+        &[an_in_progress_row()],
+        &seat(),
+        LABEL,
+        &by(),
+    )
+    .expect_err("the row moved");
+
+    assert_eq!(stop.code, REFUSED, "{}", stop.message);
+    assert!(
+        stop.message.starts_with(&format!(
+            "the order on {HELD} was not withdrawn: `{LABEL}` no longer holds it as it was listed"
+        )) && stop.message.contains(&format!("{HELD} is held by {TAKER}")),
+        "{}",
+        stop.message
+    );
+    assert_eq!(adapter.verbs(), ["order.withdraw"], "nothing else was sent");
 }

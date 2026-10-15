@@ -1,9 +1,11 @@
-//! The plugin shape, and `fleet prime` through the shipped binary.
+//! `fleet prime` through the shipped binary: what a session is handed at its
+//! start, read off a scratch fleet directory — the version, the pack layers
+//! and the guards on line one, the store on line two, then the resolved rules
+//! file and the seat's own open work.
 //!
-//! The manifests, the hook wiring, the shim and the probe skill are read off
-//! the tree rather than retyped here — the overlay's command list especially,
-//! because the whole claim of the hook file is that it is that list addressed
-//! through the plugin root, and a retyped copy would agree with itself.
+//! The plugin that runs it at a session's start is no longer this
+//! repository's: the claude-code pack carries it, and its own suite holds the
+//! hook wiring and the shim (fleet-jymr.5).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -12,369 +14,35 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod common;
 use common::hermetic::Hermetic;
 
-/// The address a plugin hook has and the Bash tool's PATH does not: the hook
-/// process carries `CLAUDE_PLUGIN_ROOT` and nothing else locates `bin/`.
-const HOOK_PREFIX: &str = "\"${CLAUDE_PLUGIN_ROOT}\"/bin/";
-
 static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-fn fleet_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the cli crate sits under the workspace root")
-        .to_path_buf()
-}
-
-fn read(relative: &str) -> String {
-    let path = fleet_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()))
-}
-
-fn json(relative: &str) -> serde_json::Value {
-    serde_json::from_str(&read(relative))
-        .unwrap_or_else(|e| panic!("{relative} parses as JSON: {e}"))
-}
-
-/// The `command` of every hook in one entry, in the file's order, with the
-/// type of each asserted on the way past.
-fn commands(entry: &serde_json::Value) -> Vec<String> {
-    entry["hooks"]
-        .as_array()
-        .expect("an entry carries a `hooks` array")
-        .iter()
-        .map(|hook| {
-            assert_eq!(
-                hook["type"].as_str(),
-                Some("command"),
-                "every hook here is a command hook"
-            );
-            hook["command"]
-                .as_str()
-                .expect("a command hook carries a string command")
-                .to_string()
-        })
-        .collect()
-}
 
 fn utf8(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).expect("the output is utf-8")
 }
 
-// ---- AC1: the manifests, the hooks, the shim and the skill ------------------
+// ---- `fleet prime` -----------------------------------------------------------
 
-#[test]
-fn the_plugin_manifest_names_fleet_at_the_crate_version() {
-    let doc = json(".claude-plugin/plugin.json");
-    assert_eq!(doc["name"].as_str(), Some("fleet"));
-    assert_eq!(
-        doc["version"].as_str(),
-        Some(env!("CARGO_PKG_VERSION")),
-        "the manifest's version is the cli crate's, so a bump is one edit"
-    );
-    assert!(
-        doc["description"]
-            .as_str()
-            .is_some_and(|d| !d.trim().is_empty()),
-        "the manifest carries a description"
-    );
-    assert!(
-        doc["author"]["name"]
-            .as_str()
-            .is_some_and(|n| !n.trim().is_empty()),
-        "the manifest carries an author with a name"
-    );
-}
-
-#[test]
-fn the_marketplace_lists_one_plugin_at_this_directory() {
-    let doc = json(".claude-plugin/marketplace.json");
-    assert_eq!(doc["name"].as_str(), Some("fleet"));
-    assert!(
-        doc["owner"]["name"]
-            .as_str()
-            .is_some_and(|n| !n.trim().is_empty()),
-        "the marketplace carries an owner with a name"
-    );
-    assert!(
-        doc["description"]
-            .as_str()
-            .is_some_and(|d| !d.trim().is_empty()),
-        "the marketplace carries a description"
-    );
-    let plugins = doc["plugins"]
-        .as_array()
-        .expect("the marketplace carries a `plugins` array");
-    assert_eq!(plugins.len(), 1, "one entry, and it is this directory");
-    assert_eq!(plugins[0]["name"].as_str(), Some("fleet"));
-    assert_eq!(plugins[0]["source"].as_str(), Some("./"));
-}
-
-#[test]
-fn the_session_start_hook_is_the_prime_line() {
-    let plugin = json("hooks/hooks.json");
-    let starts = plugin["hooks"]["SessionStart"]
-        .as_array()
-        .expect("the file carries a SessionStart array");
-    assert_eq!(starts.len(), 1);
-    assert_eq!(
-        commands(&starts[0]),
-        vec![format!("{HOOK_PREFIX}fleet prime")]
-    );
-}
-
-#[test]
-fn the_shim_runs_the_binary_the_seam_names() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let shim = fleet_root().join("bin/fleet");
-    let mode = std::fs::metadata(&shim)
-        .expect("the shim is on the tree")
-        .permissions()
-        .mode();
-    assert!(
-        mode & 0o111 != 0,
-        "the shim is executable; its mode is {mode:o}"
-    );
-
-    let direct = Command::new(env!("CARGO_BIN_EXE_fleet"))
-        .arg("--version")
-        .hermetic_nowhere()
-        .output()
-        .expect("the built binary runs");
-    let through = Command::new(&shim)
-        .env("FLEET_BIN", env!("CARGO_BIN_EXE_fleet"))
-        .hermetic_nowhere()
-        .arg("--version")
-        .output()
-        .expect("the shim runs");
-    assert_eq!(through.status.code(), Some(0));
-    assert_eq!(
-        utf8(through.stdout),
-        utf8(direct.stdout),
-        "the shim's answer is the binary's own"
-    );
-}
-
-#[test]
-fn the_shim_refuses_a_relative_seam() {
-    let shim = fleet_root().join("bin/fleet");
-    let out = Command::new(&shim)
-        .env("FLEET_BIN", "target/debug/fleet")
-        .arg("--version")
-        .output()
-        .expect("the shim runs");
-    assert_eq!(
-        out.status.code(),
-        Some(127),
-        "a relative seam is refused, never resolved against whatever directory the caller was left in"
-    );
-    let text = utf8(out.stderr);
-    assert!(
-        text.contains("target/debug/fleet"),
-        "the refusal names the path it was given: {text}"
-    );
-    assert!(
-        utf8(out.stdout).is_empty(),
-        "a refused shim runs nothing and prints nothing on stdout"
-    );
-}
-
-#[test]
-fn the_probe_skill_is_named_version() {
-    let skill = read("skills/version/SKILL.md");
-    assert!(
-        skill.starts_with("---\n"),
-        "the skill opens on its frontmatter"
-    );
-    let front = skill
-        .split("\n---")
-        .next()
-        .expect("the frontmatter is delimited");
-    assert!(
-        front.lines().any(|l| l.trim() == "name: version"),
-        "the frontmatter names the skill `version`: {front}"
-    );
-    assert!(
-        front
-            .lines()
-            .any(|l| l.trim_start().starts_with("description:")),
-        "the frontmatter carries a description: {front}"
-    );
-}
-
-mod lessons {
-    //! `claude-code.md` D5's and D6's fixture tests: the hook file is the
-    //! overlay's command list addressed through the one variable a hook process
-    //! carries, and a pack's skills reach a session through a link the loader
-    //! follows rather than through a copy.
-    //!
-    //! WHICH OVERLAY IS THE DOCTRINE PACK'S. The plugin root is this repository's
-    //! and this repository's project is the doctrine pack's, so the list the
-    //! plugin must equal is that pack's shadow of the file — which is where the
-    //! two classes a pack wires are wired (packs PRD § tiny, as the worked
-    //! example). The second arm holds the relationship between the two lists, so
-    //! a pack that dropped one of the default classes is caught here rather than in a
-    //! session that stopped refusing.
-
-    use super::*;
-
-    const OVERLAY: &str = "packs/tiny/overlay/per-provider/claude/hooks.json";
-    const DEFAULT_OVERLAY: &str = "core/defaults/overlay/per-provider/claude/hooks.json";
-
-    /// The Bash entry's command list out of one hooks document.
-    fn pre_tool_commands(relative: &str) -> Vec<String> {
-        let document = json(relative);
-        let pre = document["hooks"]["PreToolUse"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{relative} carries a PreToolUse array"));
-        assert_eq!(pre.len(), 1, "{relative}: one entry, matching Bash");
-        assert_eq!(pre[0]["matcher"].as_str(), Some("Bash"), "{relative}");
-        commands(&pre[0])
-    }
-
-    #[test]
-    fn the_pack_wires_the_default_classes_first_and_its_own_after_them() {
-        let defaults = pre_tool_commands(DEFAULT_OVERLAY);
-        let pack = pre_tool_commands(OVERLAY);
-
-        // The control on the prefix test below: two empty lists share a prefix,
-        // and an overlay this test could not read would pass as agreement.
-        assert!(
-            !defaults.is_empty() && pack.len() > defaults.len(),
-            "both lists were read, and the pack adds to the defaults': {defaults:?} / {pack:?}"
-        );
-        assert_eq!(
-            pack[..defaults.len()],
-            defaults[..],
-            "the pack's list BEGINS with the defaults', in order — a pack wires its own \
-             classes on top and removes none"
-        );
-        for class in ["release-ref", "production-write"] {
-            assert!(
-                pack.iter().any(|c| c.ends_with(&format!("guard {class}"))),
-                "the pack wires {class}: {pack:?}"
-            );
-            assert!(
-                !defaults
-                    .iter()
-                    .any(|c| c.ends_with(&format!("guard {class}"))),
-                "and the defaults do not, which is why the pack has to: {defaults:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_plugin_root_addresses_the_hook() {
-        let plugin = json("hooks/hooks.json");
-        let pre = plugin["hooks"]["PreToolUse"]
-            .as_array()
-            .expect("the plugin file carries a PreToolUse array");
-        assert_eq!(pre.len(), 1, "one entry, matching Bash");
-        assert_eq!(pre[0]["matcher"].as_str(), Some("Bash"));
-
-        let stripped: Vec<String> = commands(&pre[0])
-            .into_iter()
-            .map(|c| {
-                c.strip_prefix(HOOK_PREFIX)
-                    .unwrap_or_else(|| {
-                        panic!("every plugin hook is addressed through the plugin root: {c}")
-                    })
-                    .to_string()
-            })
-            .collect();
-
-        let want = pre_tool_commands(OVERLAY);
-
-        // The control on the comparison below: two empty lists are equal, and
-        // an overlay this test could not read would pass as agreement.
-        assert!(
-            !want.is_empty(),
-            "the overlay's command list was read and is not empty"
-        );
-        assert_eq!(
-            stripped, want,
-            "the plugin's commands are the overlay's, in order, addressed through the plugin root"
-        );
-    }
-
-    /// D6. The loader follows a symbolic link, so every ritual the doctrine pack
-    /// owns is LINKED into the plugin root rather than copied there. What this
-    /// pins is the shape that measurement licensed: one copy, in the pack, and
-    /// the plugin root pointing at it.
-    #[test]
-    fn the_plugin_loader_follows_a_skill_link() {
-        let root = fleet_root();
-        let skills = root.join("skills");
-
-        let mut linked = 0;
-        let mut plain = 0;
-        for entry in std::fs::read_dir(&skills).expect("the plugin's skills directory is readable")
-        {
-            let entry = entry.expect("the entry is readable");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let kind = std::fs::symlink_metadata(entry.path())
-                .expect("the entry's own kind is readable")
-                .file_type();
-            if !kind.is_symlink() {
-                // The probe skill is the plugin's own and is a real directory:
-                // it is the control that says the test below discriminates,
-                // rather than calling everything it finds a link.
-                assert_eq!(
-                    name, "version",
-                    "the only skill living in the plugin root itself is the probe"
-                );
-                plain += 1;
-                continue;
-            }
-
-            let target = std::fs::read_link(entry.path()).expect("the link's target is readable");
-            let target = target.to_string_lossy().into_owned();
-            assert_eq!(
-                target,
-                format!("../packs/tiny/skills/{name}"),
-                "{name} is linked at the pack's own path, relative, so the link \
-                 survives a checkout anywhere"
-            );
-
-            // The link is LIVE and not a stale copy: the bytes read through the
-            // plugin's path are the pack file's own.
-            let through = std::fs::read_to_string(entry.path().join("SKILL.md"))
-                .unwrap_or_else(|e| panic!("{name} resolves to a SKILL.md: {e}"));
-            let direct = read(&format!("packs/tiny/skills/{name}/SKILL.md"));
-            assert_eq!(
-                through, direct,
-                "{name} is read through the link, not copied"
-            );
-            assert!(
-                direct
-                    .lines()
-                    .any(|line| line.trim() == format!("name: {name}")),
-                "{name}'s frontmatter names it for the directory the link points at"
-            );
-            linked += 1;
-        }
-
-        assert_eq!(plain, 1, "the probe skill was found");
-        assert!(
-            linked >= 8,
-            "the pack's rituals reach the plugin root through links: {linked} found"
-        );
-    }
-}
-
-// ---- AC2: `fleet prime` -----------------------------------------------------
-
-/// A scratch tree: a working directory with no `fleet.toml` above it, a fleet
+/// A scratch tree, a checkout: a working directory with no `fleet.toml` above it, a fleet
 /// directory the binary is pointed at, and whatever else the case writes.
 struct Scratch {
     root: PathBuf,
 }
 
 impl Scratch {
+    /// A scratch tree that is a checkout: a `.git` directory at its root, which
+    /// is all the walk reads (shared.locations.R24). `fleet prime` falls back to
+    /// the machine's fleet only inside one, as a seat's worktree is.
     fn new(label: &str) -> Scratch {
+        let s = Scratch::bare(label);
+        s.dir(".git");
+        s
+    }
+
+    /// The same tree outside every checkout.
+    fn bare(label: &str) -> Scratch {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let root =
-            std::env::temp_dir().join(format!("fleet-plugin-{label}-{}-{n}", std::process::id()));
+            std::env::temp_dir().join(format!("fleet-prime-{label}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the scratch tree is created");
         Scratch { root }
@@ -452,11 +120,7 @@ fn prime(cwd: &Path, fleet_dir: &Path, env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fleet"));
     cmd.arg("prime")
         .current_dir(cwd)
-        .hermetic(&fleet_dir.join("home"), fleet_dir, None)
-        // The suite shares one process environment across arms run in
-        // parallel, so every seam a case does not set is removed rather than
-        // inherited.
-        .env_remove("FLEET_BD_BIN");
+        .hermetic(&fleet_dir.join("home"), fleet_dir);
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -464,12 +128,33 @@ fn prime(cwd: &Path, fleet_dir: &Path, env: &[(&str, &str)]) -> Output {
 }
 
 fn line_one(out: &Output) -> String {
-    assert_eq!(out.status.code(), Some(0), "prime always exits 0");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "prime exits 0 where it finds its fleet"
+    );
     utf8(out.stdout.clone())
         .lines()
         .next()
         .expect("prime prints at least one line")
         .to_string()
+}
+
+/// Line 1, line 2 and what follows them, for an arm run from a directory no
+/// project claims: its line 2 is the store's third answer, and no store is
+/// asked anything.
+fn past_line_two(text: &str) -> (&str, &str, &str) {
+    let (first, rest) = text
+        .split_once('\n')
+        .expect("prime printed more than a line");
+    let (second, rest) = rest
+        .split_once('\n')
+        .expect("prime printed more than two lines");
+    assert_eq!(
+        second, "store: none (no project here)",
+        "line 2 is the store's: {text}"
+    );
+    (first, second, rest)
 }
 
 /// `fleet pack add`, with the machine directory pointed at `fleet_dir` AND the
@@ -483,7 +168,7 @@ fn pack_add(source: &str, fleet_dir: &Path, packs_dir: &Path, lock: &Path) -> Ou
         .arg(packs_dir)
         .arg("--lock")
         .arg(lock)
-        .hermetic(&fleet_dir.join("home"), fleet_dir, None)
+        .hermetic(&fleet_dir.join("home"), fleet_dir)
         .output()
         .expect("the built binary runs")
 }
@@ -508,7 +193,7 @@ fn copy_dir(from: &Path, to: &Path) {
 fn git_fixture(root: &Path) {
     for args in [
         vec!["init", "--quiet", "-b", "main"],
-        vec!["add", "--", "fleet"],
+        vec!["add", "--all"],
         vec!["commit", "--quiet", "--no-gpg-sign", "-m", "the packs"],
         vec!["tag", "v1"],
     ] {
@@ -540,24 +225,117 @@ fn config_json(fleet_toml: &Path, children: &str) -> String {
     )
 }
 
+/// No fleet anywhere: no file above the directory and no `config.json`.
+/// Prime refuses as every project verb does (shared.locations.R25), under its
+/// own name on stderr, exit 1, and prints nothing on stdout.
 #[test]
-fn with_no_config_anywhere_prime_says_so_in_one_line() {
+fn with_no_fleet_anywhere_prime_refuses() {
     let s = Scratch::new("no-config");
     let cwd = s.dir("cwd");
     let fleet_dir = s.dir("fleet-dir");
 
     let out = prime(&cwd, &fleet_dir, &[]);
-    assert_eq!(out.status.code(), Some(0));
-    let text = utf8(out.stdout);
-    assert_eq!(text.lines().count(), 1, "line 1 alone: {text}");
+    assert_eq!(out.status.code(), Some(1), "{}", utf8(out.stderr.clone()));
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout.clone())
+    );
     let here = std::fs::canonicalize(&cwd).expect("the scratch cwd resolves");
-    assert_eq!(
-        text.trim_end(),
-        format!(
-            "fleet {} — no fleet config found above {}",
-            env!("CARGO_PKG_VERSION"),
-            here.display()
-        )
+    assert_eq!(utf8(out.stderr), no_fleet_line(&here));
+}
+
+/// The walk's no-fleet line, as `fleet prime` says it.
+fn no_fleet_line(cwd: &Path) -> String {
+    format!(
+        "fleet prime: no `fleet.toml` and no `.fleet/project.toml` above {} — `fleet create` \
+         writes one\n",
+        cwd.display()
+    )
+}
+
+/// A fleet the machine names, at `fleet-root/fleet.toml` in `s`.
+fn a_named_fleet(s: &Scratch) {
+    let fleet_toml = s.write("fleet-root/fleet.toml", "");
+    s.write("fleet-dir/config.json", &config_json(&fleet_toml, ""));
+}
+
+/// shared.locations.R24, R25: outside every checkout the machine's fleet is
+/// not a fallback, and prime refuses. The control is the same tree made a
+/// checkout, where it is primed.
+#[test]
+fn outside_every_checkout_prime_refuses_the_machine_s_fleet() {
+    let s = Scratch::bare("outside");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    a_named_fleet(&s);
+
+    let out = prime(&cwd, &fleet_dir, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", utf8(out.stderr.clone()));
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout.clone())
+    );
+    let here = std::fs::canonicalize(&cwd).expect("the scratch cwd resolves");
+    assert_eq!(utf8(out.stderr), no_fleet_line(&here));
+
+    s.dir("cwd/.git");
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.starts_with(&format!("fleet {} — packs: ", env!("CARGO_PKG_VERSION"))),
+        "{line}"
+    );
+}
+
+/// A linked worktree's `.git` is a FILE, and it is a checkout all the same:
+/// a seat's worktree is one.
+#[test]
+fn a_linked_worktree_s_git_file_is_a_checkout() {
+    let s = Scratch::bare("git-file");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    a_named_fleet(&s);
+    s.write("cwd/.git", "gitdir: /nowhere/.git/worktrees/cwd\n");
+
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.starts_with(&format!("fleet {} — packs: ", env!("CARGO_PKG_VERSION"))),
+        "{line}"
+    );
+}
+
+/// shared.locations.R24 asks for a policy file that EXISTS: a machine naming
+/// one that is gone is no fleet, even inside a checkout.
+#[test]
+fn a_named_policy_file_that_is_gone_is_no_fleet() {
+    let s = Scratch::new("gone");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    s.write(
+        "fleet-dir/config.json",
+        &config_json(&s.root.join("fleet-root/fleet.toml"), ""),
+    );
+
+    let out = prime(&cwd, &fleet_dir, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", utf8(out.stderr.clone()));
+    let here = std::fs::canonicalize(&cwd).expect("the scratch cwd resolves");
+    assert_eq!(utf8(out.stderr), no_fleet_line(&here));
+}
+
+/// The checkout matters only where the walk finds no file: an embedded
+/// fleet's own `fleet.toml` is primed outside every checkout.
+#[test]
+fn an_embedded_fleet_outside_every_checkout_is_primed() {
+    let s = Scratch::bare("embedded-outside");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    s.write("cwd/fleet.toml", "");
+
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.starts_with(&format!("fleet {} — packs: ", env!("CARGO_PKG_VERSION"))),
+        "{line}"
     );
 }
 
@@ -577,8 +355,7 @@ fn line_one_reads_the_guards_off_the_machine_policy() {
     assert_eq!(
         line,
         format!(
-            "fleet {} — packs: none installed; guards: shell-trap on, record off, \
-             release-ref on, production-write on",
+            "fleet {} — packs: none installed; guards: shell-trap on, record off",
             env!("CARGO_PKG_VERSION")
         )
     );
@@ -592,14 +369,58 @@ fn line_one_reads_the_guards_off_the_machine_policy() {
     let on_toml = t.write("fleet-root/fleet.toml", "[guards]\n");
     t.write("fleet-dir/config.json", &config_json(&on_toml, ""));
     assert!(
-        line_one(&prime(&on_cwd, &on_dir, &[]))
-            .ends_with("shell-trap on, record on, release-ref on, production-write on"),
+        line_one(&prime(&on_cwd, &on_dir, &[])).ends_with("guards: shell-trap on, record on"),
         "an untouched policy leaves every class on"
     );
 }
 
+/// The guards half names the classes the layers declare: core's two, then
+/// every class an installed pack's `guard_classes` turns on, in the order the
+/// classes run — and one the fleet switches off still prints, as off. The
+/// doctrine-shaped pack declares both of the other two, and the line names all
+/// four.
+///
+/// RED-PROOF: on the base the line names all four whatever is installed, so
+/// release-ref sits between record and production-write in the first half.
 #[test]
-fn the_rules_file_follows_line_one_verbatim() {
+fn line_one_names_the_classes_an_installed_pack_declares() {
+    let s = Scratch::new("declared");
+    s.shipped_defaults();
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    let fleet_toml = s.write(
+        "fleet-root/fleet.toml",
+        "[guards]\nproduction-write.enabled = false\n",
+    );
+    s.write("fleet-dir/config.json", &config_json(&fleet_toml, ""));
+    s.pack(
+        "the-opinion",
+        "opinion",
+        "guard_classes = [\"production-write\"]\n",
+    );
+
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.ends_with("guards: shell-trap on, record on, production-write off"),
+        "{line}"
+    );
+
+    std::fs::remove_dir_all(fleet_dir.join("packs/the-opinion")).expect("the pack is removed");
+    for name in ["tiny", "ts"] {
+        copy_dir(
+            &fleet_core::test_support::fixture_pack(name),
+            &fleet_dir.join("packs").join(name),
+        );
+    }
+    let line = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        line.ends_with("guards: shell-trap on, record on, release-ref on, production-write off"),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_rules_file_follows_the_first_two_lines_verbatim() {
     let s = Scratch::new("rules");
     s.shipped_defaults();
     let cwd = s.dir("cwd");
@@ -613,14 +434,52 @@ fn the_rules_file_follows_line_one_verbatim() {
     let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0));
     let text = utf8(out.stdout);
-    let (first, rest) = text
-        .split_once('\n')
-        .expect("prime printed more than a line");
+    let (first, _, rest) = past_line_two(&text);
     assert!(
         first.contains("packs: sole"),
         "line 1 names the installed pack: {first}"
     );
-    assert_eq!(rest, rules, "the rules follow line 1 byte for byte");
+    assert_eq!(rest, rules, "the rules follow line 2 byte for byte");
+}
+
+/// fleet-4fw: an installed pack whose import is not installed is named on line
+/// 1, with the line that adds it read off the importer's own line in the lock —
+/// the session that meets it is told before any run is refused.
+#[test]
+fn line_one_names_an_import_that_is_not_installed_and_the_line_that_adds_it() {
+    let s = Scratch::new("absent-import");
+    s.shipped_defaults();
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    let fleet_toml = s.write("fleet-root/fleet.toml", "");
+    s.write("fleet-dir/config.json", &config_json(&fleet_toml, ""));
+    s.pack(
+        "tiny",
+        "tiny",
+        "\n[imports.ts]\nsource = \"../ts\"\nversion = \"0.1.0\"\n",
+    );
+    fleet_core::lock::write(
+        &fleet_dir.join(fleet_core::lock::LOCK),
+        &[fleet_core::lock::Entry {
+            source: "https://example.invalid/o/fleet//packs/tiny".into(),
+            name: Some("tiny".into()),
+            version: "v1".into(),
+            commit: "0".repeat(40),
+            fetched: "2026-09-23T00:00:00Z".into(),
+            tree: None,
+        }],
+    )
+    .expect("the lock is written");
+
+    let first = line_one(&prime(&cwd, &fleet_dir, &[]));
+    assert!(
+        first.contains(
+            "packs: tiny (`tiny` imports `ts`, which is not installed — \
+             `fleet pack add https://example.invalid/o/fleet//packs/ts --version v1` adds it); \
+             guards:"
+        ),
+        "{first}"
+    );
 }
 
 /// Three claims in one fixture, each of which a plausible wrong reading gets
@@ -651,9 +510,7 @@ fn the_highest_layer_carrying_the_rules_file_is_the_one_printed() {
     let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0));
     let text = utf8(out.stdout);
-    let (first, rest) = text
-        .split_once('\n')
-        .expect("prime printed more than a line");
+    let (first, _, rest) = past_line_two(&text);
     assert!(
         first.contains("packs: alpha, zeta"),
         "the INSTALLED layers are named top first, sorted: {first}"
@@ -669,15 +526,16 @@ fn the_highest_layer_carrying_the_rules_file_is_the_one_printed() {
     );
 }
 
-/// `pack add` of the two shipped packs, then `prime` over what it installed.
+/// `pack add` of a pack and the pack it imports, then `prime` over what it
+/// installed.
 ///
-/// The source is a repository holding this tree's two pack directories at their
-/// own paths, and not a clone of the whole checkout: the verb clones what it is
-/// pointed at, and a local clone of this repository copied 1.6 GB in 8 seconds
-/// on the box this was written on, per run, growing with the history. What the
-/// arm is about — the subdirectory form, the layering check the DEFAULTS'
-/// registry gates, and the bytes that land — is carried by the pack
-/// directories, which are COPIED here rather than retyped.
+/// The source is a repository holding the two fixture packs — tiny, shaped as
+/// the doctrine pack, and ts, the runtime pack it imports — at paths of their
+/// own, COPIED from the fixture tree rather than retyped. What the arm is about
+/// is fleet's: the subdirectory form, the layering check the DEFAULTS'
+/// registry gates (tiny shadows four of the paths it lists), and the bytes
+/// that land. Whether the real doctrine pack passes the same gate is its own
+/// suite's, in the fleet-packs repository, against a pinned fleet.
 ///
 /// ts first, then tiny — one of the orders `check_layering` accepts, since it
 /// lays each add by the imports and not by the install sequence; the core
@@ -685,27 +543,27 @@ fn the_highest_layer_carrying_the_rules_file_is_the_one_printed() {
 /// the binary's defaults are materialized first so the registry rule the adds
 /// pass is the shipped one.
 #[test]
-fn the_shipped_packs_install_from_a_checkout_and_prime_reads_them() {
+fn a_pack_and_its_import_install_from_a_checkout_and_prime_reads_them() {
     let s = Scratch::new("tiny-install");
     let cwd = s.dir("cwd");
     let fleet_dir = s.dir("fleet-dir");
     let source = s.dir("source");
     s.shipped_defaults();
 
-    const SHIPPED: [&str; 2] = ["ts", "tiny"];
-    for name in SHIPPED {
+    const PACKS: [&str; 2] = ["ts", "tiny"];
+    for name in PACKS {
         copy_dir(
-            &fleet_root().join("packs").join(name),
-            &source.join("fleet/packs").join(name),
+            &fleet_core::test_support::fixture_pack(name),
+            &source.join(name),
         );
     }
     git_fixture(&source);
 
     let packs_dir = fleet_dir.join("packs");
     let lock = fleet_dir.join("packs.lock");
-    for name in SHIPPED {
+    for name in PACKS {
         let out = pack_add(
-            &format!("{}//fleet/packs/{name}", text_of(&source)),
+            &format!("{}//{name}", text_of(&source)),
             &fleet_dir,
             &packs_dir,
             &lock,
@@ -731,13 +589,13 @@ fn the_shipped_packs_install_from_a_checkout_and_prime_reads_them() {
     assert_eq!(
         names,
         vec!["tiny", "ts"],
-        "one lock line per shipped pack, in source order"
+        "one lock line per pack, in source order"
     );
     let ts = pinned
         .iter()
         .find(|e| e.name.as_deref() == Some("ts"))
         .expect("the lock records the ts pack");
-    assert!(ts.source.ends_with("//fleet/packs/ts"), "{}", ts.source);
+    assert!(ts.source.ends_with("//ts"), "{}", ts.source);
     assert_eq!(ts.version, "v1");
 
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
@@ -746,25 +604,28 @@ fn the_shipped_packs_install_from_a_checkout_and_prime_reads_them() {
     let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0));
     let text = utf8(out.stdout);
-    let (first, rest) = text
-        .split_once('\n')
-        .expect("prime printed more than a line");
+    let (first, _, rest) = past_line_two(&text);
     assert!(
         first.contains("packs: tiny, ts"),
-        "the doctrine pack sits on top and the runtime pack it imports beneath it: {first}"
+        "the doctrine-shaped pack sits on top and the runtime pack it imports beneath it: {first}"
     );
 
-    // Read off the tree, not off the installed copy: a comparison against what
-    // `pack add` wrote would only prove that prime read the same file twice.
-    let rules = read("packs/tiny/assets/rules.md");
+    // Read off the fixture, not off the installed copy: a comparison against
+    // what `pack add` wrote would only prove that prime read the same file
+    // twice.
+    let rules_file = fleet_core::test_support::fixture_pack("tiny").join("assets/rules.md");
+    let rules = std::fs::read_to_string(&rules_file)
+        .unwrap_or_else(|e| panic!("{} is readable: {e}", rules_file.display()));
     assert!(!rules.is_empty(), "the pack's rules file was read");
-    assert_eq!(rest, rules, "the pack's rules follow line 1 byte for byte");
+    assert_eq!(rest, rules, "the pack's rules follow line 2 byte for byte");
 }
 
 /// The fail-open contract, at the one place a layering can refuse: line 1
 /// still prints, with the refusal in place of the names; the rules are omitted,
 /// because there is no resolution to ask; the item lines still print, because
-/// they do not come from the packs; and the exit is still 0.
+/// the store the seat's worktree names by path does not come from the packs;
+/// and the exit is still 0. (A store that IS a pack's adapter is opened
+/// through that layering, and its item line says the layering's refusal.)
 #[test]
 fn a_layering_that_refuses_costs_the_names_and_nothing_else() {
     let s = Scratch::new("cycle");
@@ -773,7 +634,7 @@ fn a_layering_that_refuses_costs_the_names_and_nothing_else() {
     let fleet_dir = s.dir("fleet-dir");
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
     let row = format!(
-        "{{\"name\": \"seat-a\", \"worktrees\": {{\"demo\": {}}}}}",
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
         serde_json::Value::String(text_of(&cwd))
     );
     s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
@@ -794,9 +655,10 @@ fn a_layering_that_refuses_costs_the_names_and_nothing_else() {
         "bee",
         "\n[imports.ay]\nsource = \"./ay\"\nversion = \"1\"\n",
     );
-    let stub = s.script("bd", "#!/bin/sh\necho '[]'\n");
+    let adapter = tracker(&s, "tracker", &answers_version("1.3.0"), &answers_rows(&[]));
+    keeps_its_store_on(&s, "cwd", &adapter);
 
-    let out = prime(&cwd, &fleet_dir, &[("FLEET_BD_BIN", &text_of(&stub))]);
+    let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -811,8 +673,8 @@ fn a_layering_that_refuses_costs_the_names_and_nothing_else() {
         "the refusal stands where the names would be: {first}"
     );
     assert!(
-        first.ends_with("guards: shell-trap on, record on, release-ref on, production-write on"),
-        "and the guards, which the packs say nothing about, are still read: {first}"
+        first.ends_with("guards: shell-trap on, record on"),
+        "and the guards are still read: core's two, which no layering declares: {first}"
     );
     assert!(
         !text.contains("RULES NOBODY REACHES"),
@@ -867,7 +729,7 @@ fn a_resolution_that_refuses_reaches_line_one_too() {
         "resolve's refusal stands where the names would be: {first}"
     );
     assert!(
-        first.ends_with("guards: shell-trap on, record on, release-ref on, production-write on"),
+        first.ends_with("guards: shell-trap on, record on"),
         "and the guards are still read: {first}"
     );
     assert!(
@@ -876,6 +738,9 @@ fn a_resolution_that_refuses_reaches_line_one_too() {
     );
 }
 
+/// In Orla's worktree, the item lines are the items assigned to HER ID: every
+/// dispatch assigns the full id, so a listing by her name or her machine name
+/// would find nothing she was given.
 #[test]
 fn the_item_lines_are_this_seat_s_open_work() {
     let s = Scratch::new("items");
@@ -883,24 +748,24 @@ fn the_item_lines_are_this_seat_s_open_work() {
     let fleet_dir = s.dir("fleet-dir");
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
     let row = format!(
-        "{{\"name\": \"seat-a\", \"worktrees\": {{\"demo\": {}}}}}",
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"name\": \"Orla\", \
+         \"worktrees\": {{\"demo\": {}}}}}",
         serde_json::Value::String(text_of(&cwd))
     );
     s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
-
-    let argv = s.root.join("argv");
-    let stub = s.script(
-        "bd",
-        &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > {argv}\ncat <<'JSON'\n[\
-             {{\"id\": \"x-1\", \"title\": \"the open one\", \"status\": \"open\"}},\
-             {{\"id\": \"x-2\", \"title\": \"the moving one\", \"status\": \"in_progress\"}},\
-             {{\"id\": \"x-3\", \"title\": \"the done one\", \"status\": \"closed\"}}]\nJSON\n",
-            argv = text_of(&argv)
-        ),
+    let adapter = tracker(
+        &s,
+        "tracker",
+        &answers_version("1.3.0"),
+        &answers_rows(&[
+            ("x-1", "the open one", "open"),
+            ("x-2", "the moving one", "in_progress"),
+            ("x-3", "the done one", "closed"),
+        ]),
     );
+    keeps_its_store_on(&s, "cwd", &adapter);
 
-    let out = prime(&cwd, &fleet_dir, &[("FLEET_BD_BIN", &text_of(&stub))]);
+    let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0));
     let text = utf8(out.stdout);
     let items: Vec<&str> = text.lines().filter(|l| l.starts_with("item:")).collect();
@@ -910,11 +775,23 @@ fn the_item_lines_are_this_seat_s_open_work() {
         "open and in-progress only, in the order the tracker listed them: {text}"
     );
 
-    let asked = std::fs::read_to_string(&argv).expect("the stub recorded its arguments");
+    let listed: Vec<serde_json::Value> = calls_of(&s)
+        .into_iter()
+        .filter(|(verb, _)| verb == "list")
+        .map(|(_, request)| request)
+        .collect();
+    assert_eq!(listed.len(), 1, "one listing: {listed:?}");
     assert_eq!(
-        asked.trim(),
-        format!("-C {} list -a seat-a --json", text_of(&cwd)),
-        "the listing is asked of the row's own project root, for the row's seat"
+        listed[0]["filter"],
+        serde_json::json!({ "assignee": "01a0d1f1-0aec-765f-9abe-5c21e8a04b17" }),
+        "the listing is asked for the row's full id: {}",
+        listed[0]
+    );
+    assert_eq!(
+        listed[0]["root"],
+        serde_json::json!(text_of(&cwd)),
+        "of the row's own project root: {}",
+        listed[0]
     );
 }
 
@@ -925,13 +802,14 @@ fn a_seat_with_nothing_open_prints_none() {
     let fleet_dir = s.dir("fleet-dir");
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
     let row = format!(
-        "{{\"name\": \"seat-a\", \"worktrees\": {{\"demo\": {}}}}}",
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
         serde_json::Value::String(text_of(&cwd))
     );
     s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
-    let stub = s.script("bd", "#!/bin/sh\necho '[]'\n");
+    let adapter = tracker(&s, "tracker", &answers_version("1.3.0"), &answers_rows(&[]));
+    keeps_its_store_on(&s, "cwd", &adapter);
 
-    let out = prime(&cwd, &fleet_dir, &[("FLEET_BD_BIN", &text_of(&stub))]);
+    let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0));
     assert!(
         utf8(out.stdout).lines().any(|l| l == "item: none"),
@@ -947,13 +825,12 @@ fn a_directory_no_row_names_gets_no_item_line() {
     let fleet_dir = s.dir("fleet-dir");
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
     let row = format!(
-        "{{\"name\": \"seat-a\", \"worktrees\": {{\"demo\": {}}}}}",
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
         serde_json::Value::String(text_of(&elsewhere))
     );
     s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
-    let stub = s.script("bd", "#!/bin/sh\necho '[]'\n");
 
-    let out = prime(&cwd, &fleet_dir, &[("FLEET_BD_BIN", &text_of(&stub))]);
+    let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0));
     let text = utf8(out.stdout);
     assert!(
@@ -969,17 +846,27 @@ fn a_listing_that_cannot_be_read_is_its_own_answer() {
     let fleet_dir = s.dir("fleet-dir");
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
     let row = format!(
-        "{{\"name\": \"seat-a\", \"worktrees\": {{\"demo\": {}}}}}",
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
         serde_json::Value::String(text_of(&cwd))
     );
     s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
-    let stub = s.script("bd", "#!/bin/sh\necho 'the store is locked' >&2\nexit 4\n");
+    let adapter = tracker(
+        &s,
+        "tracker",
+        &answers_version("1.3.0"),
+        "echo 'the store is locked' >&2; exit 4",
+    );
+    keeps_its_store_on(&s, "cwd", &adapter);
 
-    let out = prime(&cwd, &fleet_dir, &[("FLEET_BD_BIN", &text_of(&stub))]);
+    let out = prime(&cwd, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0), "prime still exits 0");
     let text = utf8(out.stdout);
     assert!(
-        text.contains("item: could not be read — the listing exited Some(4) — the store is locked"),
+        text.contains(&format!(
+            "item: could not be read — {} list exited 4, which is not a row of the store \
+             contract's exit table: the store is locked",
+            text_of(&adapter)
+        )),
         "the third answer names what happened rather than reading as `none`: {text}"
     );
     assert!(
@@ -988,51 +875,425 @@ fn a_listing_that_cannot_be_read_is_its_own_answer() {
     );
 }
 
-/// `resolve_bd`'s DEFAULT branch: with no `FLEET_BD_BIN`, the tracker is the
-/// first `bd` on the CONSTRUCTED child PATH — the platform's own directory list
-/// over the home — and the `PATH` this process inherited contributes nothing.
-///
-/// The decoy is the control: it is first on the child's inherited `PATH` and on
-/// no entry of the constructed one, so it is reachable by a bare name and by
-/// nothing else.
-///
-/// macOS orders `/opt/homebrew/bin` and `/usr/local/bin` ahead of the home's
-/// `.local/bin`, and the home is the only entry a test may write into — so a
-/// `bd` installed in either of those genuinely wins, and this arm asserts
-/// against whichever file the constructed path names rather than against its
-/// own stub.
+/// A tracker that never answers costs the item line and nothing else: prime
+/// prints its third answer inside the listing's five-second bound, names that
+/// bound, and still exits 0 — a session-start hook that waited on a hung store
+/// would hold the session with it. The stub answers line 2's `version` at
+/// once, so the bound measured is the listing's alone.
 #[test]
-fn with_no_seam_the_tracker_comes_off_the_constructed_child_path() {
-    let s = Scratch::new("bd-default");
+fn a_listing_that_never_answers_is_its_own_answer_inside_the_bound() {
+    let s = Scratch::new("items-hung");
     let cwd = s.dir("cwd");
     let fleet_dir = s.dir("fleet-dir");
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
     let row = format!(
-        "{{\"name\": \"seat-a\", \"worktrees\": {{\"demo\": {}}}}}",
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
         serde_json::Value::String(text_of(&cwd))
     );
     s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
+    let adapter = tracker(&s, "tracker", &answers_version("1.3.0"), "sleep 30");
+    keeps_its_store_on(&s, "cwd", &adapter);
 
-    let home = s.dir("home");
-    let stub_argv0 = s.root.join("stub-argv0");
-    let stub = s.script(
-        "home/.local/bin/bd",
+    let started = std::time::Instant::now();
+    let out = prime(&cwd, &fleet_dir, &[]);
+    let took = started.elapsed();
+    assert_eq!(out.status.code(), Some(0), "prime still exits 0");
+    let text = utf8(out.stdout);
+    assert!(
+        text.contains(&format!(
+            "item: could not be read — {} list did not answer within 5s",
+            text_of(&adapter)
+        )),
+        "the third answer names the bound the listing outran: {text}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(7),
+        "prime answered about five seconds in, not when the tracker gave up: {took:?}"
+    );
+}
+
+/// A store adapter answering the contract from a `#!/bin/sh` stub at
+/// `relative`: it appends its verb and its request, one line per call, to
+/// [`calls_of`]'s log, answers `version` by running `version` and `list` by
+/// running `list`, and every other verb as usage.
+fn tracker(s: &Scratch, relative: &str, version: &str, list: &str) -> PathBuf {
+    let log = s.root.join("tracker-calls");
+    s.script(
+        relative,
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$0\" > {log}\ncat <<'JSON'\n[\
-             {{\"id\": \"fxitem-stub9\", \"title\": \"the constructed path\", \
-             \"status\": \"open\"}}]\nJSON\n",
-            log = text_of(&stub_argv0)
+            "#!/bin/sh\nrequest=$(cat)\nprintf '%s %s\\n' \"$1\" \"$request\" >> '{log}'\n\
+             case \"$1\" in\nversion) {version} ;;\nlist) {list} ;;\n*) exit 2 ;;\nesac\n",
+            log = text_of(&log)
+        ),
+    )
+}
+
+/// Every call the [`tracker`] stubs of `s` were handed, as `(verb, request)`.
+fn calls_of(s: &Scratch) -> Vec<(String, serde_json::Value)> {
+    std::fs::read_to_string(s.root.join("tracker-calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            let (verb, request) = line.split_once(' ').expect("a verb and its request");
+            let request = serde_json::from_str(request).expect("the request is one JSON value");
+            (verb.to_string(), request)
+        })
+        .collect()
+}
+
+/// A `version` answer naming the store `tracker` at `version`.
+fn answers_version(version: &str) -> String {
+    format!("echo '{{\"schema_version\":1,\"name\":\"tracker\",\"version\":\"{version}\"}}'")
+}
+
+/// A `list` answer of one row per `(id, title, status)`.
+fn answers_rows(rows: &[(&str, &str, &str)]) -> String {
+    let rows: Vec<String> = rows
+        .iter()
+        .map(|(id, title, status)| {
+            format!(
+                "{{\"id\":\"{id}\",\"title\":\"{title}\",\"status\":\"{status}\",\
+                 \"type\":\"task\",\"labels\":[],\"order\":{{\"state\":\"none\"}}}}"
+            )
+        })
+        .collect();
+    format!(
+        "echo '{{\"schema_version\":1,\"items\":[{}]}}'",
+        rows.join(",")
+    )
+}
+
+/// The seat's worktree at `cwd` naming `adapter` as its store, in the
+/// project's own file there: the file the item line's store is opened by.
+fn keeps_its_store_on(s: &Scratch, cwd: &str, adapter: &Path) {
+    s.write(
+        &format!("{cwd}/fleet.toml"),
+        &naming_adapter(&text_of(adapter)),
+    );
+}
+
+/// A pack on the machine carrying the store adapter `name`, its entry the
+/// `#!/bin/sh` script `body`, over the binary's own defaults: the store a
+/// project whose file names none, or names `name`, opens by name.
+fn a_store_pack(s: &Scratch, name: &str, body: &str) -> PathBuf {
+    s.shipped_defaults();
+    s.pack("a-store-pack", "a-store-pack", "version = \"0.1.0\"\n");
+    s.write(
+        &format!("fleet-dir/packs/a-store-pack/adapters/store/{name}/adapter.toml"),
+        &format!(
+            "[adapter]\nname = \"{name}\"\nkind = \"store\"\nversion = \"0.1.0\"\nentry = \"main\"\n"
         ),
     );
-    let decoy_argv0 = s.root.join("decoy-argv0");
-    let decoy = s.script(
-        "decoy/bd",
-        &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$0\" > {log}\ncat <<'JSON'\n[\
-             {{\"id\": \"fxitem-decoy9\", \"title\": \"the inherited PATH\", \
-             \"status\": \"open\"}}]\nJSON\n",
-            log = text_of(&decoy_argv0)
+    s.script(
+        &format!("fleet-dir/packs/a-store-pack/adapters/store/{name}/main"),
+        body,
+    )
+}
+
+/// A seat's rig whose tracker answers `version` at `version` and every listing
+/// with one open item, so an arm reads line 2 and the item line off one prime.
+fn tracker_rig(label: &str, version: &str) -> (Scratch, PathBuf, PathBuf) {
+    let s = Scratch::new(label);
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    let fleet_toml = s.write("fleet-root/fleet.toml", "");
+    let row = format!(
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
+        serde_json::Value::String(text_of(&cwd))
+    );
+    s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
+    let adapter = tracker(
+        &s,
+        "tracker",
+        &answers_version(version),
+        &answers_rows(&[("x-1", "the open one", "open")]),
+    );
+    keeps_its_store_on(&s, "cwd", &adapter);
+    (s, cwd, fleet_dir)
+}
+
+/// fleet-wpf0.3: line 2 is the store's own answer to the contract's `version`
+/// and the adapter that gave it, read off the seat's worktree, the root the
+/// item line reads. It COMPARES WITH NO PIN: a store at another release reads
+/// the same way as one at the pin, with no pointer and no verdict, and the
+/// item line still prints beneath it.
+#[test]
+fn line_two_is_the_store_s_own_version_and_its_adapter() {
+    for (label, version, line) in [
+        (
+            "store-at-one",
+            "1.3.0",
+            "store: tracker 1.3.0 (adapter tracker)",
         ),
+        (
+            "store-at-another",
+            "1.2.2",
+            "store: tracker 1.2.2 (adapter tracker)",
+        ),
+    ] {
+        let (_s, cwd, fleet_dir) = tracker_rig(label, version);
+        let out = prime(&cwd, &fleet_dir, &[]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "prime exits 0 where it finds its fleet"
+        );
+        let text = utf8(out.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.get(1), Some(&line), "{label}: {text}");
+        assert!(
+            lines.contains(&"item: x-1 — the open one"),
+            "{label}: the item line still prints: {text}"
+        );
+    }
+}
+
+/// The contract's stub adapter, at an absolute path whose file name is
+/// `fleet-store-stub`: it answers `version` as `stub` at `0`, and every other
+/// verb as a usage row.
+fn stub_adapter(s: &Scratch, relative: &str) -> PathBuf {
+    s.script(
+        relative,
+        "#!/bin/sh\ncat > /dev/null\n[ \"$1\" = version ] && \
+         { echo '{\"schema_version\":1,\"name\":\"stub\",\"version\":\"0\"}'; exit 0; }\nexit 2\n",
+    )
+}
+
+/// `[store] adapter = <path>` as a project's own file carries it.
+fn naming_adapter(adapter: &str) -> String {
+    format!(
+        "[store]\nadapter = {}\n",
+        serde_json::Value::String(adapter.to_string())
+    )
+}
+
+/// fleet-wpf0.3: an adapter the project's own file names answers line 2
+/// through the contract — its `version`, and the adapter by the file name of
+/// its path. Both files a project names its store in are read, an embedded
+/// fleet's `fleet.toml` and a standalone project's `.fleet/project.toml`, from
+/// a directory under the project the walk finds it from, and no seat row is
+/// needed for it: line 2 is the project's, and the item line the seat's.
+#[test]
+fn line_two_reads_the_adapter_the_project_names() {
+    for (label, file) in [
+        ("adapter-embedded", "fleet.toml"),
+        ("adapter-declared", ".fleet/project.toml"),
+    ] {
+        let s = Scratch::new(label);
+        let under = s.dir("project/src");
+        let fleet_dir = s.dir("fleet-dir");
+        let fleet_toml = s.write("fleet-root/fleet.toml", "");
+        s.write("fleet-dir/config.json", &config_json(&fleet_toml, ""));
+        let adapter = stub_adapter(&s, "adapters/fleet-store-stub");
+        s.write(
+            &format!("project/{file}"),
+            &naming_adapter(&text_of(&adapter)),
+        );
+        if file == ".fleet/project.toml" {
+            fleet_controller::lifecycle::register(&fleet_dir, &s.dir("project"), "project")
+                .expect("the declared project is registered");
+        }
+
+        let out = prime(&under, &fleet_dir, &[]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "prime exits 0 where it finds its fleet"
+        );
+        let text = utf8(out.stdout);
+        assert_eq!(
+            text.lines().nth(1),
+            Some("store: stub 0 (adapter fleet-store-stub)"),
+            "{label}: {text}"
+        );
+        assert!(
+            !text.contains("item:"),
+            "{label}: no row names this directory: {text}"
+        );
+    }
+}
+
+/// shared.locations.R26, R35: a declaration on a machine that names no fleet,
+/// and then one the machine's register does not list, is refused under the
+/// verb's name on stderr, exit 1, with nothing on stdout. The same tree
+/// registered is primed.
+#[test]
+fn a_declared_project_the_machine_does_not_register_is_refused() {
+    let s = Scratch::new("declared-unregistered");
+    s.shipped_defaults();
+    let project = s.dir("project");
+    let fleet_dir = s.dir("fleet-dir");
+    s.write(
+        "project/.fleet/project.toml",
+        "[project]\nname = \"project\"\n",
+    );
+    let here = std::fs::canonicalize(&project).expect("the project resolves");
+
+    let out = prime(&project, &fleet_dir, &[]);
+    let said = utf8(out.stderr.clone());
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout)
+    );
+    assert!(
+        said.starts_with(&format!(
+            "fleet prime: {} declares a project, and {} names no fleet whose policy file is \
+             there to run it under — `fleet create --standalone --fleet <dir>` registers it \
+             with one",
+            here.display(),
+            fleet_dir.join("config.json").display()
+        )),
+        "{said}"
+    );
+
+    a_named_fleet(&s);
+    let out = prime(&project, &fleet_dir, &[]);
+    let said = utf8(out.stderr.clone());
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        out.stdout.is_empty(),
+        "nothing on stdout: {}",
+        utf8(out.stdout)
+    );
+    assert!(
+        said.starts_with(&format!(
+            "fleet prime: {} declares a project that {} does not list — \
+             `fleet create --standalone` registers it",
+            here.display(),
+            fleet_dir.join("projects.toml").display()
+        )),
+        "{said}"
+    );
+
+    fleet_controller::lifecycle::register(&fleet_dir, &project, "project")
+        .expect("the project is registered");
+    let out = prime(&project, &fleet_dir, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", utf8(out.stderr));
+}
+
+/// fleet-wpf0.3: a store that cannot be opened, or will not answer, is line
+/// 2's own answer, and costs nothing else: prime exits 0 and the rules still
+/// follow. An adapter path that is not executable and a bare name that is
+/// neither form are refused by the opener before anything runs; an adapter
+/// that never answers `version` is cut at line 2's two-second bound.
+#[test]
+fn a_store_that_cannot_be_read_is_line_two_s_own_answer() {
+    let adapters = Scratch::new("adapter-inert");
+    let inert = adapters.write("fleet-store-stub", "#!/bin/sh\nexit 0\n");
+    let hung = adapters.script("hung", "#!/bin/sh\nsleep 30\n");
+    for (label, named, line) in [
+        (
+            "not-executable",
+            text_of(&inert),
+            format!(
+                "store: could not be read — [store] adapter names `{}`, which is not an \
+                 executable file",
+                text_of(&inert)
+            ),
+        ),
+        (
+            "neither-form",
+            String::from("tools/sqlite"),
+            String::from(
+                "store: could not be read — [store] adapter is `tools/sqlite` — it is the name \
+                 of a store adapter an installed pack carries, or an absolute path to an \
+                 adapter executable",
+            ),
+        ),
+        (
+            "no-pack-carries-it",
+            String::from("sqlite"),
+            format!(
+                "store: could not be read — no store adapter named `sqlite` in the installed \
+                 packs — `fleet pack add {}//adapters/store/sqlite --version {}` installs the \
+                 one fleet-packs carries",
+                fleet_core::supported::PINNED_PACKS_SOURCE,
+                fleet_core::supported::PINNED_PACKS
+            ),
+        ),
+        (
+            "never-answers",
+            text_of(&hung),
+            format!(
+                "store: could not be read — {} version did not answer within 2s",
+                text_of(&hung)
+            ),
+        ),
+    ] {
+        let s = Scratch::new(&format!("adapter-{label}"));
+        s.shipped_defaults();
+        let project = s.dir("project");
+        let fleet_dir = s.dir("fleet-dir");
+        s.write("project/fleet.toml", &naming_adapter(&named));
+
+        let started = std::time::Instant::now();
+        let out = prime(&project, &fleet_dir, &[]);
+        let took = started.elapsed();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{label}: prime exits 0 where it finds its fleet"
+        );
+        let text = utf8(out.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.get(1), Some(&line.as_str()), "{label}: {text}");
+        assert!(
+            lines.len() > 2,
+            "{label}: the rules still follow line 2: {text}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(4),
+            "{label}: prime answered inside line 2's bound, not when the store gave up: \
+             {took:?}"
+        );
+    }
+}
+
+/// fleet-3krx.2: a store adapter a pack carries runs on the CONSTRUCTED child
+/// PATH — the platform's own directory list over the home — and the `PATH`
+/// this process inherited contributes nothing. The pack's entry execs its
+/// tracker by bare name, as the bd pack's execs its runtime and its store's
+/// binary, so what the entry finds is the proof of which `PATH` it ran on.
+///
+/// The decoy is the control: it is first on the child's inherited `PATH` and on
+/// no entry of the constructed one, so an entry run on the inherited `PATH`
+/// reaches it and nothing else does. The tracker's name is this arm's own, so
+/// no directory the platform lists ahead of the home's `.local/bin` holds one.
+///
+/// RED-PROOF: with the adapter run on this process's own `PATH`, the entry
+/// execs the decoy and the item line is the decoy's.
+#[test]
+fn with_no_seam_the_tracker_comes_off_the_constructed_child_path() {
+    let s = Scratch::new("store-constructed");
+    let cwd = s.dir("cwd");
+    let fleet_dir = s.dir("fleet-dir");
+    let fleet_toml = s.write("fleet-root/fleet.toml", "");
+    let row = format!(
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
+        serde_json::Value::String(text_of(&cwd))
+    );
+    s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
+    // The worktree names no store: the default name, through the packs.
+    a_store_pack(
+        &s,
+        fleet_core::store::DEFAULT_ADAPTER,
+        "#!/bin/sh\nexec fx-probe-tracker \"$@\"\n",
+    );
+
+    let home = s.dir("home");
+    let stub = tracker(
+        &s,
+        "home/.local/bin/fx-probe-tracker",
+        &answers_version("1.3.0"),
+        &answers_rows(&[("fxitem-stub9", "the constructed path", "open")]),
+    );
+    let decoy = tracker(
+        &s,
+        "decoy/fx-probe-tracker",
+        &answers_version("1.3.0"),
+        &answers_rows(&[("fxitem-decoy9", "the inherited PATH", "open")]),
     );
     let decoy_dir = decoy.parent().expect("the decoy sits in a directory");
 
@@ -1041,8 +1302,11 @@ fn with_no_seam_the_tracker_comes_off_the_constructed_child_path() {
         !std::env::split_paths(&child_path).any(|dir| dir == decoy_dir),
         "the decoy is on no entry of the constructed child PATH {child_path}"
     );
-    let named = fleet_controller::platform::resolve_on_path(&child_path, "bd")
-        .expect("the constructed child PATH names a `bd` — the stub is on it");
+    assert_eq!(
+        fleet_core::process::resolve_on_path(&child_path, "fx-probe-tracker"),
+        Some(stub.clone()),
+        "the constructed child PATH names the stub"
+    );
 
     // `HOME` and `PATH` are set on the CHILD, so no arm in this binary shares
     // them and no lock is owed.
@@ -1056,70 +1320,13 @@ fn with_no_seam_the_tracker_comes_off_the_constructed_child_path() {
         &[(common::hermetic::HOME, &text_of(&home)), ("PATH", &ahead)],
     );
     assert_eq!(out.status.code(), Some(0));
-    let text = utf8(out.stdout.clone());
-    let item = text
-        .lines()
-        .find(|l| l.starts_with("item:"))
-        .unwrap_or_else(|| panic!("prime prints an item line: {text}"));
-
-    assert!(
-        !text.contains("fxitem-decoy9"),
-        "the decoy answers only a bare name resolved on the inherited PATH: {item}"
-    );
-    assert!(
-        !decoy_argv0.exists(),
-        "the decoy was never run, and it recorded: {}",
-        std::fs::read_to_string(&decoy_argv0).unwrap_or_default()
-    );
-
-    if named == stub {
-        let argv0 = std::fs::read_to_string(&stub_argv0).expect("the stub recorded its own $0");
-        assert_eq!(
-            argv0.trim(),
-            text_of(&stub),
-            "the stub was reached at the absolute path the constructed child PATH names"
-        );
-    } else {
-        assert!(
-            !stub_argv0.exists(),
-            "{} is earlier on the constructed child PATH than the stub, which ran anyway",
-            named.display()
-        );
-    }
-
-    // The positive claim, in one shape whichever file won: prime's item line
-    // carries that file's own answer.
-    let direct = Command::new(&named)
-        .arg("-C")
-        .arg(&cwd)
-        .args(["list", "-a", "seat-a", "--json"])
-        .output()
-        .expect("the resolved tracker runs");
-    let fingerprint = if direct.status.success() {
-        let rows: serde_json::Value =
-            serde_json::from_str(&utf8(direct.stdout.clone())).expect("the answer is JSON");
-        rows.as_array()
-            .and_then(|rows| rows.first())
-            .and_then(|first| first["id"].as_str())
-            .expect("the answer lists a row")
-            .to_string()
-    } else {
-        utf8(direct.stderr.clone())
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .expect("a refusing tracker says why")
-            .to_string()
-    };
-    assert!(
-        item.contains(&fingerprint),
-        "the item line carries the answer of {}, the file the constructed child PATH names: \
-         {item}",
-        named.display()
-    );
-    println!(
-        "the constructed child PATH names {} — the arm asserted against that file",
-        named.display()
+    let text = utf8(out.stdout);
+    let items: Vec<&str> = text.lines().filter(|l| l.starts_with("item:")).collect();
+    assert_eq!(
+        items,
+        vec!["item: fxitem-stub9 — the constructed path"],
+        "the entry found the tracker the constructed child PATH names, and never the decoy \
+         the inherited PATH puts first: {text}"
     );
 }
 
@@ -1128,9 +1335,11 @@ fn with_no_seam_the_tracker_comes_off_the_constructed_child_path() {
 /// than a wrong seat's (D3 of the prime spec — a cwd names a seat and proves
 /// nothing, so the weakest reading is the one taken).
 ///
-/// The tracker stub would answer with one item, and its argv file is the
-/// witness that it was never asked. The same fixture run from the root is the
-/// control: there the item line and the argv file both appear.
+/// The store is the default name's, a pack's adapter the worktree's file need
+/// not name, and its call log is the witness that it was asked nothing: no row
+/// names the subdirectory and no project file sits above it, so line 2 has no
+/// store to ask either. The same fixture run from the root is the control:
+/// there the item line appears and the listing is asked of the root.
 #[test]
 fn a_session_under_a_seat_s_worktree_gets_no_item_line() {
     let s = Scratch::new("items-descendant");
@@ -1139,23 +1348,28 @@ fn a_session_under_a_seat_s_worktree_gets_no_item_line() {
     let fleet_dir = s.dir("fleet-dir");
     let fleet_toml = s.write("fleet-root/fleet.toml", "");
     let row = format!(
-        "{{\"name\": \"seat-a\", \"worktrees\": {{\"demo\": {}}}}}",
+        "{{\"id\": \"01a0d1f1-0aec-765f-9abe-5c21e8a04b17\", \"worktrees\": {{\"demo\": {}}}}}",
         serde_json::Value::String(text_of(&root))
     );
     s.write("fleet-dir/config.json", &config_json(&fleet_toml, &row));
-
-    let argv = s.root.join("argv");
-    let stub = s.script(
-        "bd",
-        &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > {argv}\ncat <<'JSON'\n[\
-             {{\"id\": \"x-9\", \"title\": \"the descendant one\", \"status\": \"open\"}}]\nJSON\n",
-            argv = text_of(&argv)
-        ),
+    let tracker_bin = tracker(
+        &s,
+        "the-tracker",
+        &answers_version("1.3.0"),
+        &answers_rows(&[("x-9", "the descendant one", "open")]),
+    );
+    a_store_pack(
+        &s,
+        fleet_core::store::DEFAULT_ADAPTER,
+        &format!("#!/bin/sh\nexec '{}' \"$@\"\n", text_of(&tracker_bin)),
     );
 
-    let out = prime(&under, &fleet_dir, &[("FLEET_BD_BIN", &text_of(&stub))]);
-    assert_eq!(out.status.code(), Some(0), "prime always exits 0");
+    let out = prime(&under, &fleet_dir, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "prime exits 0 where it finds its fleet"
+    );
     let text = utf8(out.stdout);
     let items: Vec<&str> = text.lines().filter(|l| l.starts_with("item:")).collect();
     assert!(
@@ -1164,13 +1378,18 @@ fn a_session_under_a_seat_s_worktree_gets_no_item_line() {
          and it printed {} line(s): {text}",
         items.len()
     );
+    assert_eq!(
+        text.lines().nth(1),
+        Some("store: none (no project here)"),
+        "{text}"
+    );
     assert!(
-        !argv.exists(),
-        "the tracker was never asked, and it recorded: {}",
-        std::fs::read_to_string(&argv).unwrap_or_default()
+        calls_of(&s).is_empty(),
+        "the tracker was asked nothing, and it recorded: {:?}",
+        calls_of(&s)
     );
 
-    let out = prime(&root, &fleet_dir, &[("FLEET_BD_BIN", &text_of(&stub))]);
+    let out = prime(&root, &fleet_dir, &[]);
     assert_eq!(out.status.code(), Some(0));
     let text = utf8(out.stdout);
     let items: Vec<&str> = text.lines().filter(|l| l.starts_with("item:")).collect();
@@ -1179,10 +1398,17 @@ fn a_session_under_a_seat_s_worktree_gets_no_item_line() {
         vec!["item: x-9 — the descendant one"],
         "the same fixture run from the root itself does get the line: {text}"
     );
-    let asked = std::fs::read_to_string(&argv).expect("the stub recorded its arguments");
+    let listed: Vec<serde_json::Value> = calls_of(&s)
+        .into_iter()
+        .filter(|(verb, _)| verb == "list")
+        .map(|(_, request)| request)
+        .collect();
     assert_eq!(
-        asked.trim(),
-        format!("-C {} list -a seat-a --json", text_of(&root)),
+        listed
+            .iter()
+            .map(|request| request["root"].clone())
+            .collect::<Vec<_>>(),
+        vec![serde_json::json!(text_of(&root))],
         "and it is asked of the row's own root, never of the subdirectory"
     );
 }

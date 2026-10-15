@@ -17,10 +17,29 @@ path = "src/lib.rs"
 [features]
 test-support = []
 
-# Any crate, each with a work item that says why (Q1 of the controller PRD, as
-# re-ruled 2026-09-07). The work item that adds each of these is the observe
-# slice; it cannot be named here, because the boundary check forbids this
-# directory from naming the surrounding project.
+# tmux's client answered from the fake host server kept in a file, for the
+# suites that drive the built `fleet` and cannot hand it the in-process fake.
+# Under the feature alone, as core's `fleet-store-stub` is: this crate's own
+# tests turn it on through the dev-dependency below, so `cargo test -p
+# fleet-controller` builds it beside the test binaries, and a plain build of the
+# workspace never does. The cli builds the same file as an example of its own.
+[[bin]]
+name = "fleet-tmux-stub"
+path = "src/bin/tmux_stub.rs"
+required-features = ["test-support"]
+
+# The agent contract answered from the fake agent kept in a file, as an adapter
+# executable, for the suites that drive every agent path through the Exec with
+# no agent installed on the box. Under the feature alone, for the reason the
+# tmux stub above is; the cli builds it as an example of its own too.
+[[bin]]
+name = "fleet-agent-stub"
+path = "src/bin/agent_stub.rs"
+required-features = ["test-support"]
+
+# Any crate, each added with a work item that says why. The work item that
+# adds each of these is the observe slice; it cannot be named here, because the
+# boundary check forbids this directory from naming the surrounding project.
 #
 # serde/serde_json: config.json, the projection and the event stream are JSON,
 # and all three are external contracts other programs read.
@@ -35,8 +54,28 @@ test-support = []
 # only. Default features off: the local-zone read wants `std`, `tz-system` (the
 # zone this machine is set to) and `tzdb-zoneinfo` (the system database the two
 # target platforms both ship); the bundled database, the fat transition tables
-# and the concatenated Android format are all left out.
+# and the concatenated Android format are all left out. The UTC stamps in
+# clock.rs are written and read through it as well.
+#
+# fleet-core: the bounded runner — the process group, the deadline and the
+# drains — is core's, because the store bounds its own calls with it and core
+# may depend on no other member. The controller takes it from there rather
+# than keep a second copy; the edge runs the one way the workspace allows
+# (cli/tests/workspace.rs refuses the other). The fleet-packs pin is core's
+# too (`fleet_core::supported`), and it is the line a refusal of an agent
+# adapter no installed pack carries names. So is a seat's identity (`fleet_core::seat::identity`: the id, the fleet.toml
+# roster and the resolver), which `fleet start` renders the seat list from. So
+# are the agent contract's types (`fleet_core::agent::types`), which the Agent
+# trait's six verbs take and answer. So is what opens an agent adapter that is an executable:
+# the one adapter call (`fleet_core::adapter::exec`), the census `[agent]
+# adapter` is read through, and the pack resolution a name goes through, the
+# store opener's own. The controller takes from core its process runner, git
+# and PATH resolver, the atomic write, a seat's identity, actor and retire, the
+# agent contract with its trait and opener, the store, the item layer, the
+# policy reader, the entry kinds, the pack directories and the schema check;
+# core takes nothing from the controller.
 [dependencies]
+fleet-core = { path = "../core" }
 jiff = { version = "=0.2.35", default-features = false, features = [
     "std",
     "tz-system",
@@ -49,5 +88,9 @@ toml.workspace = true
 # This crate's own suites reach `test_support` the same way a dependent's do:
 # through a dev-dependency that turns the feature on. `cfg(test)` is not set for
 # the library an INTEGRATION test links against, so the feature is the only door.
+#
+# fleet-core the same way, for the schema check (`fleet_core::schema::check`)
+# the agent stub's own arms hold every answer it prints to.
 [dev-dependencies]
 fleet-controller = { path = ".", features = ["test-support"] }
+fleet-core = { path = "../core", features = ["test-support"] }

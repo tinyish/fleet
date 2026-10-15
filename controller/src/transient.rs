@@ -1,89 +1,68 @@
-//! The transient-seat primitives (PRD R30–R32; cli PRD § Seat).
+//! The transient-seat primitives.
 //!
 //! Three verbs — `fleet seat spawn`, `fleet seat feed`, `fleet seat retire` —
 //! as three functions over the machine directory, the adapter, the policy, the
 //! seat list and the session table. They are the primitives a pack's `dispatch`
 //! calls: the order note, the brief's content and the assignment belong to the
-//! caller, and NOTHING HERE TOUCHES THE WORK GRAPH.
+//! caller, and NOTHING HERE TOUCHES THE WORK GRAPH but [`withdrawn_from`], the
+//! record's half of a retire, which a caller hands in as its [`Withdrawal`].
 //!
 //! Everything a verb cannot work out for itself is gathered by the caller into
 //! [`Machine`], the way `effect.rs` gathers a seat into its `Target`: the
 //! project and its two directories come from the project's own policy file,
-//! which this crate cannot read because it depends on no other fleet crate. The
-//! stream and the session table are opened here from the machine directory the
-//! caller named, because a verb is one process and there is no loop holding
-//! them across a poll.
+//! which the caller resolves and hands in. The stream and the session table
+//! are opened here from the machine directory the caller named, because a
+//! verb is one process and there is no loop holding them across a poll.
 //!
 //! ## The belt's two environment overrides
 //!
 //! `FLEET_LOAD_AVERAGE` and `FLEET_CPUS` are read by [`Readings::taken`] and by
 //! nothing else in this crate. They exist so a suite can force both readings —
-//! the way the drive suite forces the agent binary with `FLEET_CLAUDE_BIN` —
+//! the way the drive suite forces the tmux binary with `FLEET_TMUX_BIN` —
 //! because an arm that read the real load average is one whose answer changes
-//! with whatever else the machine is running. A BINARY is what calls `taken`:
-//! an in-process caller hands the two numbers in on [`Machine`] instead,
+//! with whatever else the machine is running.
+//! [`crate::project::wiring::Wired::machine`] is what calls `taken`, for a binary's
+//! verbs and for the run seam's [`crate::runs::Engine`]: a suite that calls the
+//! primitives in process hands the two numbers in on [`Machine`] instead,
 //! because setting a variable in a process that is forking children races the
 //! fork.
 
-use crate::adapter::{dir_key, Agent, RemoveAnswer, RosterRead};
-use crate::clock::Clock;
 use crate::config::{self, Seat};
-use crate::effect::{self, Outcome, Target};
-use crate::events::{self, EventLog};
+use crate::effect::{self, Outcome, Target, Typed};
+use crate::events::{self, ActorRef, EventLog};
+use crate::host::{self, HostRead, PaneState};
 use crate::platform;
 use crate::policy::Policy;
+use crate::projection::dir_key;
+use crate::projection::SeatView;
 use crate::sessions::{self, Table};
+use fleet_core::agent::{self, Activity, Agent, Permissions};
+use fleet_core::process::git;
+use fleet_core::seat::actor::Actor;
+use fleet_core::seat::identity::{resolve, SeatId, SeatRef};
+use fleet_core::store::Store;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
-/// The rows of the exit table a REFUSAL can carry, as the cli PRD names them.
+/// The rows of the exit table a REFUSAL can carry: core's own.
 /// Done is not among them: a verb that answers `Ok` carries a value and not a
 /// status, and the cli turns it into 0.
-pub const REFUSED: u8 = 1;
-pub const COULD_NOT_TELL: u8 = 3;
-pub const NO_SESSION: u8 = 4;
-/// The row is a named seat where a transient one was required. Named seats are
-/// rung and rested; transient ones are fed and retired.
-pub const NOT_TRANSIENT: u8 = 6;
+pub use fleet_core::item::{COULD_NOT_TELL, NO_SESSION, REFUSED};
 
 /// A verb that stopped, with the status a script reads and the sentence a
-/// person does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Refusal {
-    pub code: u8,
-    pub message: String,
-}
-
-impl Refusal {
-    fn at(code: u8, message: impl Into<String>) -> Refusal {
-        Refusal {
-            code,
-            message: message.into(),
-        }
-    }
-
-    fn refused(message: impl Into<String>) -> Refusal {
-        Refusal::at(REFUSED, message)
-    }
-
-    /// An instrument the answer needed would not answer. Never rounded into a
-    /// clean verdict: a session nobody could ask is a question, not an absence.
-    fn could_not_tell(message: impl Into<String>) -> Refusal {
-        Refusal::at(COULD_NOT_TELL, message)
-    }
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
+/// person does: core's [`Stop`](fleet_core::item::Stop), under the name these
+/// verbs have always answered in. A could-not-tell is never rounded into a
+/// clean verdict: a session nobody could ask is a question, not an absence.
+pub use fleet_core::item::Stop as Refusal;
 
 /// Everything the three verbs are told rather than read for themselves.
 pub struct Machine<'a> {
     pub machine_dir: &'a Path,
     pub agent: &'a dyn Agent,
+    /// The host a spawned seat's session runs on (`crate::host`). A start
+    /// that fails kills its session there, so a spawn's rollback finds
+    /// nothing of it left on the host.
+    pub host: &'a dyn crate::host::Host,
     pub policy: &'a Policy,
     /// The project a transient seat's worktree is keyed under in the seat list.
     pub project: &'a str,
@@ -92,41 +71,45 @@ pub struct Machine<'a> {
     /// Where a transient seat's worktree is made.
     pub worktrees_dir: &'a Path,
     /// The belt's two machine readings, TAKEN BY THE CALLER like everything
-    /// else here. [`Readings::taken`] is what a binary passes; an in-process
-    /// caller hands the numbers in, which is what keeps the two overrides —
+    /// else here. [`Readings::taken`] is what
+    /// [`crate::project::wiring::Wired::machine`] passes; an in-process caller
+    /// hands the numbers in, which is what keeps the two overrides —
     /// the process's own environment, shared by every thread — out of a suite
     /// that runs arms in parallel and forks children while they run.
     pub readings: Readings,
-    /// The clock the one wait here whose subject is a DURATION is spent
-    /// against — [`cleared`]'s start-watch window. Every other wait a verb
-    /// reaches is on a real child's exit and stays the thread's.
-    pub clock: &'a dyn Clock,
 }
 
 impl Machine<'_> {
     fn config_path(&self) -> PathBuf {
-        self.machine_dir.join("config.json")
+        config::path_in(self.machine_dir)
     }
 
     fn stream_path(&self) -> PathBuf {
-        self.machine_dir.join("events.jsonl")
+        events::path_in(self.machine_dir)
     }
 
     fn table_path(&self) -> PathBuf {
         sessions::path_in(self.machine_dir)
     }
 
-    /// The configuration directory a spawned seat of this name comes up under
-    /// (flights PRD R13, Q1e): one per seat, under the machine directory, so
+    /// The configuration directory a spawned seat comes up under: one per
+    /// seat, under the machine directory and named by its machine name, so
     /// nothing from the person's home directory reaches a flight.
     ///
     /// The LOCATION is the machine directory's and no policy key names it: a
     /// second spelling of it is a second place a stale value can live.
-    fn config_dir_for(&self, seat: &str) -> PathBuf {
-        self.machine_dir.join(CONFIG_DIRS).join(seat)
+    fn config_dir_for(&self, seat: &Seat) -> PathBuf {
+        self.config_dir_named(&seat.machine_name())
     }
 
-    /// The directory a seat's own session row names, where it names one.
+    /// The same directory for a seat known so far only by the machine name a
+    /// claim took — which is what a rollback holds before any row reads back.
+    fn config_dir_named(&self, machine_name: &str) -> PathBuf {
+        self.machine_dir.join(CONFIG_DIRS).join(machine_name)
+    }
+
+    /// The directory a seat's own session row names, where it names one. The
+    /// table is keyed on the seat's id.
     fn recorded_config_dir(&self, seat: &str) -> Option<String> {
         sessions::read(&self.table_path())
             .0?
@@ -213,7 +196,7 @@ impl Machine<'_> {
         EventLog::open(&self.stream_path())
     }
 
-    /// One line on the stream, which is the controller's ONE ledger (R23, R25).
+    /// One line on the stream, which is the controller's ONE ledger.
     ///
     /// A failed append is reported and never swallowed: the act it journals has
     /// already happened — the marker moved, the seat was reclaimed — so a
@@ -221,6 +204,9 @@ impl Machine<'_> {
     /// It is could-not-tell rather than a refusal, which is the same shape a
     /// probe that cannot answer takes: the act stands, and the message says
     /// which line did not land.
+    ///
+    /// Every line these verbs write is about a seat, and names it as the actor
+    /// by its id.
     fn journal(
         &self,
         log: &mut EventLog,
@@ -228,52 +214,40 @@ impl Machine<'_> {
         seat: &str,
         payload: serde_json::Value,
     ) -> Result<(), Refusal> {
-        log.append(kind, seat, payload).map_err(|e| {
-            Refusal::could_not_tell(format!(
-                "{kind} for `{seat}` could not be appended to {}, so the act stands and the \
+        log.append(kind, &ActorRef::seat(seat), payload)
+            .map_err(|e| {
+                Refusal::could_not_tell(format!(
+                    "{kind} for `{seat}` could not be appended to {}, so the act stands and the \
                  ledger does not carry it: {e}",
-                self.stream_path().display()
-            ))
-        })
+                    self.stream_path().display()
+                ))
+            })
     }
 
-    /// One listing, once. `Unreadable` is could-not-tell on every verb that
-    /// asks (lessons claude-code B4): a listing that answers with nothing while
-    /// sessions are live must not read as an empty fleet.
-    ///
-    /// `config_dir` is one row's own configuration directory, and `None` the
-    /// fleet's. A session started under its own is held by its own daemon and
-    /// named by no other listing (flights PRD R13), so a verb about such a seat
-    /// reads there or sees nothing at all — which is a probe that cannot fail.
-    fn roster_under(
-        &self,
-        config_dir: Option<&Path>,
-    ) -> Result<Vec<crate::adapter::AgentRow>, Refusal> {
-        match self.agent.status(config_dir) {
-            RosterRead::Readable(rows) => Ok(rows),
-            RosterRead::Unreadable { cause } => Err(Refusal::could_not_tell(format!(
-                "the roster could not be read, so no session can be named: {cause}"
-            ))),
-        }
-    }
-
-    /// The row of the seat list this name belongs to, with the two refusals a
-    /// verb over a transient seat owes: a name nothing carries, and a named row
-    /// where a transient one was required.
-    fn transient_row(&self, seats: &[Seat], name: &str) -> Result<Seat, Refusal> {
-        let Some(row) = seats.iter().find(|seat| seat.name == name) else {
-            return Err(Refusal::refused(format!(
-                "`{name}` is not a row of this machine's seat list"
-            )));
+    /// The row of the seat list this argument names, through the one resolver
+    /// every seat argument takes, with the refusals a verb over a transient
+    /// seat owes: an argument that names no one row, and a named row where a
+    /// transient one was required.
+    fn transient_row(&self, seats: &[Seat], arg: &str) -> Result<Seat, Refusal> {
+        let refs: Vec<SeatRef> = seats.iter().map(Seat::as_ref).collect();
+        let row = match resolve(&refs, arg) {
+            Ok(index) => &seats[index],
+            Err(unresolved) => {
+                return Err(Refusal {
+                    code: unresolved.code(),
+                    message: unresolved.to_string(),
+                })
+            }
         };
         if !row.transient {
-            return Err(Refusal::at(
-                NOT_TRANSIENT,
-                format!(
-                    "`{name}` is a named seat — named seats are rung and rested, and only a \
-                     transient row is fed and retired"
+            return Err(Refusal {
+                code: crate::seat::EXIT_WRONG_SEAT_KIND,
+                message: format!(
+                    "{} is a named seat — named seats are rung and rested, and only a \
+                     transient row is fed and retired",
+                    row.machine_name()
                 ),
-            ));
+            });
         }
         Ok(row.clone())
     }
@@ -288,7 +262,10 @@ impl Machine<'_> {
             .or_else(|| row.worktrees.first())
             .map(|(_, path)| path.clone())
             .ok_or_else(|| {
-                Refusal::refused(format!("`{}` carries no worktree to act in", row.name))
+                Refusal::refused(format!(
+                    "`{}` carries no worktree to act in",
+                    row.machine_name()
+                ))
             })
     }
 }
@@ -313,9 +290,10 @@ pub struct Readings {
 
 impl Readings {
     /// The two overrides first, then the platform. This is the ONE function in
-    /// this crate that reads them, and a binary is its only caller: an
-    /// in-process caller builds a `Readings` instead, because setting a
-    /// variable in a process that is forking children races the fork.
+    /// this crate that reads them, and [`crate::project::wiring::Wired::machine`]
+    /// is its only caller: an in-process caller of the primitives builds a
+    /// `Readings` instead, because setting a variable in a process that is
+    /// forking children races the fork.
     pub fn taken() -> Readings {
         Readings {
             load: override_f64(LOAD_OVERRIDE).or_else(platform::load_average_5m),
@@ -344,9 +322,9 @@ pub struct Belt {
 impl Belt {
     /// Both legs, read once.
     ///
-    /// An unreadable roster makes the cap leg could-not-tell and REFUSES
-    /// NOTHING — a daemon nobody can ask must not wedge every spawn in the
-    /// fleet — while the load leg keeps its teeth.
+    /// A cap leg nobody could read is could-not-tell and REFUSES NOTHING — an
+    /// agent nobody can ask must not wedge every spawn in the fleet — while
+    /// the load leg keeps its teeth.
     pub fn read(machine: &Machine, seats: &[Seat]) -> Belt {
         let Readings {
             load: reading,
@@ -361,68 +339,61 @@ impl Belt {
             _ => None,
         };
 
-        // THE FLEET'S LISTING, and one more per transient seat that came up under
-        // its own configuration directory. Such a seat is held by its own daemon
-        // and appears in no other listing (flights PRD R13), so a cap counted off
-        // the fleet's read alone would be zero however many were mid-turn — a
-        // ceiling that refuses nothing, which is what this leg exists to prevent.
+        // EVERY TRANSIENT SEAT WHOSE PANE THE HOST HOLDS ALIVE, asked about in
+        // ONE read, each by the session its row last sighted and by its pane,
+        // under the directory its session came up under: a spawned seat is
+        // known to its agent under that directory and no other, so a cap
+        // counted off the fleet's would be zero however many were mid-turn — a
+        // ceiling that refuses nothing, which is what this leg exists to
+        // prevent. A seat is counted by what the agent says its OWN session is
+        // doing, and never by a session standing in its worktree (CORRECTIONS
+        // AT REVIEW, 2026-09-25).
         //
-        // ONE UNREADABLE LISTING makes the whole leg could-not-tell, as one
-        // unreadable roster did: a count short by an unknown number is not a
-        // count, and a daemon nobody can ask must not wedge every spawn.
+        // ONE READING NOBODY COULD MAKE makes the whole leg could-not-tell, as
+        // one unreadable listing did: a count short by an unknown number is not
+        // a count, and an agent nobody can read must not wedge every spawn.
         //
         // The table is read ONCE, not once per seat: the directories all come
         // out of the same file and a second read could answer differently.
         let recorded = sessions::read(&machine.table_path()).0;
-        let mut mid_turn = 0u32;
-        let mut busy_unreadable = None;
-        let mut count_in = |rows: &[crate::adapter::AgentRow], keys: &[String]| {
-            mid_turn += rows
-                .iter()
-                .filter(|row| {
-                    row.is_live() && row.is_busy() && keys.iter().any(|key| key == row.cwd_key())
-                })
-                .count() as u32;
-        };
-
-        // The seats whose sessions the fleet's own daemon holds: every transient
-        // row that named no directory of its own.
-        let shared: Vec<String> = seats
-            .iter()
-            .filter(|seat| seat.transient)
-            .filter(|seat| {
-                recorded
-                    .as_ref()
-                    .and_then(|table| table.newest_for(&seat.name))
-                    .and_then(|row| row.config_dir.as_ref())
-                    .is_none()
-            })
-            .flat_map(|seat| seat.worktrees.iter().map(|(_, path)| path.clone()))
-            .map(|path| dir_key(&path).to_string())
-            .collect();
-        match machine.agent.status(None) {
-            RosterRead::Readable(rows) => count_in(&rows, &shared),
-            RosterRead::Unreadable { cause } => busy_unreadable = Some(cause),
-        }
-
-        for seat in seats.iter().filter(|seat| seat.transient) {
-            let Some(config_dir) = recorded
-                .as_ref()
-                .and_then(|table| table.newest_for(&seat.name))
-                .and_then(|row| row.config_dir.clone())
-            else {
-                continue;
-            };
-            let keys: Vec<String> = seat
-                .worktrees
-                .iter()
-                .map(|(_, path)| dir_key(path).to_string())
-                .collect();
-            match machine.agent.status(Some(Path::new(&config_dir))) {
-                RosterRead::Readable(rows) => count_in(&rows, &keys),
-                RosterRead::Unreadable { cause } => busy_unreadable = Some(cause),
+        let (mid_turn, busy_unreadable) = match machine.host.list() {
+            HostRead::Unreadable { cause } => {
+                (0, Some(format!("the host could not be read: {cause}")))
             }
-        }
+            HostRead::Readable(panes) => {
+                let asked: Vec<agent::SeatRef> = seats
+                    .iter()
+                    .filter(|seat| seat.transient)
+                    .filter_map(|seat| {
+                        let session = host::session_for(&seat.id);
+                        let pane = host::live_pane(&panes, &session)?;
+                        let row = recorded
+                            .as_ref()
+                            .and_then(|table| table.newest_for(&seat.id.to_string()));
+                        Some(agent::SeatRef {
+                            seat: seat.id,
+                            session_id: row.and_then(|row| row.session_id.clone()),
+                            pid: pane.pid,
+                            config_dir: row.and_then(|row| row.config_dir.clone()),
+                            worktree: pane.path.clone(),
+                            screen: None,
+                        })
+                    })
+                    .collect();
+                let read = agent::readings(machine.agent, &asked);
+                let unreadable = read
+                    .iter()
+                    .find(|reading| {
+                        reading.activity == Activity::Unknown && reading.session_id.is_none()
+                    })
+                    .map(|reading| reading.cause.clone().unwrap_or_default());
+                let busy = read
+                    .iter()
+                    .filter(|reading| reading.activity == Activity::Busy)
+                    .count() as u32;
+                (busy, unreadable)
+            }
+        };
         let busy = match &busy_unreadable {
             Some(_) => None,
             None => Some((mid_turn, machine.policy.max_transient_busy)),
@@ -434,7 +405,6 @@ impl Belt {
             busy_unreadable,
         }
     }
-
     /// The legs that are over their ceiling, in the order they are read.
     pub fn over(&self) -> Vec<&'static str> {
         let mut over = Vec::new();
@@ -507,7 +477,7 @@ fn override_u32(key: &str) -> Option<u32> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
 
-// ---- spawn (R30) ------------------------------------------------------------
+// ---- spawn ------------------------------------------------------------------
 
 /// What a spawn was asked for. The first turn is the file's TEXT: reading the
 /// file is the caller's, because the caller is the one that knows whether a
@@ -515,20 +485,15 @@ fn override_u32(key: &str) -> Option<u32> {
 pub struct Spawn<'a> {
     pub first_turn: &'a str,
     pub model: Option<&'a str>,
-    /// The provider's local settings document, with [`WORKTREE`] still in it.
+    /// What the seat may run without asking, in fleet's own words: the
+    /// project's command words and the builder's checks.
     ///
     /// A spawned session comes up under a posture that refuses every writing
-    /// call it holds no rule for, and a permission list cannot ride the plugin
-    /// root the pack's overlay is loaded through — so the rules are written into
-    /// the worktree instead, before the first turn. `None` writes nothing.
-    ///
-    /// Everything else in the document is rendered by the caller, which reads
-    /// the pack layers and the project's gates. The worktree is not: it is
-    /// claimed below, and nothing outside this function knows the path.
-    ///
-    /// A document the worktree already carries is MERGED INTO rather than
-    /// replaced: see [`write_settings`].
-    pub settings: Option<&'a str>,
+    /// call it holds no rule for, so the launch hands these to the agent's
+    /// adapter, which renders them into its agent's own format inside the
+    /// seat's worktree before the first turn (reviewer call 2026-09-25, E8).
+    /// Nothing here knows that format or where the agent reads it.
+    pub permissions: Permissions,
     /// The work item this spawn is being made for, where the caller is giving
     /// one. It is carried only to be RECORDED — on the row and on the stream —
     /// so a report about this seat can name the work it was holding; nothing
@@ -537,35 +502,24 @@ pub struct Spawn<'a> {
     /// The commit this seat's worktree is cut from, where the caller names one.
     /// `None` cuts from [`TRUNK`], which is what every spawn did before a
     /// reviewer had to read a delivery and a returned builder had to resume
-    /// from one (flights PRD R11, R14).
+    /// from one.
     ///
     /// A base the primary cannot resolve REFUSES BEFORE ANYTHING IS MADE: the
     /// `worktree add` would otherwise leave a name claimed and a rollback to
     /// take, for a fact that was readable one call earlier.
     pub base: Option<&'a str>,
-    /// The per-provider overlay files that belong in a configuration space,
-    /// as `(relative path, content)`.
-    ///
-    /// They are copied into the per-row directory before the start. The
-    /// resolved overlay carries none today — the guards reach a session through
-    /// the plugin root and the permissions through the worktree's own settings
-    /// file — so the directory's whole content is its emptiness, and this is the
-    /// seam that stops being true without a second edit here.
-    pub config_files: &'a [(String, String)],
 }
 
 /// Where the per-row configuration directories live, under the machine
-/// directory: one per spawned seat, named by the seat (flights PRD R13, Q1e).
+/// directory: one per spawned seat, named by the seat.
 pub const CONFIG_DIRS: &str = "config";
 
-/// The one placeholder [`spawn`] fills, in the same `{name}` grammar the pack's
-/// own templates use.
-pub const WORKTREE: &str = "{worktree}";
-
-/// What a spawn left behind. The name is the verb's one answer on stdout,
-/// because the caller is `dispatch` and the name is what it assigns to.
+/// What a spawn left behind. The seat's machine name, `agent-<short>`, is the
+/// verb's one answer on stdout, because a person reads it; its id is what
+/// `dispatch` assigns the item to, because the record is keyed by the id.
 #[derive(Debug)]
 pub struct Spawned {
+    pub id: SeatId,
     pub seat: String,
     pub worktree: PathBuf,
     pub belt: Belt,
@@ -578,7 +532,7 @@ pub struct Spawned {
 }
 
 /// Create a transient seat: the belt, the worktree, the row, the start, the
-/// read-back (R30).
+/// read-back.
 ///
 /// Each step is read back before the next, and the ROLLBACK WINDOW OPENS AT THE
 /// WORKTREE: everything refused above it leaves nothing behind, and a start
@@ -599,10 +553,20 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
         None => TRUNK.to_string(),
     };
 
-    // (b) and (c) under ONE lock: the name, the worktree cut from the commit
-    // above, and the row. The rollback window opens with the `worktree add`
-    // inside it, and a claim that answers `Made` is one that got that far.
-    let model = machine.policy.model_for(ask.model);
+    // (a3) What the agent declares, before anything is made: the model a
+    // spawn that names none starts on is the fleet's, else the agent's.
+    let capabilities = machine.agent.capabilities().map_err(|why| {
+        Refusal::could_not_tell(format!(
+            "the agent's capabilities could not be read, so no model can be named and nothing \
+             was made: {why}"
+        ))
+    })?;
+
+    // (b) and (c) under ONE lock: a freshly minted seat id, the worktree cut
+    // from the commit above, and the row. The rollback window opens with the
+    // `worktree add` inside it, and a claim that answers `Made` is one that got
+    // that far.
+    let model = machine.policy.model_for(ask.model, &capabilities);
     let claimed = config::claim_transient_seat(
         &machine.config_path(),
         &config::TransientSeat {
@@ -625,13 +589,15 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
             .map(|_| ())
         },
     );
-    let (name, worktree) = match claimed {
-        Ok(claimed) => (claimed.name, claimed.worktree),
+    let claimed = match claimed {
+        Ok(claimed) => claimed,
         Err(config::ClaimError::Nothing(why)) => return Err(Refusal::refused(why)),
         Err(config::ClaimError::Made { worktree, why }) => {
-            return Err(rolled_back(machine, REFUSED, "", &worktree, &why))
+            return Err(rolled_back(machine, REFUSED, None, &worktree, &why))
         }
     };
+    let name = claimed.name.clone();
+    let worktree = claimed.worktree.clone();
     let worktree_arg = worktree.display().to_string();
     // READ HERE, right after the add and inside the rollback window: this is the
     // one moment the tree exists and nothing of the seat's has touched it, so
@@ -640,51 +606,50 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
     // it, not a precondition of it.
     let base = base_of(&worktree);
 
-    match machine.seats() {
-        Ok(seats) if seats.iter().any(|seat| seat.name == name && seat.transient) => {}
-        Ok(_) => {
-            return Err(rolled_back(
-                machine,
-                COULD_NOT_TELL,
-                &name,
-                &worktree,
-                &format!("the seat list does not read back a transient row for {name}"),
-            ))
-        }
+    // The read-back finds the row by the id the claim minted, which is the
+    // one key the row is written under.
+    let row = match machine.seats() {
+        Ok(seats) => match seats
+            .into_iter()
+            .find(|seat| seat.id == claimed.id && seat.transient)
+        {
+            Some(row) => row,
+            None => {
+                return Err(rolled_back(
+                    machine,
+                    COULD_NOT_TELL,
+                    Some(&claimed),
+                    &worktree,
+                    &format!("the seat list does not read back a transient row for {name}"),
+                ))
+            }
+        },
         Err(refusal) => {
             return Err(rolled_back(
                 machine,
                 refusal.code,
-                &name,
+                Some(&claimed),
                 &worktree,
                 &refusal.message,
             ))
         }
-    }
-
-    // (c2) The permission rules, inside the rollback window and BEFORE the
-    // start: a session that came up without them is one that cannot write, and
-    // this provider reads the file once at startup.
-    let settings = match ask.settings {
-        Some(template) => {
-            match write_settings(machine.agent.local_settings(), &worktree, template) {
-                Ok(did) => Some(did),
-                Err(why) => {
-                    return Err(rolled_back(machine, COULD_NOT_TELL, &name, &worktree, &why))
-                }
-            }
-        }
-        None => None,
     };
 
-    // (c3) The seat's OWN configuration directory, empty but for whatever the
-    // overlay puts in a configuration space (R13, Q1e). Made here, inside the
-    // rollback window and before the start, because the start is what the
-    // directory is for and a session that came up under the person's own
-    // directory is the isolation failure this whole slice is against.
-    let config_dir = machine.config_dir_for(&name);
-    if let Err(why) = make_config_dir(&config_dir, ask.config_files) {
-        return Err(rolled_back(machine, COULD_NOT_TELL, &name, &worktree, &why));
+    // (c3) The seat's OWN configuration directory, made EMPTY: what goes in it
+    // is the agent's, written by its adapter's launch (reviewer call
+    // 2026-09-25, E8). Made here, inside the rollback window and before the
+    // start, because the start is what the directory is for and a session that
+    // came up under the person's own directory is the isolation failure this
+    // whole slice is against.
+    let config_dir = machine.config_dir_for(&row);
+    if let Err(why) = make_config_dir(&config_dir) {
+        return Err(rolled_back(
+            machine,
+            COULD_NOT_TELL,
+            Some(&claimed),
+            &worktree,
+            &why,
+        ));
     }
 
     // (d) The start, through the same effect the loop's own spawn takes. The
@@ -696,25 +661,30 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
         return Err(rolled_back(
             machine,
             refusal.code,
-            &name,
+            Some(&claimed),
             &worktree,
             &refusal.message,
         ));
     }
     let mut log = machine.log();
     let before = log.seq();
+    // A seat nobody has started yet has no row to have recorded a session name
+    // on, so its session is named by its machine name.
     let target = Target {
-        seat_dir: &name,
-        display_name: name.clone(),
+        seat: claimed.id,
+        session_name: name.clone(),
         project: machine.project,
         worktree: &worktree_arg,
         model,
-        posture: machine.policy.posture_for(true).to_string(),
+        posture: machine.policy.posture_for(true),
         first_turn: ask.first_turn.to_string(),
         transient: true,
         config_dir: Some(config_dir.display().to_string()),
         item: ask.item.map(str::to_string),
-        settings: settings.map(|did| did.as_str().to_string()),
+        // Rendered by the agent's adapter into the seat's worktree as the
+        // launch is built — inside the rollback window and BEFORE the start: a
+        // session that came up without them is one that cannot write.
+        permissions: ask.permissions.clone(),
         belt: Some(belt.payload()),
         // THE SPAWNING PROCESS'S OWN RUN, read here and nowhere else. A
         // workflow's child carries `FLEET_RUN_ID`, and `fleet seat spawn` under
@@ -722,8 +692,8 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
         // started from a shell is not.
         run: crate::runs::of_this_process(),
         session_id: None,
-        short_id: None,
         context_tokens: None,
+        machine_dir: machine.machine_dir,
     };
     // INTO A TABLE OF ITS OWN: what this call produces is the ROW, and the file
     // it belongs in can be written by a feed or a retire while the start runs.
@@ -732,6 +702,7 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
     let mut opened = Table::default();
     let started = effect::spawn_woken(
         machine.agent,
+        machine.host,
         machine.policy,
         &target,
         &mut log,
@@ -739,18 +710,22 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
         now_ms,
     );
     if started != Outcome::Spawned {
-        // A14: the child exited inside the watch window and said why in-band.
-        // The output file is named from the line the adapter itself wrote, so
-        // the path in the refusal is the one the crash event carries.
-        let output = crashed_output(&machine.stream_path(), before, &name);
+        // The session died, never listed, or was never started, and the start
+        // has already killed whatever it made on the host. The cause and the
+        // capture are read from the line the start itself wrote, so the
+        // refusal names what the crash event carries.
+        let (cause, output) =
+            crashed_output(&machine.stream_path(), before, &claimed.id.to_string());
         return Err(rolled_back(
             machine,
             REFUSED,
-            &name,
+            Some(&claimed),
             &worktree,
             &format!(
-                "the start for {name} failed inside its {}s watch window; its output is at {}",
+                "the start for {name} failed inside its {}s watch window ({}); its output is at \
+                 {}",
                 machine.policy.start_watch_seconds,
+                cause.as_deref().unwrap_or("the stream names no cause"),
                 output
                     .as_deref()
                     .unwrap_or("(the stream names no output file)")
@@ -773,12 +748,13 @@ pub fn spawn(machine: &Machine, ask: &Spawn, now_ms: u64) -> Result<Spawned, Ref
             machine.table_path().display()
         ))
     })?;
-    if written.newest_for(&name).is_none() {
+    if written.newest_for(&claimed.id.to_string()).is_none() {
         return Err(Refusal::could_not_tell(format!(
             "the session table carries no row for {name} after its start"
         )));
     }
     Ok(Spawned {
+        id: claimed.id,
         seat: name,
         worktree,
         belt,
@@ -832,188 +808,36 @@ fn base_of(worktree: &Path) -> Option<String> {
     (sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())).then_some(sha)
 }
 
-/// The seat's own configuration directory, made and read back (R13, Q1e).
+/// The seat's own configuration directory, made and read back.
 ///
-/// A directory that already stands is EMPTIED first: a spawn re-using a name a
-/// retire left behind would otherwise hand the new session the old one's state,
-/// which is the isolation this exists to give, lost to a name collision.
+/// A directory that already stands is EMPTIED first — a fresh id makes that a
+/// defect, never a reuse.
 ///
-/// The read-back is the same gate every other step here takes, and it is the
+/// The read-back is the same check every other step here takes, and it is the
 /// LISTING and not the existence: a directory the process could not write into
 /// is one the agent will populate from the person's own instead.
-fn make_config_dir(dir: &Path, files: &[(String, String)]) -> Result<(), String> {
+fn make_config_dir(dir: &Path) -> Result<(), String> {
     if dir.exists() {
         std::fs::remove_dir_all(dir)
             .map_err(|e| format!("{} could not be emptied: {e}", dir.display()))?;
     }
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("{} could not be made: {e}", dir.display()))?;
-    for (relative, content) in files {
-        let path = dir.join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("{} could not be made: {e}", parent.display()))?;
-        }
-        std::fs::write(&path, content)
-            .map_err(|e| format!("{} was not written: {e}", path.display()))?;
-    }
     let back = std::fs::read_dir(dir)
         .map_err(|e| format!("{} does not read back: {e}", dir.display()))?
         .count();
-    if back != files.len() {
+    if back != 0 {
         return Err(format!(
-            "{} reads back {back} entries and {} were written",
-            dir.display(),
-            files.len()
+            "{} reads back {back} entries and was made empty",
+            dir.display()
         ));
     }
     Ok(())
 }
 
-/// What a settings write DID, which is what the seat's `session.spawned` line
-/// carries so a person reading the stream can tell the two apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettingsWrite {
-    /// The worktree carried no such document, so the pack's is the whole file.
-    Written,
-    /// The worktree carried one — a project may TRACK this path on its trunk —
-    /// so the pack's lists were folded into it and every rule of the project's
-    /// own kept.
-    Merged,
-}
-
-impl SettingsWrite {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SettingsWrite::Written => "written",
-            SettingsWrite::Merged => "merged",
-        }
-    }
-}
-
-/// The permission lists a merge folds. Everything else in either document is
-/// the project's to keep: a key only the pack carries is not a rule, and a key
-/// only the project carries is not this slice's to touch.
-const MERGED_LISTS: [&str; 2] = ["allow", "deny"];
-
-/// Render the settings document into the worktree and read it back.
-///
-/// A document already standing at the path is MERGED INTO, never replaced: a
-/// project that tracks this file on its trunk hands every transient worktree a
-/// copy of it, and a spawn that wrote over it would take the project's own
-/// rules out of the seat's session and leave a tracked file modified in a
-/// checkout nobody edited.
-///
-/// The read-back is the same gate every other step here takes: a write that
-/// silently landed short leaves a seat that can neither edit nor commit, and
-/// the refusal a person would get instead is one from the agent, hours later.
-fn write_settings(
-    relative: &str,
-    worktree: &Path,
-    template: &str,
-) -> Result<SettingsWrite, String> {
-    let rendered = template.replace(WORKTREE, &worktree.display().to_string());
-    let path = worktree.join(relative);
-    let standing = match std::fs::read_to_string(&path) {
-        Ok(standing) => Some(standing),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            return Err(format!(
-                "the settings document at {} could not be read, and one that cannot be read is \
-                 never written over: {e}",
-                path.display()
-            ))
-        }
-    };
-    let (document, did) = match standing {
-        None => (rendered, SettingsWrite::Written),
-        Some(standing) => (
-            merged_settings(&standing, &rendered).map_err(|why| {
-                format!(
-                    "the pack's permission rules were not merged into the document at {}, and \
-                     nothing was written over: {why}",
-                    path.display()
-                )
-            })?,
-            SettingsWrite::Merged,
-        ),
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("{} could not be made: {e}", parent.display()))?;
-    }
-    std::fs::write(&path, &document).map_err(|e| {
-        format!(
-            "the permission rules at {} were not written: {e}",
-            path.display()
-        )
-    })?;
-    match std::fs::read_to_string(&path) {
-        Ok(back) if back == document => Ok(did),
-        Ok(_) => Err(format!(
-            "the permission rules at {} do not read back as they were written",
-            path.display()
-        )),
-        Err(e) => Err(format!(
-            "the permission rules at {} do not read back: {e}",
-            path.display()
-        )),
-    }
-}
-
-/// The pack's permission lists folded into the document a project already
-/// carries: the project's document is the base, its rules stand FIRST and in
-/// their own order, the pack's are appended, and a rule the project already
-/// carries is not appended twice.
-///
-/// A document either side offers that this cannot read as JSON is an error
-/// here, which the caller turns into a refusal — the alternative is to fall
-/// back on the write, and the write is the damage.
-fn merged_settings(project: &str, pack: &str) -> Result<String, String> {
-    let mut merged: serde_json::Value = serde_json::from_str(project)
-        .map_err(|e| format!("the project's document is not JSON: {e}"))?;
-    let rules: serde_json::Value =
-        serde_json::from_str(pack).map_err(|e| format!("the pack's document is not JSON: {e}"))?;
-    let Some(root) = merged.as_object_mut() else {
-        return Err("the project's document is not a JSON object".to_string());
-    };
-    let Some(permissions) = root
-        .entry("permissions")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-    else {
-        return Err("the project's `permissions` is not a JSON object".to_string());
-    };
-    for list in MERGED_LISTS {
-        let Some(theirs) = rules
-            .get("permissions")
-            .and_then(|held| held.get(list))
-            .and_then(serde_json::Value::as_array)
-        else {
-            continue;
-        };
-        let Some(ours) = permissions
-            .entry(list)
-            .or_insert_with(|| serde_json::json!([]))
-            .as_array_mut()
-        else {
-            return Err(format!(
-                "the project's `permissions.{list}` is not an array"
-            ));
-        };
-        for rule in theirs {
-            if !ours.contains(rule) {
-                ours.push(rule.clone());
-            }
-        }
-    }
-    serde_json::to_string_pretty(&merged)
-        .map_err(|e| format!("the merged document could not be written out: {e}"))
-}
-
-/// Undo everything the window covers, and say what the undo did. An empty
-/// `name` is a claim that made the worktree and never wrote the row, where the
-/// drop below finds nothing and says so.
+/// Undo everything the window covers, and say what the undo did. `None` for
+/// the claim is one that made the worktree and never wrote the row, where there
+/// is nothing to drop and the line says so.
 ///
 /// NEVER A BRANCH. `git worktree remove` leaves refs alone, so a branch made
 /// inside the worktree survives — which is the point: it is exactly what a
@@ -1023,7 +847,13 @@ fn merged_settings(project: &str, pack: &str) -> Result<String, String> {
 /// of answer this is: a table nobody could read is still could-not-tell after
 /// the worktree has been taken back, and rounding it to a refusal would tell the
 /// caller the machine said no when it said it could not say.
-fn rolled_back(machine: &Machine, code: u8, name: &str, worktree: &Path, why: &str) -> Refusal {
+fn rolled_back(
+    machine: &Machine,
+    code: u8,
+    claimed: Option<&config::Claimed>,
+    worktree: &Path,
+    why: &str,
+) -> Refusal {
     let removed = match git(
         machine.primary,
         "worktree remove",
@@ -1037,11 +867,10 @@ fn rolled_back(machine: &Machine, code: u8, name: &str, worktree: &Path, why: &s
         Ok(_) => format!("the worktree at {} was removed", worktree.display()),
         Err(cause) => format!("THE WORKTREE AT {} SURVIVES: {cause}", worktree.display()),
     };
-    let held_config = machine.config_dir_for(name);
-    let unconfigured = if name.is_empty() || !held_config.exists() {
-        "no configuration directory was left to remove".to_string()
-    } else {
-        match std::fs::remove_dir_all(&held_config) {
+    let held_config = claimed.map(|claimed| machine.config_dir_named(&claimed.name));
+    let unconfigured = match held_config.filter(|dir| dir.exists()) {
+        None => "no configuration directory was left to remove".to_string(),
+        Some(held_config) => match std::fs::remove_dir_all(&held_config) {
             Ok(()) => format!(
                 "the configuration directory at {} was removed",
                 held_config.display()
@@ -1050,44 +879,54 @@ fn rolled_back(machine: &Machine, code: u8, name: &str, worktree: &Path, why: &s
                 "THE CONFIGURATION DIRECTORY AT {} SURVIVES: {e}",
                 held_config.display()
             ),
+        },
+    };
+    // No claim is one that made the worktree and never reached the row, so
+    // there is nothing to look for and the line says that rather than naming a
+    // seat that was never written.
+    let dropped = match claimed {
+        None => "no seat-list row was written to drop".to_string(),
+        Some(claimed) => {
+            let name = &claimed.name;
+            match config::drop_seat(&machine.config_path(), &claimed.id) {
+                Ok(true) => format!("the seat-list row for {name} was dropped"),
+                Ok(false) => format!("the seat list carried no row for {name} to drop"),
+                Err(cause) => format!("THE SEAT-LIST ROW FOR {name} SURVIVES: {cause}"),
+            }
         }
     };
-    // An empty name is a claim that made the worktree and never reached the row,
-    // so there is nothing to look for and the line says that rather than naming
-    // a seat with no name.
-    let dropped = if name.is_empty() {
-        "no seat-list row was written to drop".to_string()
-    } else {
-        match config::drop_seat(&machine.config_path(), name) {
-            Ok(true) => format!("the seat-list row for {name} was dropped"),
-            Ok(false) => format!("the seat list carried no row for {name} to drop"),
-            Err(cause) => format!("THE SEAT-LIST ROW FOR {name} SURVIVES: {cause}"),
-        }
-    };
-    Refusal::at(
+    Refusal {
         code,
-        format!(
+        message: format!(
             "{why}\n  rolled back: {removed}; {dropped}; {unconfigured}; no branch was deleted"
         ),
-    )
+    }
 }
 
-/// The output file the `session.crashed` line this start wrote names.
-fn crashed_output(stream: &Path, after: u64, seat: &str) -> Option<String> {
-    events::read_after(stream, after)
+/// The cause and the output file the `session.crashed` line this start wrote
+/// names, each `None` where the line carries none. `seat` is the seat's id, and
+/// the line's actor is that seat.
+fn crashed_output(stream: &Path, after: u64, seat: &str) -> (Option<String>, Option<String>) {
+    let Some(record) = events::read_after(stream, after)
         .into_iter()
         .rev()
-        .find(|record| record.kind == events::SESSION_CRASHED && record.actor == seat)
-        .and_then(|record| {
-            record
-                .payload
-                .get("output")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
+        .find(|record| {
+            record.kind == events::SESSION_CRASHED && record.actor.seat_id() == Some(seat)
         })
+    else {
+        return (None, None);
+    };
+    let field = |name: &str| {
+        record
+            .payload
+            .get(name)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    (field("cause"), field("output"))
 }
 
-// ---- feed (R31) -------------------------------------------------------------
+// ---- feed -------------------------------------------------------------------
 
 /// What a feed left behind: the turn that was in the seat and the one that is
 /// now, so a caller can say what moved.
@@ -1099,39 +938,64 @@ pub struct Fed {
 }
 
 /// Hand a live transient seat its next first turn, moving the occupant marker
-/// with a put-back on a delivery that failed (R31).
+/// with a put-back on a delivery that was not witnessed.
 ///
 /// THE MARKER IS THE SESSION-TABLE ROW'S `first_turn`, which the spawn set and
 /// this verb moves; the move is journaled on the event stream, which is the
-/// controller's one ledger (R23, R25), and never in a file beside it.
+/// controller's one ledger, and never in a file beside it.
+///
+/// The turn is TYPED into the seat's own session ([`effect::type_turn`]), so
+/// the session that holds the seat receives it, and it is believed only when
+/// the listing turns busy.
 pub fn feed(machine: &Machine, seat: &str, first_turn: &str) -> Result<Fed, Refusal> {
     let seats = machine.seats()?;
     let row = machine.transient_row(&seats, seat)?;
+    // From here the session table and the stream are asked by the seat's id,
+    // and every sentence names it by its machine name.
+    let name = row.machine_name();
+    let seat = name.as_str();
+    let seat_id = row.id.to_string();
     let worktree = machine.worktree_of(&row)?;
-    let key = dir_key(&worktree);
 
     // Under the seat's own configuration directory, for the same reason the
-    // retire reads there (flights PRD R13): the fleet's listing does not name a
-    // spawned seat's session, and a feed that read it would refuse every live
-    // seat as having none.
-    let config_dir = machine.recorded_config_dir(seat);
+    // retire reads there: the fleet's listing does not name a spawned seat's
+    // session, and a feed that read it would refuse every live seat as having
+    // none. The row is the one carrying the seat's pane's pid.
+    let config_dir = machine.recorded_config_dir(&seat_id);
     let under = config_dir.as_deref().map(Path::new);
-    let rows = machine.roster_under(under)?;
-    let live = rows
-        .iter()
-        .find(|row| row.is_live() && row.cwd_key() == key);
-    let Some(live) = live else {
-        return Err(Refusal::at(
-            NO_SESSION,
-            format!("`{seat}` has no live session in {worktree}, so there is nothing to feed"),
-        ));
+    let target = effect::TurnTarget {
+        seat: &row.id,
+        config_dir: under,
+    };
+    let live = match effect::seat_row(machine.agent, machine.host, &target) {
+        Ok(live) => live,
+        Err(Typed::Absent) => {
+            return Err(Refusal {
+                code: NO_SESSION,
+                message: format!(
+                    "`{seat}` has no live session in {worktree}, so there is nothing to feed"
+                ),
+            })
+        }
+        Err(other) => {
+            return Err(Refusal::could_not_tell(format!(
+                "no session can be named for `{seat}` — {}",
+                other.recorded()
+            )))
+        }
     };
     // The primitive knows only what the AGENT says. Whether the seat is holding
     // a work item is the caller's half and is not asked here.
-    if live.is_busy() {
+    if live.reading.activity == Activity::Busy {
         return Err(Refusal::refused(format!(
             "`{seat}` is still holding a turn — the agent reports its session {}",
-            crate::adapter::BUSY
+            Activity::Busy.word()
+        )));
+    }
+    if let Some(cause) = agent::waiting_on(&live.reading) {
+        return Err(Refusal::refused(format!(
+            "`{seat}` is stopped in front of a person — blocked on {cause} — and nothing is \
+             typed at a dialog"
         )));
     }
 
@@ -1142,7 +1006,7 @@ pub fn feed(machine: &Machine, seat: &str, first_turn: &str) -> Result<Fed, Refu
     // delivery to the put-back below: a second feed landing between the move
     // and its put-back would have its own move undone by this one.
     let (held, mut table) = machine.table_under_lock()?;
-    let Some(marker) = table.newest_for_mut(seat) else {
+    let Some(marker) = table.newest_for_mut(&seat_id) else {
         return Err(Refusal::refused(format!(
             "the session table carries no row for `{seat}`, so there is no occupant marker to \
              move"
@@ -1153,24 +1017,29 @@ pub fn feed(machine: &Machine, seat: &str, first_turn: &str) -> Result<Fed, Refu
     machine.write_table(&held, &table)?;
 
     let mut log = machine.log();
-    let delivered = machine.agent.nudge(
-        under,
-        seat,
-        &worktree,
-        &machine.policy.nudge_model,
+    let typed = effect::type_turn(
+        machine.agent,
+        machine.host,
+        &target,
         first_turn,
         Duration::from_secs(machine.policy.nudge_timeout_seconds),
     );
+    // ONLY A WITNESSED TURN IS A FEED. A turn queued behind another, refused
+    // at a dialog or never taken leaves the seat on the turn it had.
+    let delivered = match &typed {
+        Typed::Delivered => Ok(()),
+        other => Err(other.recorded()),
+    };
     let outcome = match &delivered {
         Ok(()) => "delivered".to_string(),
-        Err(cause) => format!("failed: {cause}"),
+        Err(recorded) => recorded.clone(),
     };
     // The journal BEFORE the put-back, so a line that cannot land is met with
     // the marker still where this verb moved it and the message saying so.
     let journalled = machine.journal(
         &mut log,
         events::SESSION_NUDGED,
-        seat,
+        &seat_id,
         serde_json::json!({
             "worktree": worktree,
             "prior_first_turn": first_line(&prior),
@@ -1184,7 +1053,7 @@ pub fn feed(machine: &Machine, seat: &str, first_turn: &str) -> Result<Fed, Refu
         // The row goes back to the turn that was in the seat, and the put-back
         // is a SECOND line rather than a rewrite of the first: the stream is
         // append-only and the attempt is part of what happened.
-        if let Some(marker) = table.newest_for_mut(seat) {
+        if let Some(marker) = table.newest_for_mut(&seat_id) {
             marker.first_turn = prior.clone();
         }
         machine.write_table(&held, &table)?;
@@ -1192,7 +1061,7 @@ pub fn feed(machine: &Machine, seat: &str, first_turn: &str) -> Result<Fed, Refu
         machine.journal(
             &mut log,
             events::SESSION_NUDGED,
-            seat,
+            &seat_id,
             serde_json::json!({
                 "worktree": worktree,
                 "prior_first_turn": first_line(first_turn),
@@ -1221,7 +1090,7 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
-// ---- retire (R32) -----------------------------------------------------------
+// ---- retire -----------------------------------------------------------------
 
 /// What a retire reclaimed, as numbers a person reads.
 #[derive(Debug)]
@@ -1231,11 +1100,12 @@ pub struct Reclaimed {
     /// The worktree's bytes, measured BEFORE the removal. `None` is a directory
     /// this verb could not walk, which is stated rather than reported as zero.
     pub bytes: Option<u64>,
-    /// The pid the roster carried before the stop, and `None` where no live row
-    /// named one.
+    /// The pid of the seat's live pane before the stop — the agent itself —
+    /// and `None` where the host held no live pane for the seat.
     pub pid: Option<u32>,
     pub dead: bool,
-    /// What the adapter's removal answered, including the alarm.
+    /// What the stop did on the host: `killed <session>` where the host held a
+    /// session for the seat, live or dead, and `None` where it held none.
     pub removal: Option<String>,
     /// The branch the seat's worktree stood on, read BEFORE the removal took
     /// the worktree with it. `None` is a detached HEAD or a tree git would not
@@ -1254,8 +1124,8 @@ pub struct Reclaimed {
 
 /// The record's half of a retire, filled by the caller.
 ///
-/// A SEAM AND NOT A CALL, because this crate reaches no work graph: the store
-/// is core's, and the cli is the one crate holding both. It is handed the seat
+/// A SEAM AND NOT A CALL, because each caller chooses what a board that will
+/// not answer means (see [`withdrawn_from`]). It is handed the seat
 /// going and answers what it released, or the refusal the retire stops on.
 ///
 /// The retire runs it at the LAST moment it can still stop — after the session
@@ -1264,24 +1134,63 @@ pub struct Reclaimed {
 /// the next spawn to take with somebody else's order still on it.
 pub type Withdrawal<'a> = &'a dyn Fn(&str) -> Result<Vec<String>, Refusal>;
 
-/// The caller that withdraws nothing, which is what every retire did before the
-/// seam existed: a controller with no work graph in reach passes it.
-pub fn withdraws_nothing(_seat: &str) -> Result<Vec<String>, Refusal> {
-    Ok(Vec::new())
+/// Every open ordered item this seat still holds, released, answered by id.
+///
+/// AN UNREADABLE BOARD STOPS THE RUN PASS'S RETIRE HERE, where the hand verb
+/// lets one through for a seat its session row names no item for. The
+/// difference is what the caller already knows: this pass resolved the run's
+/// project BY ASKING THIS STORE for the run's own record, so a store that will
+/// not answer the question below has stopped answering since — a question, and
+/// never a seat that was given nothing.
+///
+/// `seat` is the seat's id, which is what the order was assigned to, and
+/// `label` how the withdrawal note names it. `unread_names` is the hand verb's
+/// leniency, kept at its call: `Some(name)` says on stderr that the board went
+/// unread for `name` and goes on with nothing held; `None` is the run pass's
+/// refusal.
+pub fn withdrawn_from(
+    store: &dyn Store,
+    seat: &SeatId,
+    label: &str,
+    by: &Actor,
+    unread_names: Option<&str>,
+) -> Result<Vec<String>, Refusal> {
+    let held = match fleet_core::seat::retire::held(store, seat) {
+        Ok(held) => held,
+        Err(stop) => match unread_names {
+            // A BOARD THAT WILL NOT ANSWER IS A QUESTION wherever this fleet
+            // gave this seat something, and the retire stops on it rather than
+            // freeing the name over silence. A seat whose own session row names
+            // no item was dispatched nothing HERE: a project with no work graph
+            // at all spawns, feeds and retires its seats exactly as it did
+            // before this, and the line says the board went unread.
+            Some(name) => {
+                eprintln!(
+                    "the board was not read, so no order was withdrawn from {name}: {}",
+                    stop.message
+                );
+                Vec::new()
+            }
+            None => return Err(stop),
+        },
+    };
+    if held.is_empty() {
+        return Ok(Vec::new());
+    }
+    fleet_core::seat::retire::withdraw(store, &held, seat, label, by)?;
+    Ok(held.into_iter().map(|row| row.id.to_string()).collect())
 }
 
 /// End a transient seat and verify from OUTSIDE that nothing of it holds RAM or
-/// disk (R32).
+/// disk.
 ///
-/// The roster is read once, whole, at the top: an unreadable one is
-/// could-not-tell, because a session nobody could ask is a question and not an
-/// absence. Every probe at the end is its own reading and none of them is this
-/// verb's own earlier report.
-pub fn retire(machine: &Machine, seat: &str, dead: bool) -> Result<Reclaimed, Refusal> {
-    retire_with(machine, seat, dead, &withdraws_nothing)
-}
-
-/// The same retire, with the record's half of it filled (see [`Withdrawal`]).
+/// The host is read once, whole, at the top: an unreadable one is
+/// could-not-tell, because a session nobody could ask about is a question and
+/// not an absence. The session is stopped on the host by the seat's own name,
+/// the worktree is fleet's own to remove, and every probe at the end is its own
+/// reading and none of them is this verb's own earlier report.
+///
+/// The record's half of the retire is filled by `withdrawal` (see [`Withdrawal`]).
 pub fn retire_with(
     machine: &Machine,
     seat: &str,
@@ -1290,98 +1199,118 @@ pub fn retire_with(
 ) -> Result<Reclaimed, Refusal> {
     let seats = machine.seats()?;
     let row = machine.transient_row(&seats, seat)?;
+    // From here the session table and the stream are asked by the seat's id,
+    // and the record's assignee and every sentence by its machine name.
+    let name = row.machine_name();
+    let seat = name.as_str();
+    let seat_id = row.id.to_string();
     let worktree = machine.worktree_of(&row)?;
     let key = dir_key(&worktree).to_string();
 
-    // THE DIRECTORY THIS SEAT'S SESSION IS HELD UNDER, read off its own row
-    // (flights PRD R13). Every listing, stop and removal below is made under it:
-    // a spawned seat is named by its own daemon's listing and by no other, so
-    // the fleet's read would find no live row, take the no-session branch, and
-    // delete the worktree out from under a session still running in it.
-    let config_dir = machine.recorded_config_dir(seat);
-    let under = config_dir.as_deref().map(Path::new);
+    // THE DIRECTORY THIS SEAT'S SESSION IS HELD UNDER, read off its own row.
+    // The agent is asked about it under that directory: a spawned seat is
+    // known to its agent under its own and no other, so a read under the
+    // fleet's would find nothing whatever was still running.
+    let config_dir = machine.recorded_config_dir(&seat_id);
 
-    let rows = machine.roster_under(under)?;
-    let live = rows
-        .iter()
-        .find(|row| row.is_live() && row.cwd_key() == key)
-        .cloned();
-
-    // Measured before anything is removed, because both readings are gone the
-    // instant the removal lands.
-    let bytes = bytes_under(Path::new(&worktree));
-    let branch = branch_of(Path::new(&worktree));
-    let pid = live.as_ref().and_then(|row| row.pid);
-
-    // THE ADDRESS A REMOVAL TAKES, from the table where the roster names no
-    // live row. A seat whose session is already gone still has a session row to
-    // delete, and a retire that skipped it would leave the agent holding one
-    // per dead seat.
-    //
-    // READ WITHOUT THE LOCK, and an unreadable table refuses here, before the
-    // stop. What the lock guards is the read-modify-write at the end; held from
-    // here it would span the stop, the roster poll bounded by the start-watch
-    // window, the removal and two git calls, and every other verb on this
-    // machine would wait out a whole retire.
-    let recorded_short_id = {
-        let table = machine.table_now()?;
-        table.newest_for(seat).and_then(|row| row.short_id.clone())
-    };
-
-    let short_id = match (&live, dead) {
-        // `--dead` licenses the removal by a COMPLETED roster read that names no
-        // live row — never by silence, which is what the could-not-tell above
-        // keeps out of this branch.
-        (Some(row), true) => {
-            return Err(Refusal::refused(format!(
-                "`{seat}` is not dead — the roster names a live session {} in {worktree}, so \
-                 --dead was the wrong flag; retire it without --dead to stop it first",
-                row.session_id
+    // THE SEAT'S SESSION, BY THE SEAT: its name on the host is its id
+    // (reviewer call 2026-09-25, E1), so nothing the agent issued addresses it.
+    // Read once, whole, here: a host nobody could read is could-not-tell,
+    // because a session nobody could ask about is a question and not an
+    // absence.
+    let session = host::session_for(&row.id);
+    let pane = match machine.host.list() {
+        HostRead::Readable(panes) => host::pane(&panes, &session).cloned(),
+        HostRead::Unreadable { cause } => {
+            return Err(Refusal::could_not_tell(format!(
+                "the host could not be read, so whether `{seat}`'s session {session} is still \
+                 running cannot be told and nothing was removed: {cause}"
             )))
         }
-        // No live row: nothing to stop, and the removal is addressed by what the
-        // table remembers.
-        (None, _) => recorded_short_id,
-        (Some(row), false) => {
-            let Some(short_id) = row.id.clone() else {
+    };
+    let live = pane.as_ref().filter(|pane| pane.state == PaneState::Alive);
+
+    // Measured before anything is removed, because every reading is gone the
+    // instant the stop or the removal lands. The pid is the LIVE pane's — the
+    // agent itself, since nothing sits between (E2) — and never a dead one's,
+    // which names a process that has already ended and whose number the
+    // system may since have handed to another.
+    let bytes = bytes_under(Path::new(&worktree));
+    let branch = branch_of(Path::new(&worktree));
+    let pid = live.and_then(|pane| pane.pid);
+
+    // The agent asked, ONCE and before anything is touched, about the live
+    // pane's process under the seat's own directory — a reading nobody could
+    // make is could-not-tell here rather than after the stop — for the session
+    // it names: a session is the seat's by that pane and never by the directory
+    // it stands in (the claude-code pack's lessons B5).
+    let listed = match live.zip(pid) {
+        None => None,
+        Some((pane, pid)) => {
+            let reading = agent::readings(
+                machine.agent,
+                &[agent::SeatRef {
+                    seat: row.id,
+                    session_id: None,
+                    pid: Some(pid),
+                    config_dir: config_dir.clone(),
+                    worktree: pane.path.clone(),
+                    screen: None,
+                }],
+            )
+            .remove(0);
+            if reading.activity == Activity::Unknown && reading.session_id.is_none() {
                 return Err(Refusal::could_not_tell(format!(
-                    "the roster's live row for `{seat}` carries no short id, which is the \
-                     address a stop takes (lessons claude-code A6); nothing was removed"
-                )));
-            };
-            machine.agent.stop(under, &short_id).map_err(|cause| {
-                Refusal::refused(format!("`{seat}` could not be stopped: {cause}"))
-            })?;
-            // THE STOP'S OWN EXIT IS NEVER THE WITNESS (A6, A7). The roster is
-            // re-read until it names no row in that directory.
-            if !cleared(machine, under, &key)? {
-                return Err(Refusal::refused(format!(
-                    "the roster still names a session in {worktree} after the stop, so nothing \
-                     was removed: the worktree, the seat-list row and the session table all \
-                     stand"
+                    "the agent could not be read, so no session can be named: {}",
+                    reading.cause.unwrap_or_default()
                 )));
             }
-            Some(short_id)
+            reading.session_id
         }
     };
 
-    // In order: the session row, the worktree, the seat-list row, the table.
-    //
-    // `None` is not "nothing happened": it is a seat whose roster row is gone
-    // AND whose table row carries no address, so there is no session row
-    // anywhere for a removal to delete.
-    let removal = short_id.as_ref().map(|short_id| {
-        match machine.agent.remove(under, short_id) {
-            RemoveAnswer::Removed => format!("removed {short_id}"),
-            RemoveAnswer::Refused { cause } => format!("removing {short_id} refused: {cause}"),
-            // A8's alarm: no discard flag is ever passed, so this arm must not
-            // be reachable — and a reader meets the path in the report rather
-            // than meeting the missing directory.
-            RemoveAnswer::RemovedAWorktree { path } => {
-                format!("ALARM — the removal DELETED a worktree at {path}")
+    // READ WITHOUT THE LOCK, and an unreadable table refuses here, before the
+    // stop: the row comes off it at the end, and a table found unreadable only
+    // then would leave the session stopped and every row standing. What the
+    // lock guards is the read-modify-write at the end; held from here it would
+    // span the stop's grace and two git calls, and every other verb on this
+    // machine would wait out a whole retire.
+    machine.table_now()?;
+
+    // `--dead` licenses the retire by a COMPLETED host read that holds no live
+    // pane for the seat — never by silence, which is what the could-not-tell
+    // above keeps out of this branch.
+    if let (Some(live), true) = (live, dead) {
+        return Err(Refusal::refused(format!(
+            "`{seat}` is not dead — the host holds its session {session} live{}{}, so --dead \
+             was the wrong flag; retire it without --dead to stop it first",
+            match live.pid {
+                Some(pid) => format!(" as pid {pid}"),
+                None => String::new(),
+            },
+            match &listed {
+                Some(session) => format!(", listed as {session}"),
+                None => String::new(),
             }
+        )));
+    }
+
+    // THE STOP IS THE HOST'S, AND SO IS ITS WITNESS: `stop_session` answers Ok
+    // only once a listing read after the kill names no session for the seat.
+    // A dead pane is killed the same way — it is no session, and it holds the
+    // seat's name. `None` is a seat the host holds nothing for.
+    let removal = match &pane {
+        None => None,
+        Some(_) => {
+            effect::stop_session(machine.host, &session).map_err(|cause| {
+                Refusal::refused(format!(
+                    "`{seat}` could not be stopped, so nothing was removed — the worktree, the \
+                     seat-list row and the session table all stand: {cause}"
+                ))
+            })?;
+            Some(format!("killed {session}"))
         }
-    });
+    };
 
     if Path::new(&worktree).exists() {
         git(
@@ -1390,42 +1319,37 @@ pub fn retire_with(
             &["worktree", "remove", "--force", &worktree],
         )
         .map_err(|cause| {
-            // WHAT THIS REFUSAL SAYS IS GONE IS WHAT THE TWO ACTS ABOVE DID:
-            // the stop ran only where the roster named a live row, and the
-            // session row is already removed by the time a worktree can be
-            // found stuck.
-            let stopped = match &live {
-                Some(_) => "the session is stopped",
-                None => "there was no live session to stop",
-            };
-            let session_row = match &removal {
-                Some(answer) => format!("its session row is already gone ({answer})"),
-                None => "there was no session row to remove".to_string(),
+            // WHAT THIS REFUSAL SAYS IS GONE IS WHAT THE STOP ABOVE DID: it
+            // ran wherever the host held a session for the seat, and that
+            // session is gone by the time a worktree can be found stuck.
+            let stopped = match &removal {
+                Some(answer) => format!("its session is already gone ({answer})"),
+                None => "there was no session on the host to stop".to_string(),
             };
             Refusal::refused(format!(
-                "{worktree} could not be removed: {cause}\n  {stopped} and {session_row}; the \
-                 seat-list row and the session table both stand — so re-running this after \
-                 clearing the cause is safe"
+                "{worktree} could not be removed: {cause}\n  {stopped}; the seat-list row and \
+                 the session table both stand — so re-running this after clearing the cause is \
+                 safe"
             ))
         })?;
     }
     let _ = git(machine.primary, "worktree prune", &["worktree", "prune"]);
 
-    // THE RECORD BEFORE THE NAME. The seat list is what hands `transient-N`
-    // out, so the line below is the moment this name becomes takeable — and an
-    // order still standing against it would be inherited by whoever takes it
-    // next. Everything above has already happened and a refusal here says so:
-    // the session is stopped and gone, and the row is the one thing left.
+    // THE RECORD BEFORE THE ROW. The line below is the moment this seat stops
+    // existing, and an order still standing against it would be one nobody
+    // delivers and nothing dispatches again. Everything above has already
+    // happened and a refusal here says so: the session is stopped and gone,
+    // and the row is the one thing left.
     let withdrawn = withdrawal(seat).map_err(|refusal| Refusal {
         code: refusal.code,
         message: format!(
             "{}\n  the session and the worktree for `{seat}` ARE ALREADY GONE and the seat-list \
-             row STANDS: the name is not free, so clear the item and re-run this",
+             row STANDS: clear the item and re-run this",
             refusal.message
         ),
     })?;
 
-    config::drop_seat(&machine.config_path(), seat).map_err(|cause| {
+    config::drop_seat(&machine.config_path(), &row.id).map_err(|cause| {
         Refusal::could_not_tell(format!(
             "the seat-list row for `{seat}` could not be dropped: {cause}"
         ))
@@ -1434,14 +1358,15 @@ pub fn retire_with(
     // other seat's row on the copy this edits is the one on disk now, and not
     // the one this verb read before the stop.
     let (held, mut table) = machine.table_under_lock()?;
-    table.sessions.retain(|row| row.seat != seat);
+    table.sessions.retain(|row| row.seat != seat_id);
     machine.write_table(&held, &table)?;
     drop(held);
 
     // FROM HERE THE TWO ROWS ARE ALREADY GONE, so every refusal below says so:
-    // a re-run would be refused at the seat list with "is not a row", which
+    // a re-run would be refused at the seat list with "names no seat", which
     // tells the person nothing about what is still standing.
-    verify_from_outside(machine, seat, under, &worktree, &key, pid).map_err(|refusal| Refusal {
+    let verified = verify_from_outside(machine, seat, &session, &worktree, &key, pid);
+    verified.map_err(|refusal| Refusal {
         code: refusal.code,
         message: format!(
             "{}\n  the seat-list row and the session-table row for `{seat}` ARE ALREADY DROPPED, \
@@ -1456,11 +1381,10 @@ pub fn retire_with(
 
     // LAST, and only once the probes above have answered: the seat's
     // configuration directory, which holds that one session's whole
-    // configuration space and which the roster probe reads THROUGH — so a
-    // removal before it would leave that probe with nothing to ask and passing
-    // vacuously. A refused verification leaves the directory standing, which is
-    // right: something is still running under it.
-    let held_config = machine.config_dir_for(seat);
+    // configuration space — its transcript and its listing's scope included.
+    // A refused verification leaves the directory standing, which is right:
+    // something may still be running under it.
+    let held_config = machine.config_dir_for(&row);
     if held_config.exists() {
         std::fs::remove_dir_all(&held_config).map_err(|e| {
             Refusal::could_not_tell(format!(
@@ -1479,7 +1403,7 @@ pub fn retire_with(
     machine.journal(
         &mut log,
         events::SESSION_STOPPED,
-        seat,
+        &seat_id,
         serde_json::json!({
             "worktree": worktree,
             "bytes": bytes,
@@ -1527,7 +1451,7 @@ pub fn delete_branch(machine: &Machine, branch: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
-// ---- the priced retire (flights PRD R10, R12) -------------------------------
+// ---- the priced retire ------------------------------------------------------
 
 /// What one seat cost, and where its work got to.
 ///
@@ -1556,8 +1480,7 @@ pub struct Priced {
     pub cost: Cost,
 }
 
-/// Retire a seat a flight spawned, reading what it cost before it goes (R10,
-/// R12).
+/// Retire a seat a flight spawned, reading what it cost before it goes.
 ///
 /// THE READINGS COME FIRST, ALL OF THEM, because each is gone the instant the
 /// removal lands: the transcript goes with the session row, the worktree with
@@ -1568,17 +1491,13 @@ pub struct Priced {
 /// says so; only the retire itself refuses.
 ///
 /// `--dead` IS NOT PASSED, and that is a reading rather than an omission: the
-/// flag REFUSES when the roster names a live row and changes nothing when it
-/// names none, so a flagless call reclaims a seat whose session is already gone
-/// exactly as `--dead` would and stops one that is still up. A flight retiring a
-/// crashed seat and a flight retiring a delivered one therefore take the same
-/// call.
-pub fn priced(machine: &Machine, seat: &str, item: &str, now_ms: u64) -> Result<Priced, Refusal> {
-    priced_with(machine, seat, item, now_ms, &withdraws_nothing)
-}
-
-/// The same priced retire, with the record's half of it filled (see
-/// [`Withdrawal`]).
+/// flag REFUSES when the host holds the seat's session live and changes nothing
+/// when it does not, so a flagless call reclaims a seat whose session is already
+/// gone exactly as `--dead` would and stops one that is still up. A flight
+/// retiring a crashed seat and a flight retiring a delivered one therefore take
+/// the same call.
+///
+/// The record's half of it is filled by `withdrawal` (see [`Withdrawal`]).
 ///
 /// THE SEAM IS THE ONE THE HAND VERB RUNS. A run's cleanup retires a seat whose
 /// item can still be open — parked, or never delivered — and the name it frees
@@ -1595,6 +1514,10 @@ pub fn priced_with(
 ) -> Result<Priced, Refusal> {
     let seats = machine.seats()?;
     let row = machine.transient_row(&seats, seat)?;
+    // From here the session table and the stream are asked by the seat's id,
+    // and the line's payload names the seat as its `{id, name?, kind}` object.
+    let seat = SeatView::from(&row.as_ref());
+    let seat_id = row.id.to_string();
     let worktree = machine.worktree_of(&row)?;
 
     // The session row, for the id the transcript is keyed by and the stamp the
@@ -1602,47 +1525,64 @@ pub fn priced_with(
     let (session_id, dispatched_at) = {
         let path = machine.table_path();
         let (table, _) = sessions::read(&path);
-        match table.as_ref().and_then(|table| table.newest_for(seat)) {
+        match table.as_ref().and_then(|table| table.newest_for(&seat_id)) {
             Some(row) => (row.session_id.clone(), Some(row.dispatched_at)),
             None => (None, None),
         }
     };
 
-    // UNDER THE SEAT'S OWN CONFIGURATION DIRECTORY, which is where a spawned
-    // seat's transcript is: a read under the default resolves no file at all,
-    // which would price every seat this fleet spawned as unread.
-    let config_dir = machine.recorded_config_dir(seat);
-    let under = config_dir.as_deref().map(Path::new);
-    let transcript = session_id
-        .as_deref()
-        .and_then(|session| machine.agent.transcript(under, &worktree, session));
+    // UNDER THE SEAT'S OWN CONFIGURATION DIRECTORY, which is where the agent
+    // keeps a spawned seat's session: a read under the default resolves
+    // nothing at all, which would price every seat this fleet spawned as
+    // unread. Asked of an agent that declares `context`, and of no other.
+    let config_dir = machine.recorded_config_dir(&seat_id);
+    let declared = machine
+        .agent
+        .capabilities()
+        .is_ok_and(|capabilities| capabilities.context);
+    let context = session_id.as_ref().and_then(|session| {
+        agent::contexts(
+            machine.agent,
+            declared,
+            &[agent::SeatRef {
+                seat: row.id,
+                session_id: Some(session.clone()),
+                pid: None,
+                config_dir: config_dir.clone(),
+                worktree: dir_key(&worktree).to_string(),
+                screen: None,
+            }],
+        )
+        .remove(&row.id)
+    });
+    // Whether the agent could price the session at all: a context that states
+    // neither a window nor a turn is a session nobody read.
+    let read = context
+        .as_ref()
+        .is_some_and(|context| context.tokens.is_some() || context.turns.is_some());
     let commit = head_of(Path::new(&worktree));
 
-    let reclaimed = retire_with(machine, seat, false, withdrawal)?;
+    let reclaimed = retire_with(machine, &seat_id, false, withdrawal)?;
 
     // The branch is the RETIRE's own reading, taken before the same removal
     // every reading above is taken before, and read off what it answered rather
     // than a second time here: two readings of one fact are two things that can
     // disagree.
     let cost = Cost {
-        context_tokens: transcript
-            .as_deref()
-            .and_then(crate::observe::context_tokens_in),
-        // A transcript that opened and states no turn is a MEASURED ZERO, which
-        // is why the count is taken inside the `map` and not filtered after it:
-        // a session that took none and a transcript nobody could open answer
-        // differently here, and they are different facts.
-        turns: transcript.as_deref().map(crate::observe::turns_in),
+        context_tokens: context.as_ref().and_then(|context| context.tokens),
+        // A session that took no turn is a MEASURED ZERO, which is the agent's
+        // `turns: 0`, and one nobody could read is no count at all: they are
+        // different facts, and the agent answers them differently.
+        turns: context.as_ref().and_then(|context| context.turns),
         wall_ms: dispatched_at.map(|from| now_ms.saturating_sub(from)),
         branch: reclaimed.branch.clone(),
         commit,
     };
-
     let mut log = machine.log();
     machine.journal(
         &mut log,
         events::SESSION_RETIRED,
-        seat,
+        &seat_id,
         serde_json::json!({
             "seat": seat,
             "item": item,
@@ -1652,7 +1592,7 @@ pub fn priced_with(
             "wall_ms": cost.wall_ms,
             "branch": cost.branch,
             "commit": cost.commit,
-            "transcript": transcript.is_some(),
+            "transcript": read,
             "bytes": reclaimed.bytes,
             "pid": reclaimed.pid,
             "dead": reclaimed.dead,
@@ -1688,29 +1628,13 @@ fn head_of(worktree: &Path) -> Option<String> {
     (!sha.is_empty()).then_some(sha)
 }
 
-/// Re-read the roster until it names no session in this directory, bounded by
-/// the policy's start-watch window.
+/// The three probes — the host, the worktree, the pane's process — each its
+/// own reading and none of them this verb's own earlier report.
 ///
-/// The window and the slice are both [`Machine::clock`]'s, so the number of
-/// listings this takes is the same under any clock and only the waiting between
-/// them is the box's.
-fn cleared(machine: &Machine, under: Option<&Path>, key: &str) -> Result<bool, Refusal> {
-    let deadline =
-        machine.clock.now() + Duration::from_secs(machine.policy.start_watch_seconds.max(1));
-    loop {
-        let rows = machine.roster_under(under)?;
-        if !rows.iter().any(|row| row.is_live() && row.cwd_key() == key) {
-            return Ok(true);
-        }
-        if machine.clock.now() >= deadline {
-            return Ok(false);
-        }
-        machine.clock.sleep(Duration::from_millis(200));
-    }
-}
-
-/// The three probes, each its own reading and none of them this verb's own
-/// earlier report.
+/// No listing is among them. The session was the host's and the row is only
+/// the agent's account of its process, so a row left behind by a process the
+/// pid probe reads as gone is an account and not a session; and one whose
+/// process is alive is the pid probe's to refuse.
 ///
 /// A probe that CANNOT ANSWER is could-not-tell and refuses at 3, never rounded
 /// to clean: the whole point of verifying from outside is that a retire which
@@ -1718,23 +1642,27 @@ fn cleared(machine: &Machine, under: Option<&Path>, key: &str) -> Result<bool, R
 fn verify_from_outside(
     machine: &Machine,
     seat: &str,
-    under: Option<&Path>,
+    session: &str,
     worktree: &str,
     key: &str,
     pid: Option<u32>,
 ) -> Result<(), Refusal> {
-    // UNDER THE SEAT'S OWN DIRECTORY, which is the only listing that could name
-    // its session (flights PRD R13): the fleet's would answer "no live row" for a
-    // spawned seat whatever was running, which is a probe that cannot fail.
-    let rows = machine.roster_under(under)?;
-    if let Some(row) = rows
-        .iter()
-        .find(|row| row.is_live() && row.cwd_key() == key)
-    {
-        return Err(Refusal::refused(format!(
-            "a live session {} still names {worktree} after the retire",
-            row.session_id
-        )));
+    // THE HOST, which is where the seat's session ran and the one reading of
+    // whether it still does (ruling 3).
+    match machine.host.list() {
+        HostRead::Readable(panes) => {
+            if host::pane(&panes, session).is_some() {
+                return Err(Refusal::refused(format!(
+                    "the host still holds `{seat}`'s session {session} after the retire"
+                )));
+            }
+        }
+        HostRead::Unreadable { cause } => {
+            return Err(Refusal::could_not_tell(format!(
+                "the host could not be read, so whether `{seat}`'s session {session} is gone is \
+                 unknown: {cause}"
+            )))
+        }
     }
 
     if Path::new(worktree).exists() {
@@ -1768,8 +1696,8 @@ fn verify_from_outside(
             Some(false) => {}
             Some(true) => {
                 return Err(Refusal::refused(format!(
-                    "pid {pid}, which the roster gave for `{seat}` before the stop, is still a \
-                     live process"
+                    "pid {pid}, which the host gave for `{seat}`'s pane before the stop, is \
+                     still a live process"
                 )))
             }
             None => {
@@ -1804,33 +1732,4 @@ fn bytes_under(dir: &Path) -> Option<u64> {
         }
     }
     Some(total)
-}
-
-// ---- git --------------------------------------------------------------------
-
-/// One git call in the primary, the binary through the standard library with
-/// the terminal prompt disabled.
-///
-/// A non-zero exit is a refusal naming the step and what git said, never a
-/// value rounded to a default: a verb that read a failed `worktree add` as a
-/// worktree would start a session in a directory that is not there.
-fn git(primary: &Path, step: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(primary)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| format!("`git {step}` could not be run: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "`git {step}` {}: {}",
-            match out.status.code() {
-                Some(code) => format!("exited {code}"),
-                None => String::from("was killed by a signal"),
-            },
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

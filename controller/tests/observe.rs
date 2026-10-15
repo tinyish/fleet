@@ -2,524 +2,450 @@
 //!
 //! The `lessons::` module below is the contract named in
 //! `fleet/brain/lessons/*.md` § Test inventory: each fact the code in this slice
-//! exercises owes a test under the exact name the inventory carries.
+//! exercises owes a test under the exact name the inventory carries, and the
+//! one this file holds is core's (D4). The facts about the agent's own listing
+//! and transcript — how a row is parsed, found and read, and what a transcript
+//! says — are the claude-code pack's lessons since fleet-jymr.6, tested in
+//! fleet-packs; what core asks of three of them (A1, B8, B10) is held by the
+//! plain arms above the module.
+//!
+//! A seat is read from TWO answers (ruling 3): the host's, which says whether
+//! its session is there, and the agent's `read`, which says what the session is
+//! doing. The host's is a [`FakeHost`] here — its own panes, listed by its own
+//! `list` — and the agent's is the listing RECORDED on the supported release
+//! below, read by the stub's rules (`test_support::reading`, the in-process
+//! adapter's own, kept for the stub when fleet-x93d.2 deleted it), so the arms
+//! decide real readings against a host that is not real.
 
-use fleet_controller::adapter::claude_code::{parse_roster, ClaudeCode};
-use fleet_controller::adapter::{dir_key, encode_project_dir, transcript_path, Agent, RosterRead};
 use fleet_controller::config::Seat;
 use fleet_controller::events;
+use fleet_controller::host::{session_for, Host, HostRead, Pane, PaneState};
 use fleet_controller::observe::{
-    self, context_tokens_in, observe_seat, turns_in, Recency, RosterState, Rosters,
-    FELL_BACK_TO_START, STARTING_GRACE_MS,
+    self, observe_fleet, observe_seat, Held, RosterState, SeatObservation, STARTING_GRACE_MS,
 };
 use fleet_controller::platform::{self, Grant, Listing, GRANT_OK, GRANT_PENDING};
-use fleet_controller::policy::DEFAULT_STOPPED_RECENCY_HOURS;
-use fleet_controller::projection::{render, EffectsView, PolicyView, Projection, SeatRow, VERSION};
+use fleet_controller::projection::{
+    dir_key, render, AgentView, EffectsView, PolicyView, Projection, SeatRow, SeatView, VERSION,
+};
+use fleet_controller::run::{self, Options, Seams, StopHandler};
+use fleet_controller::test_support::reading::readings_from;
+use fleet_controller::test_support::{
+    self, Answers, FakeClock, FakeHost, StubAgent, FIRST_PANE_PID,
+};
+use fleet_core::agent::{
+    Activity, Agent, AgentError, Argv, BlockedOn, Capabilities, Evidence, Launch, Posture, Resume,
+    SeatActivity, SeatContext, SeatRef, Version,
+};
+use fleet_core::seat::identity::SeatId;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod common;
+
 const WORKTREE: &str = "/wt/builder-1";
 const OTHER: &str = "/wt/builder-2";
 
-/// The window in milliseconds, from the policy default rather than a copy of
-/// the figure: an arm asserting where the edge falls reads the same number the
-/// file's default carries.
-const WINDOW_MS: u64 = DEFAULT_STOPPED_RECENCY_HOURS * 60 * 60 * 1000;
+/// The fixed ids this suite's seats carry.
+const SEAT_ID: &str = "01a0d1f1-0aec-765f-9abe-d4f993b9739a";
+const TRANSIENT_ID: &str = "01a0d1f1-0aec-765f-9abe-00007e3fa2c0";
 
-/// No session's transcript resolves. That is the FALLBACK reading — the window
-/// runs on the start stamp — and it is what every arm here that is not about
-/// the end wants, because it is the behaviour those arms were written under.
-static NO_END: fn(&str, &str) -> Option<u64> = |_, _| None;
-
-fn started() -> Recency<'static> {
-    Recency {
-        window_ms: WINDOW_MS,
-        ended_at: &NO_END,
-    }
+fn id(text: &str) -> SeatId {
+    SeatId::parse(text).expect("a hand-written seat id parses")
 }
 
 fn seat() -> Seat {
     Seat {
-        name: "builder-1".to_string(),
-        chosen_name: Some("Rook".to_string()),
+        id: id(SEAT_ID),
+        name: None,
         model: None,
         transient: false,
         worktrees: vec![("demo".to_string(), WORKTREE.to_string())],
     }
 }
 
-/// A listing built from row bodies, in the shape the agent emits.
-fn roster(rows: &[String]) -> RosterRead {
-    parse_roster(&format!("[{}]", rows.join(",")))
-}
-
-fn live(cwd: &str, session: &str) -> String {
-    format!(
-        r#"{{"id":"{session}","sessionId":"{session}","cwd":"{cwd}","kind":"background",
-            "pid":4242,"status":"idle","startedAt":1000}}"#
-    )
-}
-
-fn waiting(cwd: &str, session: &str, cause: &str) -> String {
-    format!(
-        r#"{{"id":"{session}","sessionId":"{session}","cwd":"{cwd}","kind":"background",
-            "pid":4242,"status":"idle","startedAt":1000,"waitingFor":"{cause}"}}"#
-    )
-}
-
-/// A pid-less row the agent has registered and not yet given a process to: no
-/// end marker, so `state` is what separates it from an ended one.
-fn newborn(cwd: &str, session: &str, started_at: u64) -> String {
-    format!(
-        r#"{{"sessionId":"{session}","cwd":"{cwd}","kind":"background",
-            "state":"working","startedAt":{started_at}}}"#
-    )
-}
-
-fn ended(cwd: &str, session: &str, started_at: u64) -> String {
-    format!(
-        r#"{{"sessionId":"{session}","cwd":"{cwd}","kind":"background",
-            "state":"done","startedAt":{started_at}}}"#
-    )
-}
-
 /// A transient seat, whose session comes up under its own configuration
 /// directory.
 fn transient_seat() -> Seat {
     Seat {
-        name: "builder-9".to_string(),
-        chosen_name: None,
+        id: id(TRANSIENT_ID),
+        name: None,
         model: None,
         transient: true,
         worktrees: vec![("demo".to_string(), OTHER.to_string())],
     }
 }
 
+// ------------------------------------------------------- the recorded listing
+
+/// THE LISTING RECORDED ON THE SUPPORTED RELEASE (fleet-rge6.3's first step,
+/// reviewer call E14): the agent the claude-code pack drives, on 2.1.280, tmux
+/// 3.7b, 2026-09-26, a scratch
+/// configuration directory seeded with onboarding and the worktree's trust, a
+/// scratch socket, `DISABLE_AUTOUPDATER=1` in the pane. `agents --json --all`
+/// read every 0.25 s, the session started as the pane's own process with
+/// `--name ma --model haiku --permission-mode default` and no first turn.
+///
+/// Byte for byte as the agent printed them, less the whitespace. Idle 0.70 s
+/// after `new-session`; busy on the first read after a pasted turn was
+/// submitted; waiting, with the cause, 2.8 s after a turn that asked for a
+/// file write met the approval dialog; idle again on the next read after the
+/// dialog was cancelled; and an empty listing on the first read after
+/// `kill-session`, 0.22 s later. The pane listed `pid=31697 dead=0` beside
+/// every one of the three rows.
+const RECORDED_IDLE: &str = r#"[{"pid":31697,"cwd":"/private/tmp/fleet-measure-rge63/wt","kind":"interactive","startedAt":1790414327458,"sessionId":"d0090b9b-6edf-4cfa-8309-d14b2f1e70b4","name":"ma","status":"idle"}]"#;
+const RECORDED_BUSY: &str = r#"[{"pid":31697,"cwd":"/private/tmp/fleet-measure-rge63/wt","kind":"interactive","startedAt":1790414327458,"sessionId":"d0090b9b-6edf-4cfa-8309-d14b2f1e70b4","name":"ma","status":"busy"}]"#;
+const RECORDED_WAITING: &str = r#"[{"pid":31697,"cwd":"/private/tmp/fleet-measure-rge63/wt","kind":"interactive","startedAt":1790414327458,"sessionId":"d0090b9b-6edf-4cfa-8309-d14b2f1e70b4","name":"ma","status":"waiting","waitingFor":"permission prompt"}]"#;
+const RECORDED_GONE: &str = "[]";
+
+/// The pane's own pid in the recording, which the listing's row carried.
+const RECORDED_PID: u32 = 31_697;
+const RECORDED_SESSION: &str = "d0090b9b-6edf-4cfa-8309-d14b2f1e70b4";
+const RECORDED_CWD: &str = "/private/tmp/fleet-measure-rge63/wt";
+/// `session_created` of the recorded session, in whole seconds as the host
+/// counts them.
+const RECORDED_CREATED_MS: u64 = 1_790_414_327_000;
+
+/// A seat standing where the recording's session stood.
+fn recorded_seat() -> Seat {
+    Seat {
+        worktrees: vec![("measured".to_string(), RECORDED_CWD.to_string())],
+        ..seat()
+    }
+}
+
+/// The host's listing as the recording read it, with the pane renamed to
+/// `seat`'s session — the one thing a scratch socket could not name as fleet
+/// does.
+fn recorded_pane(seat: &Seat, state: PaneState) -> HostRead {
+    HostRead::Readable(vec![Pane {
+        session: session_for(&seat.id),
+        pid: Some(RECORDED_PID),
+        state,
+        path: match state {
+            PaneState::Alive => RECORDED_CWD.to_string(),
+            // A dead pane's path reads empty (measured on 3.7b), and the
+            // recording's `/exit` read it so.
+            PaneState::Dead { .. } => String::new(),
+        },
+        created_ms: Some(RECORDED_CREATED_MS),
+    }])
+}
+
+/// The agent's reading of `seat`'s pane `pid`, off a listing body, by the
+/// stub's rules — the recording read the way the stub's `read` reads it.
+fn read_off(body: &str, seat: &Seat, pid: u32) -> SeatActivity {
+    let body = body.to_string();
+    readings_from(
+        &[SeatRef {
+            seat: seat.id,
+            session_id: None,
+            pid: Some(pid),
+            config_dir: None,
+            worktree: WORKTREE.to_string(),
+            screen: None,
+        }],
+        &|_: Option<&str>| Ok(body.clone()),
+        &|_: &SeatRef, _: &str| None,
+    )
+    .remove(0)
+}
+
+/// A recorded listing with its pid moved onto `pid` — how a recorded row is
+/// laid beside a [`FakeHost`] pane, which numbers its own — read for `seat`.
+fn recorded_as(body: &str, seat: &Seat, pid: u32) -> SeatActivity {
+    read_off(
+        &body.replace(&RECORDED_PID.to_string(), &pid.to_string()),
+        seat,
+        pid,
+    )
+}
+
+/// A reading built whole, for the arms whose subject is core's decision and
+/// not how an adapter reaches it.
+fn reading(
+    seat: &Seat,
+    activity: Activity,
+    session: Option<&str>,
+    cause: Option<&str>,
+) -> SeatActivity {
+    SeatActivity {
+        seat: seat.id,
+        activity,
+        blocked_on: None,
+        evidence: Evidence::Typed,
+        session_id: session.map(str::to_string),
+        cause: cause.map(str::to_string),
+    }
+}
+
+// ------------------------------------------------------------- the fake host
+
+/// A host holding one live session for `seat`, started as a start would, and
+/// the pid its pane was given.
+fn hosting(seat: &Seat) -> (FakeHost, u32) {
+    let host = FakeHost::new();
+    host.new_session(
+        &session_for(&seat.id),
+        Path::new(WORKTREE),
+        &["/nowhere/agent".to_string()],
+        &[],
+    )
+    .expect("the fake host starts the session");
+    (host, FIRST_PANE_PID)
+}
+
+/// When the one session `host` holds was created, which the start's grace is
+/// measured from.
+fn created(host: &FakeHost) -> u64 {
+    match host.list() {
+        HostRead::Readable(panes) => panes[0].created_ms.expect("a fake pane is dated"),
+        HostRead::Unreadable { cause } => panic!("{cause}"),
+    }
+}
+
+/// A poll well past the start's grace for everything `host` holds.
+fn settled(host: &FakeHost) -> u64 {
+    created(host) + STARTING_GRACE_MS + 1_000
+}
+
+/// A host with nothing on it: a server that is not running reads so, which is
+/// the fleet after a reboot.
+fn nothing_hosted() -> HostRead {
+    HostRead::Readable(Vec::new())
+}
+
+/// An interactive row, as the recording's rows read: a pid and a status, and
+/// no address and no state (the claude-code pack's lessons B10).
+fn live(cwd: &str, session: &str, pid: u32) -> String {
+    format!(
+        r#"{{"sessionId":"{session}","cwd":"{cwd}","kind":"interactive","name":"orla",
+            "pid":{pid},"status":"idle","startedAt":1000}}"#
+    )
+}
+
+/// The one seat decided against a live session this suite's fake host holds
+/// and a reading naming it by the pane's pid.
+fn present(seat: &Seat, cwd: &str, session: &str) -> SeatObservation {
+    let (host, pid) = hosting(seat);
+    let read = read_off(&format!("[{}]", live(cwd, session, pid)), seat, pid);
+    observe_seat(&host.list(), seat, Some(&read), settled(&host))
+}
+
+// --------------------------------------------- an agent answering by directory
+
+/// An agent whose `read` answers every directory from its own listing — the
+/// stub's rules over listings an arm hands in per directory — and
+/// records which directories it was asked under. Nothing else it answers is
+/// asked of it here.
+struct ByDirectory<F: Fn(Option<&str>) -> Result<String, String>> {
+    listing: F,
+    asked: RefCell<Vec<Option<String>>>,
+}
+
+impl<F: Fn(Option<&str>) -> Result<String, String>> ByDirectory<F> {
+    fn new(listing: F) -> Self {
+        ByDirectory {
+            listing,
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl<F: Fn(Option<&str>) -> Result<String, String>> Agent for ByDirectory<F> {
+    fn capabilities(&self) -> Result<Capabilities, AgentError> {
+        Ok(test_support::capabilities())
+    }
+
+    fn version(&self) -> Result<Version, AgentError> {
+        Err(AgentError::Unreadable("not asked here".to_string()))
+    }
+
+    fn launch(&self, _: &Launch) -> Result<Argv, AgentError> {
+        Err(AgentError::Unreadable("not asked here".to_string()))
+    }
+
+    fn resume(&self, _: &Resume) -> Result<Argv, AgentError> {
+        Err(AgentError::Unreadable("not asked here".to_string()))
+    }
+
+    fn read(&self, seats: &[SeatRef]) -> Result<Vec<SeatActivity>, AgentError> {
+        Ok(readings_from(
+            seats,
+            &|dir: Option<&str>| {
+                self.asked.borrow_mut().push(dir.map(str::to_string));
+                (self.listing)(dir)
+            },
+            &|_: &SeatRef, _: &str| None,
+        ))
+    }
+
+    fn context(&self, _: &[SeatRef]) -> Result<Vec<SeatContext>, AgentError> {
+        Ok(Vec::new())
+    }
+}
+
+// ------------------------------------- core's arms of the pack's lessons
+//
+// A1, B8 and B10 are the claude-code pack's lessons since fleet-jymr.6, and
+// their tests are the pack's. What each asks of core is held here, under
+// core's own names.
+
+/// Core's comparison arm of the claude-code pack's lessons A1 (whose own
+/// test, holding `measured` to A1's Version, is the pack's since
+/// fleet-jymr.6): the release each behaviour was measured against is
+/// published BESIDE the version the binary reports this poll, and a spread
+/// between them is a flag, never a refusal.
+#[test]
+fn the_live_version_is_published_beside_the_expected_one() {
+    let drifted = projection(Some("2.1.262"), Some("2.1.261"));
+    let body: serde_json::Value = serde_json::from_str(&render(&drifted).unwrap()).unwrap();
+    assert_eq!(body["agent_version"], "2.1.262");
+    assert_eq!(body["agent_version_expected"], "2.1.261");
+    assert_eq!(
+        body["seats"].as_array().map(Vec::len),
+        Some(0),
+        "a spread publishes the document, it does not refuse it"
+    );
+
+    // A binary that did not answer publishes a named absence, not the pin.
+    let silent = projection(None, Some("2.1.261"));
+    let body: serde_json::Value = serde_json::from_str(&render(&silent).unwrap()).unwrap();
+    assert!(body["agent_version"].is_null());
+    assert_eq!(body["agent_version_expected"], "2.1.261");
+}
+
+/// The claude-code pack's lessons B8, core's half (the listing's half is
+/// the pack's `waiting_for_names_the_block`) — a session stopped in front of a human is keyed on the
+/// agent's reading being BLOCKED, never on what it names: the vocabulary
+/// is the agent's, so a cause this fleet has never seen must still stop the
+/// seat rather than read as a healthy one; the control is the busy row.
+///
+/// On the INTERACTIVE row the recording read (B10): `waiting` and
+/// `permission prompt` at the approval dialog, carried verbatim.
+#[test]
+fn a_blocked_reading_is_prompt_blocked_whatever_it_names() {
+    let at_the_dialog = recorded_seat();
+    let blocked = observe_seat(
+        &recorded_pane(&at_the_dialog, PaneState::Alive),
+        &at_the_dialog,
+        Some(&read_off(RECORDED_WAITING, &at_the_dialog, RECORDED_PID)),
+        RECORDED_CREATED_MS + 30_000,
+    );
+    assert_eq!(blocked.state, RosterState::PromptBlocked);
+    assert_eq!(blocked.waiting_for.as_deref(), Some("permission prompt"));
+    assert_eq!(blocked.blocked_on, Some(BlockedOn::Permission));
+    assert_eq!(blocked.activity, Some(Activity::Blocked));
+    assert_eq!(blocked.session_id.as_deref(), Some(RECORDED_SESSION));
+
+    let (host, _) = hosting(&seat());
+    let unrecognised = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&reading(
+            &seat(),
+            Activity::Blocked,
+            Some("aa"),
+            Some("a cause nobody has enumerated"),
+        )),
+        settled(&host),
+    );
+    assert_eq!(
+        unrecognised.state,
+        RosterState::PromptBlocked,
+        "presence, never the value: an unknown cause still stops the seat"
+    );
+    assert_eq!(
+        unrecognised.waiting_for.as_deref(),
+        Some("a cause nobody has enumerated")
+    );
+    // And a block the agent names nothing for at all is blocked all the
+    // same, published as the bare word.
+    let nameless = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&reading(&seat(), Activity::Blocked, None, None)),
+        settled(&host),
+    );
+    assert_eq!(nameless.state, RosterState::PromptBlocked);
+    assert_eq!(nameless.waiting_for.as_deref(), Some("blocked"));
+
+    let control = observe_seat(
+        &recorded_pane(&at_the_dialog, PaneState::Alive),
+        &at_the_dialog,
+        Some(&read_off(RECORDED_BUSY, &at_the_dialog, RECORDED_PID)),
+        RECORDED_CREATED_MS + 30_000,
+    );
+    assert_eq!(control.state, RosterState::Present);
+    assert_eq!(control.waiting_for, None);
+
+    // The reference publishes no context reading for this state, and the
+    // acceptance is row-for-row parity with it.
+    assert!(!RosterState::PromptBlocked.has_context_reading());
+    assert!(RosterState::Present.has_context_reading());
+    assert!(RosterState::Stopped.has_context_reading());
+    assert!(!RosterState::Starting.has_context_reading());
+}
+
+/// The claude-code pack's lessons B10, core's half (the listing's half is
+/// the pack's `an_interactive_row_is_listed_without_an_address`) — the recording, decided: every row the agent printed,
+/// read by the adapter's rules and laid beside the pane the host listed,
+/// is the seat's live session with its activity; and the session's end is
+/// the HOST's reading — the listing's empty answer after `kill-session`
+/// beside no pane is absent, and `/exit`'s dead pane is stopped.
+#[test]
+fn the_recording_decided_is_the_seats_live_session_and_its_end_the_hosts() {
+    let recorded = recorded_seat();
+    let alive = recorded_pane(&recorded, PaneState::Alive);
+    let at = RECORDED_CREATED_MS + 30_000;
+
+    for (body, activity) in [
+        (RECORDED_IDLE, Activity::Idle),
+        (RECORDED_BUSY, Activity::Busy),
+        (RECORDED_WAITING, Activity::Blocked),
+    ] {
+        let read = read_off(body, &recorded, RECORDED_PID);
+        let seen = observe_seat(&alive, &recorded, Some(&read), at);
+        assert!(
+            matches!(
+                seen.state,
+                RosterState::Present | RosterState::PromptBlocked
+            ),
+            "{body}: {seen:?}"
+        );
+        assert_eq!(seen.activity, Some(activity));
+        assert_eq!(seen.pane_pid, Some(RECORDED_PID));
+        assert_eq!(seen.project.as_deref(), Some("measured"));
+    }
+
+    // `kill-session`: the next read lists nothing, and the host holds no
+    // session. The seat is absent, and nothing stands in for an end.
+    let killed = observe_seat(&nothing_hosted(), &recorded, None, at);
+    assert_eq!(killed.state, RosterState::Absent);
+    assert_eq!(killed.session_id, None);
+
+    // `/exit`: the row went as fast (0.22 s), and the pane stayed, dead
+    // with status 0 and its pid, under remain-on-exit. The end is the
+    // host's reading and the agent has nothing to add to it.
+    let exited = observe_seat(
+        &recorded_pane(&recorded, PaneState::Dead { status: Some(0) }),
+        &recorded,
+        Some(&read_off(RECORDED_GONE, &recorded, RECORDED_PID)),
+        at,
+    );
+    assert_eq!(exited.state, RosterState::Stopped);
+    assert_eq!(exited.exit_status, Some(0));
+    assert_eq!(exited.pane_pid, Some(RECORDED_PID));
+}
+
 mod lessons {
     use super::*;
 
-    /// claude-code A1 — the pin is a measurement, not a version number: the
-    /// release each behaviour was measured against is published BESIDE the
-    /// version the binary reports this poll, and a spread between them is a
-    /// flag, never a refusal.
-    #[test]
-    fn version_pin_is_published_beside_the_live_version() {
-        let drifted = projection(Some("2.1.262"), Some("2.1.261"));
-        let body: serde_json::Value = serde_json::from_str(&render(&drifted).unwrap()).unwrap();
-        assert_eq!(body["agent_version"], "2.1.262");
-        assert_eq!(body["agent_version_expected"], "2.1.261");
-        assert_eq!(
-            body["seats"].as_array().map(Vec::len),
-            Some(0),
-            "a spread publishes the document, it does not refuse it"
-        );
-
-        // A binary that did not answer publishes a named absence, not the pin.
-        let silent = projection(None, Some("2.1.261"));
-        let body: serde_json::Value = serde_json::from_str(&render(&silent).unwrap()).unwrap();
-        assert!(body["agent_version"].is_null());
-        assert_eq!(body["agent_version_expected"], "2.1.261");
-    }
-
-    /// claude-code B1 — the roster is one command, and the reader tolerates
-    /// fields it does not know. Field presence is kind-dependent, so a reader
-    /// that requires a field on every row fails on the first mixed listing.
-    #[test]
-    fn the_roster_is_one_command() {
-        let mixed = parse_roster(
-            r#"[
-              {"id":"aa","sessionId":"aa","cwd":"/wt/builder-1","kind":"background",
-               "pid":1,"status":"idle","state":"running","name":"rook","startedAt":10,
-               "someFieldNobodyHasSeen":"harmless"},
-              {"sessionId":"bb","cwd":"/wt/builder-2","kind":"interactive"}
-            ]"#,
-        );
-        match mixed {
-            RosterRead::Readable(rows) => {
-                assert_eq!(rows.len(), 2, "both kinds survive one read");
-                assert!(rows[0].is_live());
-                assert!(!rows[1].is_live(), "an interactive row carries no pid");
-            }
-            RosterRead::Unreadable { cause } => panic!("the listing must parse: {cause}"),
-        }
-    }
-
-    /// claude-code B2 — there is no token figure anywhere in the listing, so
-    /// context accounting cannot come from it. A number that looks like one on a
-    /// row is not the seat's context: the transcript is.
-    #[test]
-    fn the_roster_carries_no_token_field() {
-        let read = parse_roster(
-            r#"[{"id":"aa","sessionId":"aa","cwd":"/wt/builder-1","kind":"background",
-                 "pid":1,"startedAt":10,"tokens":999999,"input_tokens":999999}]"#,
-        );
-        let seen = observe_seat(&read, &seat(), 2_000, &started());
-        assert_eq!(seen.state, RosterState::Present);
-
-        let from_transcript =
-            context_tokens_in(r#"{"type":"assistant","message":{"usage":{"input_tokens":7}}}"#);
-        assert_eq!(
-            from_transcript,
-            Some(7),
-            "the reading is the transcript's, and 999999 has no path into it"
-        );
-    }
-
-    /// claude-code B4 — the listing has been observed answering with zero bytes
-    /// and a success status while sessions were live. Empty is UNREADABLE, never
-    /// a reading of zero; the control is an empty JSON array, which is a listing
-    /// that answered and said there is nothing.
-    #[test]
-    fn the_roster_read_can_go_silently_dead() {
-        let silent = observe_seat(&parse_roster(""), &seat(), 2_000, &started());
-        assert_eq!(silent.state, RosterState::Unknown);
-        assert!(
-            silent.unknown_cause.is_some(),
-            "the cause travels with the Unknown"
-        );
-
-        let answered = observe_seat(&parse_roster("[]"), &seat(), 2_000, &started());
-        assert_eq!(
-            answered.state,
-            RosterState::Absent,
-            "a listing that answered and said nothing is not the same read"
-        );
-    }
-
-    /// claude-code B5 — `cwd` names a seat and proves nothing. One worktree per
-    /// seat makes the match a function; two live rows in one worktree cannot be
-    /// told apart, and picking one is how an unattributed session gets handed to
-    /// a seat as its own.
-    #[test]
-    fn cwd_names_a_seat_and_proves_nothing() {
-        let mine = observe_seat(&roster(&[live(WORKTREE, "aa")]), &seat(), 2_000, &started());
-        assert_eq!(mine.state, RosterState::Present);
-        assert_eq!(mine.session_id.as_deref(), Some("aa"));
-        assert_eq!(mine.project.as_deref(), Some("demo"));
-
-        let elsewhere = observe_seat(&roster(&[live(OTHER, "bb")]), &seat(), 2_000, &started());
-        assert_eq!(
-            elsewhere.state,
-            RosterState::Absent,
-            "a row in another seat's worktree is not this seat's"
-        );
-
-        let contested = observe_seat(
-            &roster(&[live(WORKTREE, "aa"), live(WORKTREE, "bb")]),
-            &seat(),
-            2_000,
-            &started(),
-        );
-        assert_eq!(contested.state, RosterState::Unknown);
-        assert!(
-            contested.session_id.is_none(),
-            "an unattributed pair names no session"
-        );
-
-        // Two ENDED rows beside a live one is a seat working normally beside its
-        // own history: the partition is by pid, never by count.
-        let history = observe_seat(
-            &roster(&[
-                live(WORKTREE, "aa"),
-                format!(
-                    r#"{{"sessionId":"old","cwd":"{WORKTREE}","kind":"background",
-                        "state":"done","startedAt":500}}"#
-                ),
-            ]),
-            &seat(),
-            2_000,
-            &started(),
-        );
-        assert_eq!(history.state, RosterState::Present);
-        assert_eq!(history.session_id.as_deref(), Some("aa"));
-    }
-
-    /// claude-code C1 — the transcript path is an encoding, and every context
-    /// instrument resolves the same way, so a change to it blinds them all at
-    /// once. The rule is EVERY non-alphanumeric character, not the separator
-    /// alone: a worktree carrying a dot, an underscore or a space is the case a
-    /// separator-only reader publishes a null context for forever.
-    #[test]
-    fn the_transcript_path_encoding() {
-        let path = transcript_path(Path::new("/home/av/.claude"), "/wt/builder-1", "aa-bb");
-        assert_eq!(
-            path,
-            Path::new("/home/av/.claude/projects/-wt-builder-1/aa-bb.jsonl")
-        );
-
-        assert_eq!(
-            encode_project_dir("/Users/av/.claude/jobs/tmp"),
-            "-Users-av--claude-jobs-tmp",
-            "a dot is a dash, and a dot after a separator is two"
-        );
-        assert_eq!(
-            encode_project_dir("/wt/my_seat/a b.c"),
-            "-wt-my-seat-a-b-c",
-            "an underscore, a space and a dot are all dashes"
-        );
-        assert_eq!(encode_project_dir("plain123"), "plain123");
-    }
-
-    /// claude-code B8 — one field says a session is stopped in front of a human,
-    /// and it is keyed on PRESENCE. The vocabulary is the agent's, so a cause
-    /// this fleet has never seen must still stop the seat rather than read as a
-    /// healthy one; the control below is the same row without the field.
-    #[test]
-    fn waiting_for_names_the_block() {
-        let blocked = observe_seat(
-            &roster(&[waiting(WORKTREE, "aa", "input needed")]),
-            &seat(),
-            2_000,
-            &started(),
-        );
-        assert_eq!(blocked.state, RosterState::PromptBlocked);
-        assert_eq!(blocked.waiting_for.as_deref(), Some("input needed"));
-        assert_eq!(blocked.session_id.as_deref(), Some("aa"));
-
-        let unrecognised = observe_seat(
-            &roster(&[waiting(WORKTREE, "aa", "a cause nobody has enumerated")]),
-            &seat(),
-            2_000,
-            &started(),
-        );
-        assert_eq!(
-            unrecognised.state,
-            RosterState::PromptBlocked,
-            "presence, never the value: an unknown cause still stops the seat"
-        );
-
-        let control = observe_seat(&roster(&[live(WORKTREE, "aa")]), &seat(), 2_000, &started());
-        assert_eq!(control.state, RosterState::Present);
-        assert_eq!(control.waiting_for, None);
-
-        // The reference publishes no context reading for this state, and the
-        // acceptance is row-for-row parity with it.
-        assert!(!RosterState::PromptBlocked.has_context_reading());
-        assert!(RosterState::Present.has_context_reading());
-        assert!(RosterState::Stopped.has_context_reading());
-        assert!(!RosterState::Starting.has_context_reading());
-    }
-
-    /// claude-code A2 — a row with no pid is two different states: a session
-    /// that has ENDED, and one that has not finished STARTING. `state` is what
-    /// tells them apart, and reading pid alone collapses the second into the
-    /// first and spawns over a newborn.
-    #[test]
-    fn pid_null_is_two_states() {
-        let newborn = newborn(WORKTREE, "new", 100_000);
-        let ended = ended(WORKTREE, "old", 90_000);
-
-        // Inside the grace window, a pid-less row with no end marker is starting.
-        let starting = observe_seat(
-            &roster(std::slice::from_ref(&newborn)),
-            &seat(),
-            110_000,
-            &started(),
-        );
-        assert_eq!(starting.state, RosterState::Starting);
-        assert_eq!(starting.session_id.as_deref(), Some("new"));
-
-        // Past it, the same row is not: the grace bound is what separates a slow
-        // start from a row that will never gain a pid.
-        let aged = observe_seat(
-            &roster(std::slice::from_ref(&newborn)),
-            &seat(),
-            100_000 + STARTING_GRACE_MS + 1,
-            &started(),
-        );
-        assert_eq!(aged.state, RosterState::Stopped);
-
-        // A row carrying the end marker is stopped inside the same window.
-        let stopped = observe_seat(
-            &roster(std::slice::from_ref(&ended)),
-            &seat(),
-            110_000,
-            &started(),
-        );
-        assert_eq!(stopped.state, RosterState::Stopped);
-        assert_eq!(stopped.session_id.as_deref(), Some("old"));
-
-        // The ordering: a starting row outranks the ended ones beside it, even
-        // when an ended row started later.
-        let both = observe_seat(
-            &roster(&[ended.clone(), newborn.clone()]),
-            &seat(),
-            110_000,
-            &started(),
-        );
-        assert_eq!(both.state, RosterState::Starting);
-        assert_eq!(both.session_id.as_deref(), Some("new"));
-
-        // Past the recency bound every ended row is history and the seat reads
-        // plainly absent.
-        let history = observe_seat(
-            &roster(&[ended]),
-            &seat(),
-            90_000 + WINDOW_MS + 1,
-            &started(),
-        );
-        assert_eq!(history.state, RosterState::Absent);
-        assert_eq!(history.session_id, None);
-    }
-
-    /// The window is measured from the session's END, and this is what happens
-    /// when there is no end to measure from.
-    ///
-    /// The listing carries no end stamp on any row (measured 2.1.261), so the
-    /// end is the transcript's last write, and a transcript that does not
-    /// resolve leaves the start stamp as the only reading there is. A row kept
-    /// on that reading says so: the fallback is a different question answered —
-    /// how long the session RAN, not how long ago it finished — and a reader
-    /// that cannot tell the two apart is back where this rule started.
-    #[test]
-    fn a_stopped_row_with_no_end_falls_back_to_its_start_and_names_the_fallback() {
-        let old = ended(WORKTREE, "old", 1_000);
-        let ended_now: fn(&str, &str) -> Option<u64> = |_, _| Some(1_000_000);
-        let ends = Recency {
-            window_ms: WINDOW_MS,
-            ended_at: &ended_now,
-        };
-
-        // With an end that resolves: judged on it, and nothing to say.
-        let on_its_end = observe_seat(
-            &roster(std::slice::from_ref(&old)),
-            &seat(),
-            1_060_000,
-            &ends,
-        );
-        assert_eq!(on_its_end.state, RosterState::Stopped);
-        assert_eq!(
-            on_its_end.recency_fallback, None,
-            "a row judged on its end has no fallback to report"
-        );
-
-        // Without one: the same row, the same window, judged on its start — and
-        // the reading is named rather than passed off as the one above.
-        let on_its_start = observe_seat(
-            &roster(std::slice::from_ref(&old)),
-            &seat(),
-            1_060_000,
-            &started(),
-        );
-        assert_eq!(on_its_start.state, RosterState::Stopped);
-        assert_eq!(
-            on_its_start.recency_fallback.as_deref(),
-            Some(FELL_BACK_TO_START),
-            "a row kept on its start stamp says which stamp kept it"
-        );
-
-        // And the fallback is a real reading and not a pass: the same row is
-        // history once its START is outside the window, which is the behaviour
-        // the end-keyed rule replaces and the only one available here.
-        let past_it = observe_seat(&roster(&[old]), &seat(), 1_000 + WINDOW_MS + 1, &started());
-        assert_eq!(past_it.state, RosterState::Absent);
-    }
-
-    /// claude-code C2 — the entry shape: there is no single context number, and
-    /// the reading is the arithmetic over the input tokens and both cache
-    /// figures on the LAST main-chain assistant entry.
-    #[test]
-    fn the_transcript_entry_shape() {
-        let body = r#"
-{"type":"user","message":{"usage":{"input_tokens":900}}}
-{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":2,"cache_creation_input_tokens":3}}}
-{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}}
-{"type":"assistant","message":{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
-{"type":"assistant","message":{"usage":{"inp"#;
-        assert_eq!(
-            context_tokens_in(body),
-            Some(60),
-            "the last entry stating a window, summed over all three figures"
-        );
-        assert_eq!(
-            context_tokens_in(r#"{"type":"assistant","message":{}}"#),
-            None,
-            "an entry with no usage block states no window"
-        );
-        assert_eq!(context_tokens_in(""), None);
-    }
-
-    /// The turn reader beside the window reader (flights PRD R12): the SAME
-    /// filter, one step shorter.
-    ///
-    /// The two part company on exactly one entry shape, and the fixture is
-    /// built so they must answer differently: four main-chain assistant entries
-    /// carry a usage block and one of them sums to zero, so the window reader
-    /// answers the last non-zero and the turn reader answers 4. A reader that
-    /// had copied the window's own filter would answer 3 here.
-    #[test]
-    fn the_turn_reader_counts_the_entry_the_window_reader_skips() {
-        let body = r#"
-{"type":"user","message":{"usage":{"input_tokens":900}}}
-{"type":"assistant","message":{"usage":{"input_tokens":1}}}
-{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":2600000}}}
-{"type":"assistant","message":{"usage":{"input_tokens":0,"cache_read_input_tokens":0}}}
-{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":20}}}
-{"type":"assistant","message":{"usage":{"input_tokens":40,"cache_read_input_tokens":20}}}
-{"type":"assistant","message":{"usage":{"inp"#;
-        assert_eq!(turns_in(body), 4, "the zero-usage entry is a turn");
-        assert_eq!(
-            context_tokens_in(body),
-            Some(60),
-            "and the window reader still skips it, which is what makes the count above a second \
-             reading rather than a copy"
-        );
-
-        // An entry with NO usage block is not a turn either reader counts: the
-        // agent made no call, so there is nothing to count.
-        assert_eq!(
-            turns_in(r#"{"type":"assistant","message":{}}"#),
-            0,
-            "no usage block is no turn"
-        );
-        assert_eq!(
-            turns_in(""),
-            0,
-            "and an empty transcript is a measured zero"
-        );
-
-        // The sidechain control, as C3's own arm has it: with the flag
-        // cleared, the entry IS counted — so the skip is a filter and not an
-        // inference.
-        let control = body.replace("\"isSidechain\":true", "\"isSidechain\":false");
-        assert_eq!(
-            turns_in(&control),
-            5,
-            "the control must count the entry the skip drops, or the skip proves nothing"
-        );
-    }
-
-    /// claude-code C3 — a sidechain entry is a subagent's turn carrying the
-    /// subagent's window. The flag is on every entry, so the skip is a filter
-    /// and not an inference; the control below is the same file with the flag
-    /// cleared, where the entry IS the reading.
-    #[test]
-    fn sidechains_carry_another_window() {
-        let with_subagent = r#"
-{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":11}}}
-{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":2600000}}}"#;
-        assert_eq!(context_tokens_in(with_subagent), Some(11));
-
-        let control = with_subagent.replace("\"isSidechain\":true", "\"isSidechain\":false");
-        assert_eq!(
-            context_tokens_in(&control),
-            Some(2_600_000),
-            "the control must read the entry the skip drops, or the skip proves nothing"
-        );
-
-        let absent_flag = r#"{"type":"assistant","message":{"usage":{"input_tokens":42}}}"#;
-        assert_eq!(
-            context_tokens_in(absent_flag),
-            Some(42),
-            "an absent flag reads as main chain"
-        );
-    }
-
-    /// claude-code D4 — the host's file-access dialog does not refuse, it BLOCKS
-    /// until somebody answers, and whether a guarded read under it returns an
-    /// error or simply hangs was never measured. So the gate is built so the
+    /// lessons claude-code D4 — the host's file-access dialog does not refuse,
+    /// it BLOCKS until somebody answers, and whether a guarded read under it
+    /// returns an error or simply hangs was never measured. So the gate is built so the
     /// answer does not matter: a listing that outlasts the bound is PENDING
     /// exactly as a refusal is, the detail says which one was seen, and while
     /// any seat is pending no effect is issued.
@@ -611,71 +537,265 @@ mod lessons {
             assert_eq!(read.state, GRANT_OK);
         }
     }
+}
 
-    /// claude-code A11 — the configuration directory scopes the provider's
-    /// DAEMON, and this slice's consequence: a per-row directory is a per-row
-    /// daemon, and a per-row daemon is a per-row ROSTER, so the fleet's listing
-    /// does not name a session started under one and every read about that
-    /// session has to be made under the same directory.
-    ///
-    /// Measured live on this box on 2026-09-12 on 2.1.261, before the code was
-    /// written: two daemons side by side, the fleet's pid unchanged across the
-    /// probe; the fleet's `agents --json --all` answered 9 rows and named none of
-    /// the session under the scratch directory, whose own listing answered
-    /// exactly 1 and named only it; and `claude logs <short id>` from the fleet's
-    /// directory exited 1 with "No job matching" for that same live session.
-    ///
-    /// The fixture is the FOLD, because that is where the consequence lands: the
-    /// directories asked for are recorded, and the row is decided against the
-    /// one that could see it.
-    #[test]
-    fn the_config_dir_scopes_the_daemon() {
-        let named = seat();
-        let spawned = transient_seat();
-        let seats = vec![named.clone(), spawned.clone()];
-        let per_row_dir = "/machine/config/builder-9";
+// ------------------------------------------------ presence against activity
+//
+// One arm per case of `observe_seat`, in its own order (fleet-rge6.3): what
+// the host holds for the seat, and what the agent answered beside it.
 
-        // Which directories the poll asked for, in call order.
-        let asked = std::cell::RefCell::new(Vec::new());
-        let reads = |dir: Option<&Path>| {
-            asked
-                .borrow_mut()
-                .push(dir.map(|d| d.display().to_string()));
-            match dir {
-                None => roster(&[live(WORKTREE, "named-session")]),
-                Some(_) => roster(&[live(OTHER, "spawned-session")]),
-            }
-        };
-        let rosters = Rosters::gather(
-            &seats,
-            &|seat: &str| (seat == "builder-9").then(|| per_row_dir.to_string()),
-            &reads,
-        );
+/// The host's own listing could not be read: Unknown, with the host's cause,
+/// whatever the agent says — a seat whose presence nobody read is never
+/// decided on its activity alone.
+#[test]
+fn an_unreadable_host_is_unknown_with_the_hosts_cause() {
+    let unreadable = HostRead::Unreadable {
+        cause: "the server said no".to_string(),
+    };
+    let seen = observe_seat(
+        &unreadable,
+        &seat(),
+        Some(&reading(&seat(), Activity::Idle, Some("aa"), None)),
+        2_000,
+    );
+    assert_eq!(seen.state, RosterState::Unknown);
+    assert_eq!(seen.unknown_cause.as_deref(), Some("the server said no"));
+    assert_eq!(seen.session_id, None);
+}
 
-        // ONE READ PER DISTINCT DIRECTORY, the fleet's among them: a poll that
-        // read once could not see the spawned row at all, and one that read per
-        // seat would ask the fleet's twice.
-        assert_eq!(
-            asked.into_inner(),
-            vec![None, Some(per_row_dir.to_string())],
-            "the fleet's directory and the row's own, once each"
-        );
+/// No session on the host: Absent, which is the one state a spawn is issued
+/// from.
+#[test]
+fn no_session_and_no_live_row_is_absent() {
+    let seen = observe_seat(&nothing_hosted(), &seat(), None, 2_000);
+    assert_eq!(seen.state, RosterState::Absent);
+    assert_eq!(seen.unknown_cause, None);
+    assert_eq!(seen.pane_pid, None);
 
-        // And the row is decided against the listing that could see it, while the
-        // fleet's — the same moment, the same fold — reads it absent.
-        assert_eq!(
-            observe_seat(rosters.for_seat(&spawned.name), &spawned, 2_000, &started()).state,
-            RosterState::Present
+    // Another seat's session on the host is not this one's.
+    let (host, _) = hosting(&transient_seat());
+    let beside = observe_seat(&host.list(), &seat(), None, settled(&host));
+    assert_eq!(beside.state, RosterState::Absent);
+}
+
+/// No session on the host, and the agent running a LIVE session standing in
+/// the seat's worktree: still ABSENT. No seat is found by its working
+/// directory, anywhere (CORRECTIONS AT REVIEW, 2026-09-25;
+/// the claude-code pack's lessons B5) — the agent is only ever asked about a
+/// seat's own pane, so a session fleet does not host is invisible to the seat
+/// and never handed to it.
+///
+/// This replaces fleet-rge6.3's Unknown for the same shape, which read the
+/// listing's rows by directory.
+#[test]
+fn no_session_beside_a_live_row_in_the_worktree_is_absent_and_never_the_seats() {
+    let unhosted = recorded_seat();
+    let asked = RefCell::new(0);
+    let agent = ByDirectory::new(|_: Option<&str>| {
+        *asked.borrow_mut() += 1;
+        Ok(RECORDED_IDLE.to_string())
+    });
+    let seen = observe_fleet(
+        &agent,
+        &nothing_hosted(),
+        std::slice::from_ref(&unhosted),
+        &|_: &SeatId| Held::default(),
+        2_000,
+    );
+    assert_eq!(seen[0].state, RosterState::Absent);
+    assert_eq!(seen[0].unknown_cause, None);
+    assert_eq!(seen[0].session_id, None, "and it is not handed the session");
+    assert_eq!(
+        *asked.borrow(),
+        0,
+        "a seat with no pane is asked about by nobody"
+    );
+}
+
+/// The seat's pane is DEAD: Stopped, with the status it exited with and the
+/// pid it had. The agent's answer is not read — the session left with its
+/// process — and one nobody could make changes nothing.
+#[test]
+fn a_dead_pane_is_stopped_with_its_exit_status() {
+    let (host, pid) = hosting(&seat());
+    host.end(&session_for(&seat().id), Some(3));
+    let seen = observe_seat(&host.list(), &seat(), None, settled(&host));
+    assert_eq!(seen.state, RosterState::Stopped);
+    assert_eq!(seen.exit_status, Some(3));
+    assert_eq!(seen.pane_pid, Some(pid));
+    assert_eq!(seen.worktree.as_deref(), Some(WORKTREE));
+
+    let blind = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&reading(
+            &seat(),
+            Activity::Unknown,
+            None,
+            Some("the listing could not be read: zero bytes"),
+        )),
+        settled(&host),
+    );
+    assert_eq!(blind.state, RosterState::Stopped);
+
+    // A signal leaves no status, and the end is still an end.
+    let (host, _) = hosting(&seat());
+    host.end(&session_for(&seat().id), None);
+    let signalled = observe_seat(&host.list(), &seat(), None, settled(&host));
+    assert_eq!(signalled.state, RosterState::Stopped);
+    assert_eq!(signalled.exit_status, None);
+}
+
+/// A LIVE pane beside a reading the agent could not make: Unknown, naming both
+/// — never Present on a reading nobody took (reviewer call 2026-09-25 (1)) —
+/// and whatever the pane's age: a young pane is not starting on a read that
+/// never happened.
+#[test]
+fn a_live_pane_beside_an_unreadable_listing_is_unknown_naming_both() {
+    let (host, pid) = hosting(&seat());
+    let unreadable = read_off("", &seat(), pid);
+    assert_eq!(unreadable.activity, Activity::Unknown);
+    for at in [created(&host) + 500, settled(&host)] {
+        let seen = observe_seat(&host.list(), &seat(), Some(&unreadable), at);
+        assert_eq!(seen.state, RosterState::Unknown, "at {at}");
+        let cause = seen
+            .unknown_cause
+            .expect("the cause travels with the Unknown");
+        assert!(cause.contains(&format!("pid {pid}")), "{cause}");
+        assert!(cause.contains("zero bytes"), "{cause}");
+        assert_eq!(seen.pane_pid, Some(pid));
+    }
+
+    // A pane the agent was never asked about is the same could-not-tell.
+    let unasked = observe_seat(&host.list(), &seat(), None, settled(&host));
+    assert_eq!(unasked.state, RosterState::Unknown);
+}
+
+/// A live pane and a reading of it: Present, or PromptBlocked where the agent
+/// says it is blocked, with the reading's activity carried as the seat's and
+/// its session as the seat's.
+#[test]
+fn a_live_pane_and_its_row_is_present_with_the_status_as_activity() {
+    let (host, pid) = hosting(&seat());
+    let idle = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&recorded_as(RECORDED_IDLE, &seat(), pid)),
+        settled(&host),
+    );
+    assert_eq!(idle.state, RosterState::Present);
+    assert_eq!(idle.activity, Some(Activity::Idle));
+    assert_eq!(idle.session_id.as_deref(), Some(RECORDED_SESSION));
+    assert_eq!(idle.pane_pid, Some(pid));
+    assert_eq!(idle.exit_status, None);
+    assert_eq!(idle.project.as_deref(), Some("demo"));
+
+    let busy = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&recorded_as(RECORDED_BUSY, &seat(), pid)),
+        settled(&host),
+    );
+    assert_eq!(busy.state, RosterState::Present);
+    assert_eq!(busy.activity, Some(Activity::Busy));
+
+    let blocked = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&recorded_as(RECORDED_WAITING, &seat(), pid)),
+        settled(&host),
+    );
+    assert_eq!(blocked.state, RosterState::PromptBlocked);
+    assert_eq!(blocked.waiting_for.as_deref(), Some("permission prompt"));
+
+    // A row that says it waits and names no cause is blocked all the same: the
+    // one answer a typed turn refuses on (`effect::type_turn`), so the
+    // projection never calls present a seat a nudge would refuse.
+    let causeless = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&recorded_as(
+            &RECORDED_WAITING.replace(r#","waitingFor":"permission prompt""#, ""),
+            &seat(),
+            pid,
+        )),
+        settled(&host),
+    );
+    assert_eq!(causeless.state, RosterState::PromptBlocked);
+    assert_eq!(causeless.waiting_for.as_deref(), Some("status waiting"));
+
+    // A session the agent FOUND whose activity it cannot say — a status word
+    // it has no reading for, or a row listed before its status — is still a
+    // session there, never an absence and never a fifth state.
+    for activity in [Activity::Unknown, Activity::Starting] {
+        let found = observe_seat(
+            &host.list(),
+            &seat(),
+            Some(&reading(&seat(), activity, Some("aa"), None)),
+            settled(&host),
         );
-        assert_eq!(
-            observe_seat(rosters.fleet(), &spawned, 2_000, &started()).state,
-            RosterState::Absent
-        );
+        assert_eq!(found.state, RosterState::Present, "{activity:?}");
+        assert_eq!(found.session_id.as_deref(), Some("aa"));
     }
 }
 
-/// The grant as the projection publishes it (R26, R33): the state, the detail
-/// while it is pending, and the effects view the two of them produce.
+/// A live pane the agent names no session for YET: Starting, while the session
+/// is younger than the grace — an interactive row was listed 0.5–0.75 s after
+/// its session was made (2.1.280), and a poll can land inside that.
+#[test]
+fn a_young_live_pane_with_no_row_is_starting() {
+    let (host, pid) = hosting(&seat());
+    let seen = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&read_off(RECORDED_GONE, &seat(), pid)),
+        created(&host) + 500,
+    );
+    assert_eq!(seen.state, RosterState::Starting);
+    assert_eq!(seen.pane_pid, Some(pid));
+    assert_eq!(seen.unknown_cause, None);
+}
+
+/// The same pane past the grace, still unnamed: Unknown, saying the host holds
+/// the pid alive and the agent names no session for it. The row with the
+/// recording's own pid is somebody else's, and it changes nothing.
+#[test]
+fn an_older_live_pane_with_no_row_is_unknown_naming_the_pid() {
+    let (host, pid) = hosting(&seat());
+    let at_the_edge = created(&host) + STARTING_GRACE_MS - 1;
+    assert_eq!(
+        observe_seat(
+            &host.list(),
+            &seat(),
+            Some(&read_off(RECORDED_GONE, &seat(), pid)),
+            at_the_edge
+        )
+        .state,
+        RosterState::Starting,
+        "one millisecond inside the grace is still starting"
+    );
+
+    let seen = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&read_off(RECORDED_IDLE, &seat(), pid)),
+        created(&host) + STARTING_GRACE_MS,
+    );
+    assert_eq!(seen.state, RosterState::Unknown);
+    assert_eq!(
+        seen.unknown_cause.as_deref(),
+        Some(
+            format!(
+                "tmux holds pid {pid} alive for {}; the listing names no row with pid {pid}",
+                seat().machine_name()
+            )
+            .as_str()
+        )
+    );
+}
+
+/// The grant as the projection publishes it: the state, the detail while it is
+/// pending, and the effects view the two of them produce.
 #[test]
 fn the_projection_publishes_the_grant_and_holds_effects_while_it_is_pending() {
     let mut pending = projection(Some("2.1.261"), None);
@@ -723,23 +843,28 @@ fn the_projection_publishes_the_grant_and_holds_effects_while_it_is_pending() {
 
 /// A pid in a state file reads as a live collector to the next person who opens
 /// it, so the published document carries no pid, no handle and no session id —
-/// on any row, in any state (PRD R26).
+/// on any row, in any state.
 #[test]
 fn the_projection_carries_no_pid_and_no_handle() {
-    let read = parse_roster(
-        r#"[{"id":"short-id","sessionId":"a-session-id","cwd":"/wt/builder-1",
-             "kind":"background","pid":4242,"startedAt":10}]"#,
+    let (host, pid) = hosting(&seat());
+    let read = read_off(
+        &format!(
+            r#"[{{"id":"short-id","sessionId":"a-session-id","cwd":"/wt/builder-1",
+                 "kind":"background","pid":{pid},"status":"idle","startedAt":10}}]"#
+        ),
+        &seat(),
+        pid,
     );
-    let seen = observe_seat(&read, &seat(), 2_000, &started());
+    let seen = observe_seat(&host.list(), &seat(), Some(&read), settled(&host));
     assert_eq!(seen.state, RosterState::Present);
+    assert_eq!(seen.pane_pid, Some(pid));
 
     let mut document = projection(Some("2.1.261"), Some("2.1.261"));
-    document.seats = vec![SeatRow::from_observation(
-        "builder-1",
-        Some("Rook"),
-        &seen,
-        Some(1234),
-    )];
+    let orla = Seat {
+        name: Some("Orla".to_string()),
+        ..seat()
+    };
+    document.seats = vec![SeatRow::from_observation(&orla, &seen, Some(1234))];
     let body = render(&document).unwrap();
 
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -748,7 +873,7 @@ fn the_projection_carries_no_pid_and_no_handle() {
         "\"pid\"",
         "\"handle\"",
         "\"session_id\"",
-        "4242",
+        &pid.to_string(),
         "short-id",
     ] {
         assert!(
@@ -764,11 +889,12 @@ fn the_projection_carries_no_pid_and_no_handle() {
 /// intent as the fleet's state, and a row that says neither is a permanent seat
 /// on the fleet's default model — which is a reading rather than a silence.
 ///
-/// The forbidden-key shape above, over a PRESENT row: `from_observation` never
-/// reads the `Seat`, so the two fields are set to show that the projection is
-/// not handed them rather than to feed them in, and the state is what has to be
-/// asserted — an Unknown row carries neither key either, and an arm that read
-/// one would pass while a leak scoped to a seat that was found went by.
+/// The forbidden-key shape above, over a PRESENT row: `from_observation` reads
+/// the `Seat` for its id and its name and nothing else, so the two fields are
+/// set to show that the projection is not handed them rather than to feed them
+/// in, and the state is what has to be asserted — an Unknown row carries
+/// neither key either, and an arm that read one would pass while a leak scoped
+/// to a seat that was found went by.
 #[test]
 fn the_projection_carries_no_model_and_no_transient() {
     let configured = Seat {
@@ -776,12 +902,7 @@ fn the_projection_carries_no_model_and_no_transient() {
         transient: true,
         ..seat()
     };
-    let seen = observe_seat(
-        &roster(&[live(WORKTREE, "a-session")]),
-        &configured,
-        2_000,
-        &started(),
-    );
+    let seen = present(&configured, WORKTREE, "a-session");
     assert_eq!(
         seen.state,
         RosterState::Present,
@@ -789,19 +910,15 @@ fn the_projection_carries_no_model_and_no_transient() {
     );
 
     let mut document = projection(Some("2.1.261"), Some("2.1.261"));
-    document.seats = vec![SeatRow::from_observation(
-        &configured.name,
-        configured.chosen_name.as_deref(),
-        &seen,
-        Some(1234),
-    )];
+    // The row the loop publishes: the seat as its object — which, for this
+    // seat, carries no name.
+    document.seats = vec![SeatRow::from_observation(&configured, &seen, Some(1234))];
     let body = render(&document).unwrap();
 
     // The positive control: the row IS this seat's, so the absences below are
     // the projection's silence and not an empty document.
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(parsed["seats"][0]["seat_dir"], "builder-1");
-    assert_eq!(parsed["seats"][0]["chosen_name"], "Rook");
+    assert_eq!(parsed["seats"][0]["seat"]["id"], configured.id.to_string());
     assert_eq!(parsed["seats"][0]["roster_state"], "present");
 
     for forbidden in ["\"model\"", "\"transient\"", "a-model"] {
@@ -812,13 +929,73 @@ fn the_projection_carries_no_model_and_no_transient() {
     }
 }
 
+/// A row names its seat as the one object every document carries: `{id, name,
+/// kind}`, and nothing beside it. The two keys it replaced are gone rather than
+/// kept alongside — a reader that still found `seat_dir` would go on keying on
+/// it — and a seat with no name of its own carries no `name` key at all, which
+/// a reader can tell from a name that is empty.
+#[test]
+fn a_row_names_its_seat_as_the_id_the_name_and_the_kind() {
+    let orla = Seat {
+        name: Some("Orla".to_string()),
+        ..seat()
+    };
+    let seen = present(&orla, WORKTREE, "a-session");
+    let nameless = Seat {
+        id: id(TRANSIENT_ID),
+        worktrees: vec![("demo".to_string(), OTHER.to_string())],
+        ..seat()
+    };
+    let unseen = observe_seat(&nothing_hosted(), &nameless, None, 2_000);
+
+    let mut document = projection(Some("2.1.261"), Some("2.1.261"));
+    document.seats = vec![
+        SeatRow::from_observation(&orla, &seen, Some(1234)),
+        SeatRow::from_observation(&nameless, &unseen, None),
+    ];
+    let body = render(&document).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        parsed["seats"][0]["seat"],
+        serde_json::json!({ "id": SEAT_ID, "name": "Orla", "kind": "agent" }),
+        "{body}"
+    );
+    for retired in ["seat_dir", "chosen_name"] {
+        assert!(
+            parsed["seats"][0].get(retired).is_none(),
+            "the row carries no {retired}: {body}"
+        );
+    }
+    assert_eq!(
+        parsed["seats"][1]["seat"],
+        serde_json::json!({ "id": TRANSIENT_ID, "kind": "agent" }),
+        "{body}"
+    );
+    assert!(
+        parsed["seats"][1]["seat"].get("name").is_none(),
+        "a nameless seat's object has no name key: {body}"
+    );
+
+    // And the reader `fleet status` uses takes the document back.
+    let read: Projection = serde_json::from_str(&body).expect("the writer's own document");
+    assert_eq!(read.seats[0].seat.name.as_deref(), Some("Orla"));
+    assert_eq!(read.seats[1].seat.name, None);
+}
+
 /// An Unknown seat publishes its cause and no context figure: a reading nobody
 /// took is a named absence, never a stale number carried forward.
 #[test]
 fn an_unknown_seat_publishes_its_cause_and_no_reading() {
-    let seen = observe_seat(&parse_roster(""), &seat(), 2_000, &started());
+    let (host, pid) = hosting(&seat());
+    let seen = observe_seat(
+        &host.list(),
+        &seat(),
+        Some(&read_off("", &seat(), pid)),
+        settled(&host),
+    );
     let mut document = projection(Some("2.1.261"), Some("2.1.261"));
-    document.seats = vec![SeatRow::from_observation("builder-1", None, &seen, None)];
+    document.seats = vec![SeatRow::from_observation(&seat(), &seen, None)];
     let parsed: serde_json::Value = serde_json::from_str(&render(&document).unwrap()).unwrap();
     assert_eq!(parsed["seats"][0]["roster_state"], "unknown");
     assert!(parsed["seats"][0]["context_tokens"].is_null());
@@ -831,51 +1008,62 @@ fn an_unknown_seat_publishes_its_cause_and_no_reading() {
 /// are put in one form, so a configured path and a reported one that differ only
 /// there are the same place — and the root is left alone, because trimming it
 /// away leaves nothing to compare.
+///
+/// The match attributes nothing (the pid does); it is what names the project a
+/// present seat's pane stands in.
 #[test]
 fn a_trailing_separator_on_either_side_is_the_same_directory() {
     let with_slash = format!("{WORKTREE}/");
 
-    let read = roster(&[live(&with_slash, "a-session")]);
-    assert_eq!(
-        observe_seat(&read, &seat(), 2_000, &started()).state,
-        RosterState::Present,
-        "a reported cwd with a trailing separator matches a worktree without one"
-    );
-
     let mut slashed = seat();
     slashed.worktrees = vec![("demo".to_string(), with_slash.clone())];
-    let read = roster(&[live(WORKTREE, "a-session")]);
     assert_eq!(
-        observe_seat(&read, &slashed, 2_000, &started()).state,
-        RosterState::Present,
-        "and a configured worktree with one matches a cwd without"
+        present(&slashed, WORKTREE, "a-session").project.as_deref(),
+        Some("demo"),
+        "a configured worktree with one holds a pane standing in one without"
     );
+
+    // And a pane reported with one stands in a worktree configured without.
+    let host = FakeHost::new();
+    host.new_session(
+        &session_for(&seat().id),
+        Path::new(&with_slash),
+        &["/nowhere/agent".to_string()],
+        &[],
+    )
+    .expect("the fake host starts the session");
+    let read = reading(&seat(), Activity::Idle, Some("a-session"), None);
+    let seen = observe_seat(&host.list(), &seat(), Some(&read), settled(&host));
+    assert_eq!(seen.project.as_deref(), Some("demo"));
+    assert_eq!(seen.worktree.as_deref(), Some(WORKTREE));
 
     assert_eq!(dir_key("/"), "/", "the root is left alone");
 
-    // The control: a directory that differs by more than a separator is a
-    // different directory, so the two matches above are the normalisation's and
-    // not a matcher that says yes to everything.
-    let read = roster(&[live(OTHER, "a-session")]);
-    assert_eq!(
-        observe_seat(&read, &seat(), 2_000, &started()).state,
-        RosterState::Absent
-    );
+    // The control: a seat on two projects whose pane stands in NEITHER names
+    // no project, so the two matches above are the normalisation's and not a
+    // matcher that says yes to everything.
+    let mut several = seat();
+    several.worktrees = vec![
+        ("demo".to_string(), "/wt/elsewhere".to_string()),
+        ("other".to_string(), OTHER.to_string()),
+    ];
+    let (host, _) = hosting(&several);
+    let seen = observe_seat(&host.list(), &several, Some(&read), settled(&host));
+    assert_eq!(seen.state, RosterState::Present);
+    assert_eq!(seen.project, None);
 }
 
-/// A seat no row matched still names where it would be found — but only when
-/// that is one place. Registered on several projects it has no one answer, and
-/// the fields are absent rather than guessed.
+/// A seat no session answers for still names where it would be found — but
+/// only when that is one place. Registered on several projects it has no one
+/// answer, and the fields are absent rather than guessed.
 #[test]
 fn a_seat_on_several_projects_names_no_worktree_when_no_row_matches() {
-    let empty = roster(&[]);
-
     let mut several = seat();
     several.worktrees = vec![
         ("demo".to_string(), WORKTREE.to_string()),
         ("other".to_string(), OTHER.to_string()),
     ];
-    let seen = observe_seat(&empty, &several, 2_000, &started());
+    let seen = observe_seat(&nothing_hosted(), &several, None, 2_000);
     assert_eq!(seen.state, RosterState::Absent);
     assert!(
         seen.project.is_none() && seen.worktree.is_none(),
@@ -883,7 +1071,7 @@ fn a_seat_on_several_projects_names_no_worktree_when_no_row_matches() {
     );
 
     // The control: one project, and the same absent seat names both.
-    let seen = observe_seat(&empty, &seat(), 2_000, &started());
+    let seen = observe_seat(&nothing_hosted(), &seat(), None, 2_000);
     assert_eq!(seen.state, RosterState::Absent);
     assert_eq!(seen.project.as_deref(), Some("demo"));
     assert_eq!(seen.worktree.as_deref(), Some(WORKTREE));
@@ -894,14 +1082,19 @@ fn projection(agent_version: Option<&str>, expected: Option<&str>) -> Projection
         version: VERSION,
         generated_at: "2026-09-06T00:00:00Z".to_string(),
         controller_version: "0.1.0".to_string(),
+        agent: AgentView {
+            adapter: "an-adapter".to_string(),
+            name: Some(StubAgent::NAME.to_string()),
+            version: agent_version.map(str::to_string),
+            expected: expected.map(str::to_string),
+            postures: vec![Posture::Ask, Posture::Auto, Posture::Unattended],
+        },
         agent_version: agent_version.map(str::to_string),
         agent_version_expected: expected.map(str::to_string),
         fleet: PolicyView {
             path: "/fleet/fleet.toml".to_string(),
             mtime: Some("2026-09-06T00:00:00Z".to_string()),
             poll_seconds: 5,
-            claude_code: expected.map(str::to_string),
-            plugin_dir: None,
         },
         fleet_parse_error: None,
         in_flight: None,
@@ -913,12 +1106,107 @@ fn projection(agent_version: Option<&str>, expected: Option<&str>) -> Projection
     }
 }
 
+// ------------------------------------------------------ the projection's agent
+
+/// E13 — the projection names the agent in words that name no vendor: which
+/// adapter answers, which agent it drives at which version, the release it is
+/// expected at and the postures it takes — and the two fields it replaced stay
+/// as its mirrors, so `agent.version` IS `agent_version` and `agent.expected`
+/// IS `agent_version_expected`.
+///
+/// Driven through the loop itself, one poll against a stub agent and a fake
+/// host, because the mirrors are the loop's to fill: a fixture document would
+/// only agree with itself.
+#[test]
+fn the_projections_agent_block_mirrors_the_version_fields_and_names_the_adapter() {
+    let root = std::env::temp_dir().join(format!("fleet-observe-agent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let machine = root.join("machine");
+    let worktree = root.join("wt");
+    std::fs::create_dir_all(&worktree).expect("the worktree is made");
+    std::fs::create_dir_all(&machine).expect("the machine directory is made");
+    std::fs::write(root.join("fleet.toml"), "[controller]\npoll_seconds = 1\n")
+        .expect("the policy is written");
+    std::fs::write(
+        machine.join("config.json"),
+        format!(
+            "{{\"fleet_toml\": \"{}\", \"children\": [\
+             {{\"id\": \"{SEAT_ID}\", \"worktrees\": {{\"demo\": \"{}\"}}}}]}}\n",
+            root.join("fleet.toml").display(),
+            worktree.display()
+        ),
+    )
+    .expect("the seat list is written");
+    common::hermetic::export(common::hermetic::vars(&root, &machine));
+    platform::clear_stop();
+
+    let host = FakeHost::new();
+    host.new_session(
+        &session_for(&id(SEAT_ID)),
+        &worktree,
+        &["/nowhere/agent".to_string()],
+        &[],
+    )
+    .expect("the fake host starts the seat's session");
+    let stub = StubAgent::answering(Answers {
+        listing: Ok(test_support::listing(&test_support::arrivals(1))),
+        ..Answers::default()
+    });
+    let clock = FakeClock::new();
+    assert_eq!(
+        run::observe_seamed(
+            &Options { once: true },
+            Grant::new(platform::directory_listing(), Duration::from_secs(5)),
+            None,
+            Seams {
+                clock: &clock,
+                adapter: "an-adapter",
+                agent: &stub,
+                host: &host,
+                child_path: "",
+                effects_off: Some("this arm issues no effect".to_string()),
+                stop_handler: StopHandler::Unarmed,
+            },
+        ),
+        0
+    );
+    let body: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(machine.join("projection.json"))
+            .expect("a projection is published"),
+    )
+    .expect("the projection parses");
+    let _ = std::fs::remove_dir_all(&root);
+
+    let agent = &body["agent"];
+    assert_eq!(agent["adapter"], "an-adapter", "{body}");
+    assert_eq!(agent["name"], StubAgent::NAME);
+    assert_eq!(agent["version"], StubAgent::VERSION);
+    assert_eq!(
+        agent["version"], body["agent_version"],
+        "agent.version is agent_version"
+    );
+    assert_eq!(
+        agent["expected"],
+        StubAgent::VERSION,
+        "the live release, among those the adapter was measured against, is the one expected"
+    );
+    assert_eq!(
+        agent["expected"], body["agent_version_expected"],
+        "agent.expected is agent_version_expected"
+    );
+    assert_eq!(
+        agent["postures"],
+        serde_json::json!(["ask", "auto", "unattended"])
+    );
+    // And the seat it read is the host's live pane, found by its pid.
+    assert_eq!(body["seats"][0]["roster_state"], "present", "{body}");
+}
+
 // ------------------------------------------------ the per-row config directory
 
 /// AC2, D1 — a spawned seat is seen through ITS OWN configuration directory and
-/// is absent from the fleet's, which is the whole cost of the isolation R13
-/// rules: a per-row directory is a per-row daemon, and a per-row daemon is a
-/// per-row roster.
+/// is unnamed by the fleet's, which is the whole cost of giving each spawned
+/// seat its own configuration: a per-row directory is a per-row listing.
 ///
 /// Measured live on this box on 2026-09-12 before the code was written: the
 /// fleet's `agents --json --all` answered 9 rows and named none of the session
@@ -926,72 +1214,96 @@ fn projection(agent_version: Option<&str>, expected: Option<&str>) -> Projection
 /// named only it.
 ///
 /// The two listings differ in content, so the arm cannot pass by reading either
-/// one twice — which is the mutant it exists to kill: a fold that asks for every
-/// row under the adapter's own directory.
+/// one twice — which is the mutant it exists to kill: a poll that asks about
+/// every seat under the adapter's own directory.
 #[test]
 fn a_transient_row_is_seen_through_its_own_directory_and_unseen_through_the_fleets() {
     let named = seat();
     let spawned = transient_seat();
     let seats = vec![named.clone(), spawned.clone()];
     let per_row_dir = "/machine/config/builder-9";
+    // One host holding both seats' sessions, the named one's first.
+    let (host, named_pid) = hosting(&named);
+    host.new_session(
+        &session_for(&spawned.id),
+        Path::new(OTHER),
+        &["/nowhere/agent".to_string()],
+        &[],
+    )
+    .expect("the fake host starts the spawned seat's session");
+    let spawned_pid = named_pid + 1;
+    let at = settled(&host);
 
     // The fleet's listing names the NAMED seat's session and not the spawned
     // one's; the per-row listing names the spawned one's and nothing else.
-    let reads = |dir: Option<&Path>| match dir {
-        None => roster(&[live(WORKTREE, "named-session")]),
-        Some(dir) => {
-            assert_eq!(
-                dir,
-                Path::new(per_row_dir),
-                "the read is under the row's own"
-            );
-            roster(&[live(OTHER, "spawned-session")])
-        }
+    let agent = ByDirectory::new(|dir: Option<&str>| {
+        Ok(match dir {
+            None => format!("[{}]", live(WORKTREE, "named-session", named_pid)),
+            Some(dir) => {
+                assert_eq!(dir, per_row_dir, "the read is under the row's own");
+                format!("[{}]", live(OTHER, "spawned-session", spawned_pid))
+            }
+        })
+    });
+    let held = |seat: &SeatId| Held {
+        session_id: None,
+        config_dir: (*seat == spawned.id).then(|| per_row_dir.to_string()),
     };
-    let rosters = Rosters::gather(
-        &seats,
-        &|seat: &str| (seat == "builder-9").then(|| per_row_dir.to_string()),
-        &reads,
+    let seen = observe_fleet(&agent, &host.list(), &seats, &held, at);
+    assert_eq!(
+        agent.asked.borrow().clone(),
+        vec![None, Some(per_row_dir.to_string())],
+        "ONE read, asking the fleet's directory and the row's own, once each"
     );
-
-    let seen = observe_seat(rosters.for_seat(&spawned.name), &spawned, 2_000, &started());
-    assert_eq!(seen.state, RosterState::Present, "{seen:?}");
-    assert_eq!(seen.session_id.as_deref(), Some("spawned-session"));
+    assert_eq!(seen[1].state, RosterState::Present, "{:?}", seen[1]);
+    assert_eq!(seen[1].session_id.as_deref(), Some("spawned-session"));
+    // And the named seat is still decided against the fleet's, unchanged.
+    assert_eq!(seen[0].state, RosterState::Present, "{:?}", seen[0]);
+    assert_eq!(seen[0].session_id.as_deref(), Some("named-session"));
 
     // THE CONTROL, and the reason the arm is a measurement rather than a
-    // restatement: the same seat decided against the FLEET's listing is absent,
-    // so the pair differs and the fold is what made the difference.
-    let missed = observe_seat(rosters.fleet(), &spawned, 2_000, &started());
-    assert_eq!(missed.state, RosterState::Absent, "{missed:?}");
-    assert_eq!(missed.session_id, None);
-
-    // And the named seat is still decided against the fleet's, unchanged.
-    let named_seen = observe_seat(rosters.for_seat(&named.name), &named, 2_000, &started());
-    assert_eq!(named_seen.state, RosterState::Present, "{named_seen:?}");
-    assert_eq!(named_seen.session_id.as_deref(), Some("named-session"));
+    // restatement: the same seat asked about under the FLEET's directory is
+    // named nothing for its live pane, so the pair differs and the directory
+    // is what made the difference.
+    let unscoped = observe_fleet(
+        &agent,
+        &host.list(),
+        &seats,
+        &|_: &SeatId| Held::default(),
+        at,
+    );
+    assert_eq!(unscoped[1].state, RosterState::Unknown, "{:?}", unscoped[1]);
+    assert_eq!(unscoped[1].session_id, None);
 }
 
 /// AC2 — a per-row listing nobody could read leaves THAT row Unknown, with the
 /// cause, and every other seat decided. The failure this forbids is one
-/// unreachable daemon publishing the whole fleet as blind.
+/// unreadable listing publishing the whole fleet as blind.
 #[test]
 fn a_per_row_listing_that_cannot_be_read_leaves_that_row_unknown_and_the_rest_decided() {
     let named = seat();
     let spawned = transient_seat();
     let seats = vec![named.clone(), spawned.clone()];
-    let reads = |dir: Option<&Path>| match dir {
-        None => roster(&[live(WORKTREE, "named-session")]),
-        Some(_) => RosterRead::Unreadable {
-            cause: "its daemon's socket is unreachable".to_string(),
-        },
+    let (host, named_pid) = hosting(&named);
+    host.new_session(
+        &session_for(&spawned.id),
+        Path::new(OTHER),
+        &["/nowhere/agent".to_string()],
+        &[],
+    )
+    .expect("the fake host starts the spawned seat's session");
+    let at = settled(&host);
+    let agent = ByDirectory::new(|dir: Option<&str>| match dir {
+        None => Ok(format!("[{}]", live(WORKTREE, "named-session", named_pid))),
+        Some(_) => Err("its listing's socket is unreachable".to_string()),
+    });
+    let held = |seat: &SeatId| Held {
+        session_id: None,
+        config_dir: (*seat == spawned.id).then(|| "/machine/config/builder-9".to_string()),
     };
-    let rosters = Rosters::gather(
-        &seats,
-        &|seat: &str| (seat == "builder-9").then(|| "/machine/config/builder-9".to_string()),
-        &reads,
-    );
+    let seen = observe_fleet(&agent, &host.list(), &seats, &held, at);
 
-    let blind = observe_seat(rosters.for_seat(&spawned.name), &spawned, 2_000, &started());
+    let blind = &seen[1];
     assert_eq!(blind.state, RosterState::Unknown, "{blind:?}");
     assert!(
         blind
@@ -1002,181 +1314,135 @@ fn a_per_row_listing_that_cannot_be_read_leaves_that_row_unknown_and_the_rest_de
         "the cause is carried: {blind:?}"
     );
 
-    let decided = observe_seat(rosters.for_seat(&named.name), &named, 2_000, &started());
+    let decided = &seen[0];
     assert_eq!(decided.state, RosterState::Present, "{decided:?}");
     assert!(decided.unknown_cause.is_none());
 }
 
-/// AC2 — the transcript is read under the ROW's directory. The adapter resolves
-/// the path from the directory it is handed, so a body written under one is
-/// unreadable through the other.
+/// The session a seat is asked about by is the one the table last sighted for
+/// it, and the agent's answer is found by it before the pane's pid: a seat
+/// whose held session the agent still has reads that session.
 #[test]
-fn a_transcript_resolves_under_the_directory_it_is_read_with() {
-    let root = std::env::temp_dir().join(format!("tt-observe-transcript-{}", std::process::id()));
-    let fleet_dir = root.join("fleet-config");
-    let row_dir = root.join("row-config");
-    let session = "a-session";
-    let body = "{\"type\":\"assistant\"}\n";
+fn a_seat_is_asked_about_by_the_session_the_table_holds_for_it() {
+    let (host, pid) = hosting(&seat());
+    let agent = ByDirectory::new(|_: Option<&str>| {
+        Ok(format!(
+            "[{}, {}]",
+            live(WORKTREE, "held-session", 7),
+            live(WORKTREE, "by-the-pid", pid)
+        ))
+    });
+    let held = |_: &SeatId| Held {
+        session_id: Some("held-session".to_string()),
+        config_dir: None,
+    };
+    let seen = observe_fleet(
+        &agent,
+        &host.list(),
+        std::slice::from_ref(&seat()),
+        &held,
+        settled(&host),
+    );
+    assert_eq!(seen[0].session_id.as_deref(), Some("held-session"));
 
-    let path = transcript_path(&row_dir, WORKTREE, session);
-    std::fs::create_dir_all(path.parent().expect("the transcript has a parent"))
-        .expect("the scratch directory is made");
-    std::fs::write(&path, body).expect("the transcript is written");
-    assert!(
-        path.exists(),
-        "the fixture is on disk at {}",
-        path.display()
+    // The control: holding none, the pane's pid is what finds it.
+    let seen = observe_fleet(
+        &agent,
+        &host.list(),
+        std::slice::from_ref(&seat()),
+        &|_: &SeatId| Held::default(),
+        settled(&host),
     );
-
-    let agent = ClaudeCode::with_seams(
-        "claude".to_string(),
-        fleet_dir.clone(),
-        Duration::from_secs(1),
-        root.clone(),
-        String::new(),
-        None,
-        String::new(),
-    );
-    assert_eq!(
-        agent
-            .transcript(Some(&row_dir), WORKTREE, session)
-            .as_deref(),
-        Some(body),
-        "read under the row's directory it resolves"
-    );
-    // The control on that positive: the SAME call under the adapter's own
-    // directory resolves nothing, so the argument is what decided it.
-    assert_eq!(
-        agent.transcript(None, WORKTREE, session),
-        None,
-        "and under the fleet's it does not"
-    );
-
-    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(seen[0].session_id.as_deref(), Some("by-the-pid"));
 }
 
 // ------------------------------------------------------- the logged-out dispatch
 
-/// The provider's logged-out first turn, as it was read off a real transcript on
-/// this box on 2026-09-12 (2.1.261): one synthetic assistant entry carrying the
-/// cause, the flag and a window of zero.
-fn logged_out_body() -> String {
-    concat!(
-        r#"{"type":"user","isSidechain":false,"message":{"role":"user"}}"#,
-        "\n",
-        r#"{"type":"assistant","isSidechain":false,"isApiErrorMessage":true,"#,
-        r#""error":"authentication_failed","message":{"model":"<synthetic>","#,
-        r#""usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"#,
-        r#""cache_read_input_tokens":0},"content":[{"type":"text","#,
-        r#""text":"Not logged in · Please run /login"}]}}"#,
-        "\n",
-    )
-    .to_string()
-}
-
-/// A first turn that ANSWERED, from the same probe's other arm: a real assistant
-/// entry with a non-zero window.
-fn answered_body() -> String {
-    concat!(
-        r#"{"type":"user","isSidechain":false,"message":{"role":"user"}}"#,
-        "\n",
-        r#"{"type":"assistant","isSidechain":false,"message":{"model":"claude-haiku-4-5","#,
-        r#""usage":{"input_tokens":10,"output_tokens":219,"#,
-        r#""cache_creation_input_tokens":36062,"cache_read_input_tokens":0}}}"#,
-        "\n",
-    )
-    .to_string()
-}
-
-/// AC3 — a transient row whose transcript carries the logged-out shape yields
-/// exactly ONE line, and a row whose first turn carries a window yields none.
+/// AC3 — a transient seat the agent reads BLOCKED ON LOGGED_OUT yields exactly
+/// ONE line, and a seat it reads any other way yields none.
 ///
 /// "Exactly one" is the second poll: the first sighting writes the line and every
 /// poll after it is already sighted, which is what stops a line per interval.
 #[test]
 fn a_logged_out_first_turn_yields_one_dispatch_failure_and_an_answered_one_yields_none() {
-    let logged_out = logged_out_body();
-    let answered = answered_body();
+    let logged_out = Some(BlockedOn::LoggedOut);
 
-    // The first sighting of a transient row reading logged out.
+    // The first sighting of a transient seat reading logged out.
     assert!(observe::logged_out_dispatch(
         true,
-        RosterState::Present,
+        RosterState::PromptBlocked,
         false,
-        Some(&logged_out)
+        logged_out
     ));
-    // The same row on every later poll: already sighted, so nothing more.
+    // The same seat on every later poll: already sighted, so nothing more.
     assert!(!observe::logged_out_dispatch(
         true,
-        RosterState::Present,
+        RosterState::PromptBlocked,
         true,
-        Some(&logged_out)
+        logged_out
     ));
-    // A row that ANSWERED, one variable apart from the first case.
+    // A seat blocked on something else, one variable apart from the first case.
     assert!(!observe::logged_out_dispatch(
         true,
-        RosterState::Present,
+        RosterState::PromptBlocked,
         false,
-        Some(&answered)
+        Some(BlockedOn::Permission)
     ));
-    // A NAMED seat's session is the person's own, whatever its transcript says.
+    // A NAMED seat's session is the person's own, whatever the agent says.
     assert!(!observe::logged_out_dispatch(
         false,
-        RosterState::Present,
+        RosterState::PromptBlocked,
         false,
-        Some(&logged_out)
+        logged_out
     ));
-    // A transcript that did not resolve is a reading nobody has.
+    // A reading that names no reason is a seat not known to be logged out.
     assert!(!observe::logged_out_dispatch(
         true,
         RosterState::Present,
         false,
         None
     ));
-    // And the reading comes off a LIVE row: an absent seat has no first turn.
+    // And the reading comes off a LIVE session: an absent seat has no first turn.
     assert!(!observe::logged_out_dispatch(
         true,
         RosterState::Absent,
         false,
-        Some(&logged_out)
+        logged_out
+    ));
+
+    // The reading as the loop meets it: the adapter's blocked-on-logged-out
+    // answer, laid beside a live pane, is the prompt-blocked seat the line is
+    // written for, carrying what it waits on.
+    let (host, _) = hosting(&seat());
+    let mut answer = reading(&seat(), Activity::Blocked, Some("aa"), None);
+    answer.blocked_on = logged_out;
+    let seen = observe_seat(&host.list(), &seat(), Some(&answer), settled(&host));
+    assert_eq!(seen.state, RosterState::PromptBlocked);
+    assert_eq!(seen.blocked_on, logged_out);
+    assert_eq!(seen.waiting_for.as_deref(), Some("logged_out"));
+    assert!(observe::logged_out_dispatch(
+        true,
+        seen.state,
+        false,
+        seen.blocked_on
     ));
 
     // The line's own content: the seat and the item the order index named.
+    let builder = SeatView::from(&seat().as_ref());
     let payload = events::dispatch_failed_payload(
-        "builder-9",
+        &builder,
         Some("an-item"),
         fleet_controller::observe::AUTHENTICATION_FAILED,
     );
-    assert_eq!(payload["seat"], "builder-9");
+    assert_eq!(payload["seat"]["id"], SEAT_ID);
+    assert_eq!(payload["seat"]["kind"], "agent");
     assert_eq!(payload["item"], "an-item");
     assert_eq!(payload["cause"], "authentication_failed");
     // A start no order accompanied carries the key as null rather than dropping
     // it, so a reader meets a field it can read as absent.
-    let no_item = events::dispatch_failed_payload("builder-9", None, "authentication_failed");
+    let no_item = events::dispatch_failed_payload(&builder, None, "authentication_failed");
     assert!(
         no_item.get("item").is_some_and(|v| v.is_null()),
         "{no_item}"
     );
-}
-
-/// AC3 — the reader's three terms, each one alone insufficient. The conjunction
-/// is the safe direction: a term that moves in a later release yields NO reading,
-/// and a reading nobody has costs one uncaught logged-out seat where a looser
-/// match would fail a dispatch that was fine.
-#[test]
-fn the_logged_out_reader_needs_all_three_terms() {
-    assert!(observe::logged_out_first_turn(&logged_out_body()));
-    // The flag alone: an entry the provider wrote for some other cause.
-    let other_cause = logged_out_body().replace("authentication_failed", "overloaded_error");
-    assert!(!observe::logged_out_first_turn(&other_cause));
-    // The cause alone, on an entry the provider did not write itself.
-    let not_flagged = logged_out_body().replace(r#""isApiErrorMessage":true,"#, "");
-    assert!(!observe::logged_out_first_turn(&not_flagged));
-    // The pair, with a window: not a turn that never reached the model.
-    let with_window = logged_out_body().replace(r#""input_tokens":0"#, r#""input_tokens":42"#);
-    assert!(!observe::logged_out_first_turn(&with_window));
-    // And the FIRST entry is the one read: a session that answered and later met
-    // an auth failure was not a failed dispatch.
-    let later = format!("{}{}", answered_body(), logged_out_body());
-    assert!(!observe::logged_out_first_turn(&later));
 }

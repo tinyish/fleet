@@ -15,46 +15,50 @@ rest_threshold_tokens = 700000
 # another one.
 arrival_window_seconds = 45
 
-# How long a start is watched for an immediate failure, and how long one nudge
-# turn may run.
+# How long a start is watched for an immediate failure, and how long a turn
+# typed into a seat's session has to be taken — the seat's row reading busy.
 start_watch_seconds = 5
-nudge_timeout_seconds = 90
+nudge_timeout_seconds = 10
 
-# The model a start names when the seat's own row does not. Mandatory on every
-# start: a start with no model comes up on the cheapest model available.
-default_model = "claude-opus-5"
+# The model a start names when the seat's own row does not, as the agent
+# spells it. Every start names one: left out, it is the default the agent's
+# adapter declares.
+# default_model = "<model>"
 
-# The permission posture a start asks for — one for a named seat, one for a
-# spawned (transient) row. The pinned CLI accepts auto, dontAsk, acceptEdits,
-# bypassPermissions, manual and plan.
+# The posture a start asks for — one for a named seat, one for a spawned
+# (transient) row — in fleet's own words: ask (ask a person before an act the
+# rules do not allow), auto (act without asking, within the model's
+# judgement) or unattended (nobody is there, so an act the rules do not allow
+# is refused, not asked). Any other word is refused when the file is read.
 posture = "auto"
-transient_posture = "dontAsk"
+transient_posture = "unattended"
 
 # The models measured to honour a requested posture, matched BY PREFIX. A row
 # whose start would ask for `auto` on a model outside this list is dropped at
 # config read, because the downgrade is silent everywhere an instrument looks.
-auto_capable_models = ["claude-opus-5", "claude-fable-5", "claude-sonnet-5"]
+# Left out, it is the list the agent's adapter declares.
+# auto_capable_models = ["<model prefix>"]
 
 # The first turn a woken session is started with. `{seat}` is the seat
 # directory.
 first_turn = "/wake {seat}"
 
-# The model one nudge turn runs on: one sentence to one session, so the cheapest
-# model the fleet keeps rather than the seat's own.
-nudge_model = "claude-haiku-4-5-20251001"
+# The agent this fleet's seats run: the name of an agent adapter an installed
+# pack carries, or the absolute path to an adapter executable. Left out, it is
+# the claude-code pack's. The releases the agent is expected at are its
+# adapter's to declare, and a live version outside them is a `substrate.moved`
+# on the stream.
+# [agent]
+# adapter = "<name>"
 
-[substrate.claude_code]
-# The agent release this fleet's measurements are pinned to — the most recent
-# one ../brain/lessons/claude-code.md re-measured against, not the release every
-# entry there was taken on. The projection publishes it beside the version the
-# binary reports this poll; a spread between them is a flag to re-measure.
-version = "2.1.261"
-
-# Whether the provider's two isolation knobs still scope a spawned seat's
-# configuration directory WITHOUT logging it out — `holds` or `broken`. Written
-# by a person from the `isolation-pair` doctor entry the binary's defaults ship,
-# at every move of the version above, and by no check: a policy file edited by
-# a check is one
-# nobody can read as a record of what a person confirmed. `broken` is a fleet
-# whose spawned seats come up logged out and whose every first turn fails.
-isolation_pair = "holds"
+# The test commands are in no table of this file, and a [gates] table that
+# sets `suite` or `touched` is refused by name. They are the workflow's:
+# `fleet land --test <command>` runs the landing's on the rebased tree, and
+# `fleet dispatch --touched <command>` hands a builder its own gate. For the
+# takeoff workflow, set them for the pack that carries it — a run's
+# `--input test=` / `--input touched=` wins over these — and with neither set
+# the flight lands NOT TESTED, and says so on every landed entry:
+#
+# [packs.tiny]
+# takeoff.test = "cargo nextest run --workspace"
+# takeoff.touched = "make test-touched"

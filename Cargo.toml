@@ -37,11 +37,28 @@ clap = { version = "4", default-features = false, features = [
     "error-context",
 ] }
 serde = { version = "1", features = ["derive"] }
+# schemars is exact-pinned because its output is committed: the store contract's
+# document (core/src/store/store.schema.json) is what this release of it writes,
+# byte for byte, and a release that spells one schema otherwise reds the drift
+# test with no change to the contract. `derive` and `std` are its defaults,
+# named with default-features off like every pin here.
+schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }
+# regex-lite is the schema validator's, for a schema's `pattern`: one crate
+# with no dependencies of its own.
+regex-lite = "0.1"
+# sha2 is exact-pinned and default-features off: the digest it writes goes
+# onto packs.lock and a flight's record item and is read back weeks later,
+# and the published vectors in core/src/digest.rs are what hold this release
+# of it to the algorithm. `alloc` and `oid` are its defaults; neither is read.
+sha2 = { version = "=0.11.0", default-features = false }
 # float_roundtrip: the step writer parses a workflow's `--result` and stores the
 # value re-serialized, and the default parser can land a decimal literal on the
 # neighbouring double — so a replayed number would differ from the one the
 # first run saw by an ulp. Correctly rounded parsing is what keeps the two equal.
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# serde_path_to_error: a seat's input file the types refuse is named by the
+# path to the key that failed, which serde's own error does not carry.
+serde_path_to_error = "0.1"
 toml = { version = "=1.1.5", default-features = false, features = [
     "display",
     "parse",

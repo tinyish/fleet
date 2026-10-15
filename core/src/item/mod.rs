@@ -7,22 +7,35 @@
 //!
 //! Nothing in here reads the process table or the environment. What only a
 //! process knows — the project root, the machine directory, the clock, the
-//! dispatcher's name — is resolved by the cli and handed in.
+//! dispatcher's name — is resolved by the caller and handed in.
 
 pub mod brief;
 pub mod deliver;
 pub mod dispatch;
-pub mod gate;
+pub mod doctor;
+pub mod events;
+pub use events::{
+    payload_keys, signal, Events, CHECK_READ, ITEM_ENTRY, RUN_CANCELLED, RUN_CLEANED, RUN_CLOSED,
+    RUN_COULD_NOT_TELL, RUN_FAILED, RUN_STARTED, RUN_WAITING, STEP_CLOSED, STEP_STARTED,
+};
+pub mod hold;
 pub mod land;
 pub mod lane;
+pub mod list;
 pub mod pins;
 pub mod review;
 pub mod rules;
 pub mod run;
+pub mod show;
 
 use std::path::{Path, PathBuf};
 
-/// The exits, as the cli PRD's table names them. A verb answers with one of
+use crate::entry::{to_json, Body, Entry, Timeline};
+use crate::seat::actor::Actor;
+use crate::seat::identity::SeatId;
+use crate::store::{Item, ItemId, Store, StoreError};
+
+/// The exits, one vocabulary shared by every verb. A verb answers with one of
 /// these and the cli does nothing but return it.
 pub const DONE: u8 = 0;
 pub const REFUSED: u8 = 1;
@@ -65,6 +78,20 @@ impl Stop {
     }
 }
 
+/// The store's answers in the exit vocabulary: an item that is not there is
+/// refused on the record, a write no store takes is usage, and a store that
+/// would not answer is could-not-tell. The store's own sentence is the
+/// message, word for word.
+impl From<StoreError> for Stop {
+    fn from(e: StoreError) -> Stop {
+        match e {
+            StoreError::Refused(why) | StoreError::Moved(why) => Stop::refused(why),
+            StoreError::Usage(why) => Stop::usage(why),
+            StoreError::Unreadable(why) => Stop::could_not_tell(why),
+        }
+    }
+}
+
 impl std::fmt::Display for Stop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
@@ -75,7 +102,7 @@ impl std::fmt::Display for Stop {
 ///
 /// `Absent` is a seat with no live session, which is not a failure: the
 /// assignment already recorded the handoff, and the seat's successor reads the
-/// order at wake (packs PRD § What every verb refuses to guess, rule 4).
+/// order at wake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RingOutcome {
     Delivered,
@@ -85,165 +112,6 @@ pub enum RingOutcome {
 
 pub trait Ring {
     fn ring(&self, seat: &str, text: &str) -> RingOutcome;
-}
-
-/// The flight record's three kinds, as the events table names them. Nothing in
-/// this crate writes any of them: the verbs that did left core with the run
-/// lifecycle's arrival (fleet-layers.md § What moves, workflows-formula-fate).
-pub const FLIGHT_PLANNED: &str = "flight.planned";
-pub const FLIGHT_OPENED: &str = "flight.opened";
-pub const FLIGHT_CLOSED: &str = "flight.closed";
-
-/// The one a run's front half writes, named here beside the flight's opening
-/// because the two are the same act on the two lifecycles: every input pinned,
-/// the directory hashed, and the record standing.
-pub const RUN_STARTED: &str = "run.started";
-
-/// The four the back half writes, one per row of the exit table the workflow
-/// answers on.
-///
-/// EXACTLY ONE OF THEM PER RUN, and a run that has one is a run whose process
-/// is gone: a workflow is short-lived by design, so the stream and not the
-/// process table is where a reader learns how one ended. [`RUN_CLOSED`] and
-/// [`RUN_FAILED`] are the two whose record is closed with them; [`RUN_WAITING`]
-/// leaves the record open at the sequence it carries, and
-/// [`RUN_COULD_NOT_TELL`] leaves it open with what was read, because a run
-/// nothing could classify is not one to retire on a guess.
-pub const RUN_CLOSED: &str = "run.closed";
-pub const RUN_FAILED: &str = "run.failed";
-pub const RUN_WAITING: &str = "run.waiting";
-pub const RUN_COULD_NOT_TELL: &str = "run.could_not_tell";
-
-/// The one the CONTROLLER writes when a run's seats are let go.
-///
-/// Named here beside the five above because it is the same lifecycle's
-/// vocabulary and a kind spelled twice is two kinds — the controller crate
-/// depends on no other member of this workspace, so it carries its own spelling
-/// and a test in the binary holds the two to one string.
-///
-/// IT IS NOT AN ENDING. A run ends on one of the four rows of the exit table;
-/// this says the seats that run spawned are gone, which is a fact about the
-/// machine and not about the workflow.
-pub const RUN_CLEANED: &str = "run.cleaned";
-
-/// The item vocabulary (flights PRD § The events, Q4a).
-///
-/// Five of these and [`GATE_READ`] are the four verbs' own: each writes exactly
-/// one, after its note has been written and read back. [`ITEM_HELD`] and
-/// [`ITEM_PARKED`] are named here and written nowhere in this crate, because
-/// a fold over the stream reads them and a kind spelled twice is two kinds.
-pub const ITEM_DISPATCHED: &str = "item.dispatched";
-pub const ITEM_HELD: &str = "item.held";
-pub const ITEM_DELIVERED: &str = "item.delivered";
-pub const ITEM_REVIEWED: &str = "item.reviewed";
-pub const ITEM_RETURNED: &str = "item.returned";
-pub const ITEM_LANDED: &str = "item.landed";
-pub const ITEM_PARKED: &str = "item.parked";
-pub const GATE_READ: &str = "gate.read";
-
-/// The one a person's answer writes (flights PRD R21). It is the gate's own
-/// kind and not an item's: what it says is that the object a park raised is
-/// resolved, and the item it names is how a fold ties it to a list.
-pub const GATE_RESOLVED: &str = "gate.resolved";
-
-/// The value `item.reviewed` carries under `verdict`. The accept is the only
-/// verdict that kind names: a return is `item.returned` and not a second
-/// verdict value.
-pub const VERDICT_ACCEPTED: &str = "accepted";
-
-/// The value `item.dispatched` carries under `role` for a REVIEWER's spawn
-/// (flights PRD R14).
-///
-/// A builder's dispatch carries no role at all, because the role a spawn has
-/// when nothing says otherwise is the one the whole vocabulary is written
-/// around: an absent key is a builder, and a reader that had to tell two role
-/// values apart would be reading a distinction only this one event makes.
-pub const ROLE_REVIEWER: &str = "reviewer";
-
-/// Every item and gate kind, in the order the events table lists them.
-pub const ITEM_KINDS: [&str; 9] = [
-    ITEM_DISPATCHED,
-    ITEM_HELD,
-    ITEM_DELIVERED,
-    ITEM_REVIEWED,
-    ITEM_RETURNED,
-    ITEM_LANDED,
-    ITEM_PARKED,
-    GATE_READ,
-    GATE_RESOLVED,
-];
-
-/// The payload keys one item or gate kind carries — and [`RUN_STARTED`], which
-/// is neither and is here for the same reason — or `None` for every other kind.
-///
-/// The table is HERE and not in each verb, so the writer and the fold cannot
-/// disagree about what a kind carries: every writer asserts its payload against
-/// this and the fold reads the same names. `item` is first on every one of them
-/// — it is the key the fold ties a record to a list by.
-pub fn payload_keys(kind: &str) -> Option<&'static [&'static str]> {
-    Some(match kind {
-        ITEM_DISPATCHED => &["item", "seat", "base", "role", "reason"],
-        ITEM_HELD => &["item", "reading"],
-        ITEM_DELIVERED => &["item", "commit", "branch", "base"],
-        ITEM_REVIEWED => &["item", "commit", "verdict", "accepted", "overruled"],
-        ITEM_RETURNED => &["item", "commit", "findings"],
-        // `run` is the run whose record carried the landing, `null` where a
-        // seat landed it in its own name. The actor is the reviewer either way
-        // — a run lands AS the `[core] reviewer` — so this is the key that says
-        // what carried the act.
-        ITEM_LANDED => &["item", "sha", "base", "squash_of", "run"],
-        ITEM_PARKED => &["item", "reason", "branch", "commit", "gate"],
-        // `log` is where the reading it carries can be read back. It is on the
-        // kind and not only on the rerun's: a pair of readings a person is
-        // asked to judge names two files, and one of them is the first.
-        // `path` is the search path the reading's child ran under, so a suite
-        // that failed on the diff and one that failed because it could not find
-        // its tools are told apart from the stream alone.
-        GATE_READ => &["item", "suite", "rc", "verdict", "reading", "log", "path"],
-        // `letter` is the answer itself and rides the kind, because the one
-        // thing a reader of the stream wants to know about a resolved gate is
-        // which way it went.
-        GATE_RESOLVED => &["item", "gate", "letter"],
-        // `run` first, as `item` is first on every row above: it is the key a
-        // reader of the stream ties a hash and a workflow name to.
-        RUN_STARTED => &["run", "hash", "workflow"],
-        // The close carries the id alone: everything else about the run was
-        // said on `run.started` and stands on the record.
-        RUN_CLOSED => &["run"],
-        // `reason` and `wake` are the workflow's OWN last line, read as JSON
-        // and carried whole — core parses no further, so what a fold reads
-        // under them is whatever shape the workflow's language writes.
-        RUN_FAILED => &["run", "reason"],
-        // `seq` is the stream's position when the process exited, which is
-        // what a re-run measures the stream against.
-        RUN_WAITING => &["run", "wake", "seq"],
-        // `exit` is the code, or null where the process died on a signal, and
-        // `read` is the last line as it stood — the two readings that say why
-        // no other row fitted.
-        RUN_COULD_NOT_TELL => &["run", "exit", "read"],
-        // `count` is how many seats were retired, and it is the whole payload
-        // beside the id: which seats they were is on each one's own
-        // `session.retired`, and a list here would be a second copy of it.
-        RUN_CLEANED => &["run", "count"],
-        _ => return None,
-    })
-}
-
-/// The two a workflow step writes on the run lifecycle. NOTHING IN CORE WRITES
-/// EITHER: the SDK's steps do, through the stream, and the vocabulary is stated
-/// here so the fold reads one name and the writer adds an act rather than a
-/// name.
-pub const STEP_STARTED: &str = "step.started";
-pub const STEP_CLOSED: &str = "step.closed";
-
-/// The payload keys the events table names for the two above. `outcome` and
-/// `attempt` ride `step.closed`; the first four ride both.
-pub const STEP_PAYLOAD: [&str; 6] = ["item", "flight", "step", "run", "outcome", "attempt"];
-
-/// Where a typed event goes. Core never opens the stream file: the cli wires
-/// this to the controller's writer, the same way `dispatch` reaches its spawn.
-pub trait Events {
-    fn append(&self, kind: &str, actor: &str, payload: serde_json::Value) -> Result<(), String>;
 }
 
 /// Where a long act says how far it has got. The cli draws it; core states the
@@ -262,19 +130,9 @@ pub trait Progress {
     fn finish(&self);
 }
 
-/// A progress surface that draws nothing, for a caller that has no terminal to
-/// draw on.
-pub struct Silent;
-
-impl Progress for Silent {
-    fn row(&self) {}
-    fn message(&self, _text: &str) {}
-    fn finish(&self) {}
-}
-
 /// The trunk, as the local ref names it. `deliver` records the base it read
-/// and never fetches: a fetch moves what a second verb is about to gate on, and
-/// `land` is the verb that owns that (cli PRD § `fleet land`).
+/// and never fetches: a fetch moves what a second verb is about to check
+/// against, and `land` is the verb that owns that.
 pub const TRUNK: &str = "origin/main";
 
 /// The branch a delivery may not sit on.
@@ -307,21 +165,20 @@ pub trait Git {
     /// [`TRUNK`] as the local ref holds it. No fetch.
     fn trunk_tip(&self) -> Result<String, String>;
 
-    /// The paths `git diff --cached --name-only` prints.
+    /// The paths `git diff --cached --name-only -z` prints, raw.
     fn staged(&self) -> Result<Vec<String>, String>;
 
-    /// `git status --porcelain`, one line per entry, classified by the caller:
-    /// the two status columns are the index's and the working tree's, and only
-    /// the second says whether a path was left unstaged.
-    fn status(&self) -> Result<Vec<String>, String>;
+    /// `git status --porcelain -z`, one typed entry per path, classified by the
+    /// caller: the two status columns are the index's and the working tree's,
+    /// and only the second says whether a path was left unstaged.
+    fn status(&self) -> Result<Vec<StatusLine>, String>;
 
     /// Everything the working tree holds put in the index: tracked changes,
     /// unstaged modifications and untracked files alike.
     ///
     /// It is a SECOND operation beside [`Git::commit`] and not a flag on it,
     /// because the two verbs that commit want different sets: a delivery is the
-    /// staged set the seat chose, and a park is everything the seat has
-    /// (flights PRD S4c).
+    /// staged set the seat chose, and a park is everything the seat has.
     fn add_all(&self) -> Result<(), String>;
 
     /// The staged set committed with this message, answered as the commit the
@@ -353,12 +210,67 @@ pub fn numstat_line(line: &str) -> Option<Change> {
     })
 }
 
+/// One entry of `git status --porcelain -z`: the index's column, the working
+/// tree's column, and the path, unquoted — the `-z` form quotes nothing, so the
+/// path is the one a person types, decoded as UTF-8 lossily
+/// ([`git`](crate::process::git) reads every answer so). A rename or copy also
+/// names where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusLine {
+    pub index: char,
+    pub worktree: char,
+    pub path: String,
+    pub from: Option<String>,
+}
+
+/// The v1 porcelain line, minus git's quoting: `XY from -> path` for a rename
+/// or copy, `XY path` otherwise.
+impl std::fmt::Display for StatusLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.from {
+            Some(from) => write!(f, "{}{} {from} -> {}", self.index, self.worktree, self.path),
+            None => write!(f, "{}{} {}", self.index, self.worktree, self.path),
+        }
+    }
+}
+
+/// Every `git status --porcelain -z` entry. Each is `XY <path>` ended by a NUL,
+/// and a rename or copy (`R` or `C` in either column) is followed by its origin
+/// as a field of its own — the new name first. An entry of any other shape is
+/// refused rather than read as a path, because a path misread here is one a
+/// delivery would carry or leave behind without a word.
+pub fn status_entries(z: &str) -> Result<Vec<StatusLine>, String> {
+    let malformed = |field: &str| {
+        format!("`git status --porcelain -z` answered an entry that is not `XY <path>`: {field:?}")
+    };
+    let mut fields = z.split('\0').filter(|field| !field.is_empty());
+    let mut entries = Vec::new();
+    while let Some(field) = fields.next() {
+        let bytes = field.as_bytes();
+        if bytes.len() < 4 || !bytes[0].is_ascii() || !bytes[1].is_ascii() || bytes[2] != b' ' {
+            return Err(malformed(field));
+        }
+        let index = char::from(bytes[0]);
+        let worktree = char::from(bytes[1]);
+        let from = if [index, worktree].iter().any(|c| matches!(c, 'R' | 'C')) {
+            Some(fields.next().ok_or_else(|| malformed(field))?.to_string())
+        } else {
+            None
+        };
+        entries.push(StatusLine {
+            index,
+            worktree,
+            path: field[3..].to_string(),
+            from,
+        });
+    }
+    Ok(entries)
+}
+
 /// What the controller answered when asked for a seat to give this item to.
 ///
-/// `base` is the commit the seat's worktree was cut from, read by the spawner
-/// from that worktree's own HEAD: the fact is answered by the tree it describes
-/// (flights PRD Q4a, the `item.dispatched` row). `None` where the spawner could
-/// not read it, which the event then carries absent rather than as a guess.
+/// `seat` is the spawned seat's full id, which is what dispatch assigns the
+/// item to and writes into its index.
 ///
 /// `belt` is both readings the spawn was let through on, rendered by the
 /// spawner into the lines a person reads. Core measures no machine and knows
@@ -368,14 +280,19 @@ pub fn numstat_line(line: &str) -> Option<Change> {
 /// `Refused` is a VERDICT and `CouldNotTell` is a question. Dispatch withdraws
 /// an order on the first and leaves it standing on the second, so a spawn
 /// nobody could observe is never recorded as a spawn that was declined.
+/// `Unreadable` is a verdict too, whose exit is could-not-tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnOutcome {
     Spawned {
         seat: String,
-        base: Option<String>,
         belt: Option<String>,
     },
     Refused(String),
+    /// The spawn made nothing, because a file it reads is not in the shape it
+    /// must be — the project's `[permissions] tool_commands`. Dispatch withdraws
+    /// the order as for [`SpawnOutcome::Refused`], and stops could-not-tell: the
+    /// call was right, and the policy is not.
+    Unreadable(String),
     CouldNotTell(String),
 }
 
@@ -396,12 +313,14 @@ pub struct Spawn<'a> {
     /// cannot act on. Nothing below this seam reads the work graph.
     pub item: &'a str,
     /// The commit the seat's worktree is cut from, where the caller names one
-    /// (flights PRD R11, R14): a reviewer reads the delivery and a returned
-    /// builder resumes from it. `None` cuts from the trunk.
+    /// — `fleet seat spawn --base`. `None` cuts from the trunk.
     pub base: Option<&'a str>,
     /// The model this seat runs on, where the caller names one. `None` leaves
     /// the fleet's policy default.
     pub model: Option<&'a str>,
+    /// The builder's own checks, as the dispatch was handed them: the command the
+    /// seat's permission rules let it run. `None` writes no rule for one.
+    pub touched: Option<&'a str>,
 }
 
 pub trait Spawner {
@@ -409,17 +328,49 @@ pub trait Spawner {
     fn spawn(&self, spawn: &Spawn) -> SpawnOutcome;
 }
 
-/// The project a verb acts inside, as the cli resolved it.
+/// The project a verb acts inside, as its caller resolved it.
 ///
-/// `gates` and `guards` are two tables and not one because a standalone fleet
-/// keeps them in two files: the project declares its suite, and the fleet
+/// `policy` and `guards` are two tables and not one because a standalone fleet
+/// keeps them in two files: the project declares its own policy, and the fleet
 /// declares which guards its seats run. An embedded fleet hands the same table
 /// twice, which is the shape its one `fleet.toml` actually has.
 pub struct Project {
     pub root: PathBuf,
     pub name: String,
-    pub gates: toml::Table,
+    /// The project's whole policy file, every table in it.
+    pub policy: toml::Table,
     pub guards: toml::Table,
+}
+
+impl Project {
+    /// A refusal where either file still sets a test command, naming each key
+    /// and where it is set instead ([`crate::policy::MOVED`]), or still carries
+    /// a table whose keys moved, naming where each is set now
+    /// ([`crate::policy::MOVED_TABLES`]) — or a key nothing reads any more,
+    /// naming it to delete ([`crate::policy::RETIRED`]).
+    ///
+    /// Read by every verb that would have read one — `land`, the brief, a
+    /// spawn's rules and `run` — BEFORE it writes anything, so a fleet whose
+    /// landings a person believes are tested hears otherwise from the first
+    /// verb that lands, briefs or opens a run.
+    pub fn refuse_moved(&self) -> Result<(), Stop> {
+        let mut found = crate::policy::moved(&self.policy);
+        for also in crate::policy::moved(&self.guards) {
+            if !found.contains(&also) {
+                found.push(also);
+            }
+        }
+        if found.is_empty() {
+            return Ok(());
+        }
+        Err(Stop::refused(
+            found
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        ))
+    }
 }
 
 /// One policy file as a table. Core is this workspace's TOML reader, so the cli
@@ -435,7 +386,7 @@ pub fn table_at(path: &Path) -> toml::Table {
 /// The same file with the two failures kept apart, for a reader that has to
 /// tell an empty policy from one it could not read — `fleet status` prints the
 /// `[[core.flight.rules]]` table off the policy in force and answers
-/// could-not-tell where the file will not parse (cli PRD § `fleet status`).
+/// could-not-tell where the file will not parse.
 pub fn read_table(path: &Path) -> Result<toml::Table, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
@@ -495,166 +446,6 @@ fn is_placeholder(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-// ---- the note grammar --------------------------------------------------------
-//
-// A note is one region of an item's notes: a marker line at column zero and
-// every line under it until the next marker or the end. The store keeps notes
-// as one text joined by newlines, so a region is found by its marker and by
-// nothing else.
-
-/// The two a delivery opens on. `RE-DELIVERED` is a delivery after a return,
-/// and a reader anchoring on the last delivery must read it as the current one.
-pub const DELIVERY_MARKERS: [&str; 2] = ["DELIVERED", "RE-DELIVERED"];
-
-/// The two a verdict opens on. Neither begins with a delivery marker, so a
-/// reader that anchors on the last column-zero `DELIVERED` never reads a
-/// verdict as a delivery (verification doctrine on the covers region).
-pub const VERDICT_MARKERS: [&str; 2] = ["ACCEPTED", "RETURNED WITH FINDINGS"];
-
-/// The one a landing opens on. It begins with no delivery marker and no verdict
-/// marker, so a reader anchoring on the last column-zero `DELIVERED` line, or on
-/// the last verdict, reads neither a landing (verification doctrine on the
-/// covers region).
-pub const LANDING_MARKERS: [&str; 1] = ["LANDED"];
-
-/// The one a park opens on (flights PRD R19). It shares no prefix with the
-/// three above, and it ENDS each of their regions: a park written after a
-/// delivery is a region of its own, so a reader taking the last delivery does
-/// not read the park's branch and commit as the delivery's.
-pub const PARK_MARKERS: [&str; 1] = ["PARKED"];
-
-/// The one a person's answer opens on (flights PRD R21). It ends the park it
-/// answers, which is the whole of why it is a marker at all: a park's region
-/// carries the question and its options, and an answer written inside that
-/// region would be read back as part of the question.
-pub const ANSWER_MARKERS: [&str; 1] = ["ANSWERED"];
-
-/// Whether this line opens a note with one of these markers, at column zero.
-pub fn opens_with(line: &str, markers: &[&str]) -> bool {
-    markers
-        .iter()
-        .any(|marker| line == *marker || line.starts_with(&format!("{marker} ")))
-}
-
-/// The last region one of these markers opens: from the last one of them to the
-/// next marker of ANOTHER KIND, or to the end.
-///
-/// A REGION IS ENDED BY WHAT FOLLOWS IT, NEVER BY ITS OWN KIND, and that is the
-/// whole of why `ends` is passed rather than taken as "any marker". A note's
-/// body is text somebody wrote — a findings body quotes verdicts, a verdict's
-/// walk quotes a delivery — and a reader that stopped at every marker would cut
-/// a note off inside itself and then report the write it just made as
-/// disagreeing with the record.
-fn last_region(notes: &str, opens: &[&str], ends: &[&[&str]]) -> Option<String> {
-    let lines: Vec<&str> = notes.lines().collect();
-    let start = lines.iter().rposition(|line| opens_with(line, opens))?;
-    let end = lines[start + 1..]
-        .iter()
-        .position(|line| ends.iter().any(|markers| opens_with(line, markers)))
-        .map(|offset| start + 1 + offset)
-        .unwrap_or(lines.len());
-    Some(lines[start..end].join("\n").trim_end().to_string())
-}
-
-/// The last delivery region of an item's notes, ended by the verdict or the
-/// landing that follows it.
-pub fn last_delivery(notes: &str) -> Option<String> {
-    last_region(
-        notes,
-        &DELIVERY_MARKERS,
-        &[
-            &VERDICT_MARKERS,
-            &LANDING_MARKERS,
-            &PARK_MARKERS,
-            &ANSWER_MARKERS,
-        ],
-    )
-}
-
-/// The last landing region of an item's notes.
-pub fn last_landing(notes: &str) -> Option<String> {
-    last_region(
-        notes,
-        &LANDING_MARKERS,
-        &[
-            &DELIVERY_MARKERS,
-            &VERDICT_MARKERS,
-            &PARK_MARKERS,
-            &ANSWER_MARKERS,
-        ],
-    )
-}
-
-/// The last park region of an item's notes, ended by anything that follows it.
-pub fn last_park(notes: &str) -> Option<String> {
-    last_region(
-        notes,
-        &PARK_MARKERS,
-        &[
-            &DELIVERY_MARKERS,
-            &VERDICT_MARKERS,
-            &LANDING_MARKERS,
-            &ANSWER_MARKERS,
-        ],
-    )
-}
-
-/// The last answer region of an item's notes.
-pub fn last_answer(notes: &str) -> Option<String> {
-    last_region(
-        notes,
-        &ANSWER_MARKERS,
-        &[
-            &DELIVERY_MARKERS,
-            &VERDICT_MARKERS,
-            &LANDING_MARKERS,
-            &PARK_MARKERS,
-        ],
-    )
-}
-
-/// Where the last line one of these markers opens sits, as a line index.
-///
-/// Two regions are told apart by WHICH CAME LAST and not by their content, so
-/// an answer standing over a park is this answered against this park's — and a
-/// park raised again after an answer is not.
-pub fn last_marker_at(notes: &str, markers: &[&str]) -> Option<usize> {
-    notes
-        .lines()
-        .collect::<Vec<&str>>()
-        .iter()
-        .rposition(|line| opens_with(line, markers))
-}
-
-/// A template's block for one marker: the paragraph it opens. What follows the
-/// blocks is the prose that teaches them, and a note is not made of prose.
-pub fn marker_block(template: &str, marker: &str) -> Option<String> {
-    let mut block = Vec::new();
-    let mut inside = false;
-    for line in template.lines() {
-        if opens_with(line, &[marker]) {
-            inside = true;
-        } else if inside && line.trim().is_empty() {
-            break;
-        }
-        if inside {
-            block.push(line);
-        }
-    }
-    (!block.is_empty()).then(|| block.join("\n"))
-}
-
-/// The value of a `label:` line at column zero, trimmed. The first such line
-/// wins: a note carrying two is a note the grammar does not describe, and the
-/// one a reader meets first is the one it reads.
-pub fn label_value(region: &str, label: &str) -> Option<String> {
-    let head = format!("{label}:");
-    region
-        .lines()
-        .find(|line| line.starts_with(&head))
-        .map(|line| line[head.len()..].trim().to_string())
-}
-
 /// A token nothing wrote, for the read-backs to ask their own answer about.
 ///
 /// Every other assertion a read-back makes is of the form "the record says what
@@ -674,4 +465,99 @@ pub fn control_token() -> &'static str {
             .unwrap_or(0);
         format!("fleet-control-{}-{nanos}", std::process::id())
     })
+}
+
+/// The negative control every read-back ends on: a read whose proof carries
+/// [`control_token`] is not reading the item `id` names.
+pub(crate) fn refuse_planted(read: &Item, id: &str) -> Result<(), Stop> {
+    let control = control_token();
+    if read.proof.carries(control) {
+        return Err(Stop::could_not_tell(format!(
+            "the read-back on {id} carries {control}, which nothing wrote — the read is not \
+             reading this item"
+        )));
+    }
+    Ok(())
+}
+
+/// One read of `item`, asserting its assignee against the ARGUMENT, then the
+/// negative control.
+pub(crate) fn assignee_reads_back(
+    store: &dyn Store,
+    item: &str,
+    wanted: SeatId,
+) -> Result<(), Stop> {
+    let read = store.show(item)?;
+    if read.assignee != Some(wanted) {
+        return Err(Stop::could_not_tell(format!(
+            "{item} read back with assignee ==\n{}\n  wanted:\n{wanted}\n  READ: fleet item \
+             show {item}",
+            read.assignee
+                .map_or_else(|| String::from("(absent)"), |held| held.to_string())
+        )));
+    }
+    refuse_planted(&read, item)
+}
+
+/// Why an entry a verb wrote is not on the record: the store refused the write,
+/// or took it and the read after it does not show it. Two halves because they
+/// are two sentences — "nothing was written" and "the write's effect cannot be
+/// told" — and each verb says its own STANDS line for each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unrecorded {
+    NotWritten(StoreError),
+    Unconfirmed(String),
+}
+
+/// One entry appended to `item`'s timeline and READ BACK, answered as the id
+/// the store gave it.
+///
+/// The read-back asks four things of the timeline: that it holds the id the
+/// append answered, that the entry under it carries the body and the actor
+/// written, and — the control — that it carries no entry under
+/// [`control_token`], which nothing writes. A read that answered yes to
+/// everything would pass the first three.
+///
+/// Each verb that calls it maps [`Unrecorded`] to its own wording.
+pub fn recorded(
+    store: &dyn Store,
+    item: &str,
+    body: &Body,
+    by: &Actor,
+) -> Result<String, Unrecorded> {
+    let written = ItemId::from(item);
+    let id = store
+        .append(&written, body, by)
+        .map_err(Unrecorded::NotWritten)?;
+    let entries = store
+        .timeline(&written)
+        .map_err(|e| Unrecorded::Unconfirmed(e.to_string()))?;
+    let timeline = Timeline(&entries);
+    let kind = body.kind();
+    let Some(read) = timeline.entry(&id) else {
+        return Err(Unrecorded::Unconfirmed(format!(
+            "{item}'s timeline does not hold the {kind} entry {id} the store answered for it"
+        )));
+    };
+    if read.body != *body || read.by != *by {
+        let written = Entry {
+            id: id.clone(),
+            at: read.at.clone(),
+            by: by.clone(),
+            body: body.clone(),
+        };
+        return Err(Unrecorded::Unconfirmed(format!(
+            "{item}'s {kind} entry {id} read back as {} and {} was written",
+            to_json(read),
+            to_json(&written)
+        )));
+    }
+    let token = control_token();
+    if timeline.entry(token).is_some() {
+        return Err(Unrecorded::Unconfirmed(format!(
+            "the read-back of {item}'s timeline carries {token}, which nothing wrote — the read \
+             is not reading this item"
+        )));
+    }
+    Ok(id)
 }

@@ -4,18 +4,10 @@
 # than a copy of the file.
 #
 # The guards themselves are not here and cannot be: they are compiled into the
-# one binary, and what a pack may replace is the WIRING — which classes a
-# provider runs, in which order — and the health check that reports on them.
+# one binary, and what a pack may replace is the health check that reports on
+# them. Which classes an agent's sessions run is its adapter's pack's.
 
 schema = 1
-
-[[shadow]]
-path = "overlay/per-provider/claude/hooks.json"
-purpose = "which guard classes this provider's sessions run before a shell call, and in what order"
-
-[[shadow]]
-path = "overlay/per-provider/claude/permissions.json"
-purpose = "the permission rules a transient seat's session comes up under, with {suite} and {worktree} rendered at the spawn"
 
 [[shadow]]
 path = "doctor/guards-installed/doctor.toml"
@@ -26,14 +18,6 @@ path = "doctor/guards-installed/run.sh"
 purpose = "what the guard health check runs and which status it reports"
 
 [[shadow]]
-path = "doctor/isolation-pair/doctor.toml"
-purpose = "the isolation probe's own name and description"
-
-[[shadow]]
-path = "doctor/isolation-pair/run.sh"
-purpose = "which knobs a provider's isolation is measured through, and which status the pair reports"
-
-[[shadow]]
 path = "doctor/runtime-version/doctor.toml"
 purpose = "the runtime check's own name and description"
 
@@ -42,40 +26,44 @@ path = "doctor/runtime-version/run.sh"
 purpose = "how a pack's pinned runtime is asked for its version and which readings count as holding — the shape the defaults ship against no [runtime] table of their own, for the feature-layer pack that pins one to replace"
 
 [[shadow]]
+path = "doctor/tmux-version/doctor.toml"
+purpose = "the tmux check's own name and description"
+
+[[shadow]]
+path = "doctor/tmux-version/run.sh"
+purpose = "how tmux is asked for its version against the oldest release the controller's host was measured on, how fleet's own server is read, and the line a missing or older tmux names to install it"
+
+[[shadow]]
+path = "doctor/fleet-packs-version/doctor.toml"
+purpose = "the fleet-packs pin check's own name and description"
+
+[[shadow]]
+path = "doctor/fleet-packs-version/run.sh"
+purpose = "how the packs installed from fleet-packs are read out of the lock against the tag the binary was checked against, and the lines a mismatch names to replace them"
+
+[[shadow]]
+path = "doctor/adopt-board/doctor.toml"
+purpose = "the board-adoption check's own name and description"
+
+[[shadow]]
+path = "doctor/adopt-board/run.sh"
+purpose = "what the board-adoption check reads through fleet, which keys and labels it counts as a board's own conventions, and which status the report gives"
+
+[[shadow]]
 path = "assets/brief.md"
 purpose = "the first turn a dispatched seat reads, and the contract it works under"
 
 [[shadow]]
-path = "assets/review-brief.md"
-purpose = "the first turn a spawned reviewer reads, carrying the delivery, the size line, the item and the one verdict it may write"
+path = "assets/delivery.schema.json"
+purpose = "the JSON shape a seat's delivery file takes, shown in its brief; fleet deliver reads the file against the binary's own type"
 
 [[shadow]]
-path = "assets/dispatch-note.md"
-purpose = "the one line an order writes on an item, and the words a reader greps for"
+path = "assets/findings.schema.json"
+purpose = "the JSON shape a reviewer's findings take; fleet review --return reads it against the binary's own type"
 
 [[shadow]]
-path = "assets/delivery-note.md"
-purpose = "the note a delivery renders, with the machine-read lines a reviewer parses"
-
-[[shadow]]
-path = "assets/verdict.md"
-purpose = "the two shapes a review writes, and the markers a reader tells them from a delivery by"
-
-[[shadow]]
-path = "assets/landing-note.md"
-purpose = "the note a landing renders, with the one line a script reads the landed sha and the suite off"
-
-[[shadow]]
-path = "assets/park-note.md"
-purpose = "the note a park renders, carrying the question, the branch, the commit and the gate the answer resolves, and the RESUME section a resumed seat's brief carries"
-
-[[shadow]]
-path = "assets/question-note.md"
-purpose = "the grammar a seat's blocking question is written in: the marker, the question and one lettered option per line"
-
-[[shadow]]
-path = "assets/answer-note.md"
-purpose = "the note an answer renders, carrying the gate it resolved, the letter a person chose and what they said beyond it"
+path = "assets/question.schema.json"
+purpose = "the JSON shape a seat's question takes, shown in its brief; fleet hold reads it against the binary's own type"
 
 [[shadow]]
 path = "assets/rules.md"

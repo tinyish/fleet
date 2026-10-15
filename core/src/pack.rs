@@ -8,17 +8,19 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+use crate::guard;
 use crate::registry;
 
 /// The manifest's file name, and the eight slot directories beside it. A tenth
 /// name at a pack's top level is a defect: the schema is the reference's, and a
 /// name they did not define is a typo.
 ///
-/// `workflows` is the one slot this format carries that the reference does not,
-/// and it is the slot `fleet run` resolves a name through — which is why it is
-/// here rather than beside the manifest's own keys.
+/// `workflows` and `adapters` are the two slots this format carries that the
+/// reference does not, and each is a slot a name resolves through — `fleet run`
+/// a workflow's, the store's opener an adapter's — which is why they are here
+/// rather than beside the manifest's own keys.
 pub const MANIFEST: &str = "pack.toml";
-pub const SLOTS: [&str; 7] = [
+pub const SLOTS: [&str; 8] = [
     "agents",
     "skills",
     "orders",
@@ -26,7 +28,94 @@ pub const SLOTS: [&str; 7] = [
     "overlay",
     "assets",
     "workflows",
+    ADAPTERS,
 ];
+
+/// The slot adapters sit under: one directory per kind, and one per adapter
+/// beneath it, `adapters/<kind>/<name>/`.
+pub const ADAPTERS: &str = "adapters";
+
+/// The file an adapter's directory is declared by.
+pub const ADAPTER_MANIFEST: &str = "adapter.toml";
+
+const ADAPTER_KEYS: [&str; 5] = ["name", "kind", "version", "description", "entry"];
+
+/// The table an agent adapter's `adapter.toml` may carry beside `[adapter]`:
+/// its pre-tool hook, as [`guard::hook`](crate::guard::hook) reads it. A store
+/// adapter carrying one is a defect.
+pub const HOOK_TABLE: &str = "hook";
+
+/// What an adapter answers for, which is the directory it is filed under. A
+/// kind directory naming neither is a defect: nothing opens an adapter of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterKind {
+    Store,
+    Agent,
+}
+
+impl AdapterKind {
+    pub const ALL: [AdapterKind; 2] = [AdapterKind::Store, AdapterKind::Agent];
+
+    /// The kind directory's name, which is the `kind` key's value too.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdapterKind::Store => "store",
+            AdapterKind::Agent => "agent",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<AdapterKind> {
+        AdapterKind::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == text)
+    }
+
+    /// The kind's adapter as a sentence names one: `a store adapter`, `an
+    /// agent adapter`.
+    pub fn indefinite(self) -> &'static str {
+        match self {
+            AdapterKind::Store => "a store adapter",
+            AdapterKind::Agent => "an agent adapter",
+        }
+    }
+
+    /// Where the pack carrying the adapter `name` of this kind sits in a
+    /// repository laid out as fleet-packs is: its own directory,
+    /// `adapters/<kind>/<name>`, at the repository's top — the source `fleet
+    /// pack add` takes for it.
+    pub fn pack_source(self, repo: &str, name: &str) -> String {
+        format!("{repo}//{ADAPTERS}/{}/{name}", self.as_str())
+    }
+
+    /// The line that installs the adapter `name` of this kind out of `repo` at
+    /// `version`: what `fleet create` prints where it installs no store, and
+    /// names where it could not install the agent's pack, and what a refusal of
+    /// a name no installed pack carries names.
+    pub fn pack_line(self, repo: &str, name: &str, version: &str) -> String {
+        format!(
+            "fleet pack add {} --version {version}",
+            self.pack_source(repo, name)
+        )
+    }
+}
+
+/// One adapter's `adapter.toml`, read and held to the directory it sits in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdapterManifest {
+    /// The adapter directory's own name, which the file repeats.
+    pub name: String,
+    /// The kind directory's, which the file repeats.
+    pub kind: AdapterKind,
+    pub version: String,
+    pub description: Option<String>,
+    /// The executable that answers for the adapter, as a path inside its
+    /// directory.
+    pub entry: String,
+    /// An agent adapter's `[hook]` table, held to the shape
+    /// [`HookMap::parse`](crate::guard::hook::HookMap::parse) reads; `None`
+    /// where it carries none, which a store adapter always does.
+    pub hook: Option<toml::Table>,
+}
 
 /// A manifest declaring any other number is refused rather than read: the keys
 /// beneath it are not this parser's. There is no dual read — a pack that has not
@@ -42,9 +131,45 @@ pub const AGENT_FORMS: [&str; 2] = ["agent.toml", "prompt.template.md"];
 /// refused when the manifest is read rather than when the exec fails.
 pub const PLACEHOLDERS: [&str; 5] = ["entry", "bundle", "run_dir", "fleet", "inputs"];
 
-const PACK_KEYS: [&str; 4] = ["name", "version", "schema", "description"];
-const TOP_TABLES: [&str; 4] = ["pack", "imports", "named_session", "runtime"];
+const PACK_KEYS: [&str; 5] = ["name", "version", "schema", "description", "guard_classes"];
+const TOP_TABLES: [&str; 5] = ["pack", "imports", "named_session", "runtime", "config"];
 const RUNTIME_KEYS: [&str; 4] = ["name", "version", "bundle", "run"];
+
+/// The three keys a `[config.<key>]` declaration may hold. `description` is
+/// required: a setting nobody can read the purpose of is one a person sets by
+/// guessing.
+pub const SETTING_KEYS: [&str; 3] = ["description", "default", "type"];
+
+/// The value types a declaration may name, spelled as TOML's own type names so
+/// a value is judged by comparing one word. A declaration naming none takes
+/// whatever value `fleet.toml` writes.
+pub const SETTING_TYPES: [&str; 5] = ["string", "integer", "float", "boolean", "array"];
+
+/// One setting the pack declares, which a fleet sets under `[packs.<name>]` in
+/// its `fleet.toml` and a workflow the pack carries reads by the same name.
+///
+/// THE NAME IS DOTTED, and a declaration may spell it either way TOML allows —
+/// `[config."takeoff.test"]` or `[config.takeoff.test]` — because both read as
+/// the one setting `takeoff.test`, which is how `fleet.toml` writes it
+/// (`takeoff.test = "…"` under the pack's section) and how a workflow asks for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Setting {
+    pub key: String,
+    pub description: String,
+    /// What a workflow reads where the fleet sets nothing.
+    pub default: Option<toml::Value>,
+    /// One of [`SETTING_TYPES`], or none.
+    pub kind: Option<String>,
+}
+
+impl Setting {
+    /// Whether a value `fleet.toml` writes is one this declaration accepts.
+    pub fn admits(&self, value: &toml::Value) -> bool {
+        self.kind
+            .as_deref()
+            .is_none_or(|kind| value.type_str() == kind)
+    }
+}
 
 /// One import declared by the manifest, keyed by import name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +203,7 @@ pub struct Runtime {
     pub run: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub name: String,
     pub version: String,
@@ -89,10 +214,24 @@ pub struct Manifest {
     /// Absent on a pack that carries no workflows. This binary ships no pack;
     /// the doctrine pack in this workspace is on that side of it.
     pub runtime: Option<Runtime>,
+    /// The settings the pack declares, by name.
+    pub config: Vec<Setting>,
+    /// `[pack] guard_classes`: which of core's compiled guard classes the pack
+    /// turns on, in the order it wrote them. A pack names a class and never
+    /// writes one, and a pack that names none turns none on.
+    pub guards: Vec<guard::Class>,
 }
 
 /// One thing wrong with a pack. Every variant prints as one line, because the
 /// check names the first defect and every further one on its own line.
+///
+/// The adapter defects name an adapter by `adapters/<kind>/<name>`.
+/// `AdapterKind` carries `None` for a kind directory naming no kind, else the
+/// `kind` an `adapter.toml` says against the directory it is filed under;
+/// `AdapterKey` the key and what is wrong with it; `AdapterHook` what is wrong
+/// with the `[hook]` table, in its reader's words; and
+/// `AdapterEntryNotExecutable` the entry by the path the check was handed, so
+/// the `chmod` its line prints runs from where the check ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Defect {
     Unreadable(String),
@@ -102,6 +241,7 @@ pub enum Defect {
     UnknownManifestKey(String),
     MissingManifestKey(String),
     ManifestKeyType { key: String, want: &'static str },
+    UnknownGuardClass(String),
     UnknownRuntimeKey(String),
     RuntimeTemplate { key: String, why: String },
     Schema(i64),
@@ -115,6 +255,18 @@ pub enum Defect {
     RegistrySchema(i64),
     RegistryKey(String),
     RegistryPathMissing(String),
+    SettingName(String),
+    UnknownSettingKey { key: String, field: String },
+    SettingType { key: String, kind: String },
+    SettingDefault { key: String, kind: String },
+    SettingOverlap { key: String, other: String },
+    AdapterWithoutManifest(String),
+    AdapterKind(String, Option<String>),
+    AdapterKey(String, String, &'static str),
+    AdapterHook(String, String),
+    AdapterNameMismatch { path: String, name: String },
+    AdapterEntryMissing { path: String, entry: String },
+    AdapterEntryNotExecutable(String),
 }
 
 impl fmt::Display for Defect {
@@ -131,6 +283,12 @@ impl fmt::Display for Defect {
             Defect::ManifestKeyType { key, want } => {
                 write!(f, "{MANIFEST}'s `{key}` is not {want}")
             }
+            Defect::UnknownGuardClass(name) => write!(
+                f,
+                "[pack] guard_classes names `{name}`, which is not a guard class — the classes \
+                 are {}",
+                guard::CLASSES.map(guard::Class::name).join(", ")
+            ),
             Defect::UnknownRuntimeKey(k) => write!(
                 f,
                 "[runtime] holds an unknown key `{k}` — the table is {}",
@@ -175,6 +333,66 @@ impl fmt::Display for Defect {
                 "`{}` lists `{p}`, which the pack does not hold",
                 registry::REGISTRY
             ),
+            Defect::SettingName(k) => write!(
+                f,
+                "`[config.{k}]` is not a setting name — each dotted part is letters, digits, \
+                 `_` or `-`"
+            ),
+            Defect::UnknownSettingKey { key, field } => write!(
+                f,
+                "[config.{key}] holds an unknown key `{field}` — a declaration is {}",
+                SETTING_KEYS.join(", ")
+            ),
+            Defect::SettingType { key, kind } => write!(
+                f,
+                "[config.{key}]'s type `{kind}` is not one of {}",
+                SETTING_TYPES.join(", ")
+            ),
+            Defect::SettingDefault { key, kind } => write!(
+                f,
+                "[config.{key}]'s default is not of the declaration's own type, {kind}"
+            ),
+            Defect::SettingOverlap { key, other } if key == other => {
+                write!(f, "[config.{key}] is declared twice")
+            }
+            Defect::SettingOverlap { key, other } => write!(
+                f,
+                "[config.{key}] and [config.{other}] overlap — one setting's name is never the \
+                 start of another's, or a `fleet.toml` value could be read as either"
+            ),
+            Defect::AdapterWithoutManifest(p) => write!(f, "`{p}` holds no {ADAPTER_MANIFEST}"),
+            Defect::AdapterKind(path, None) => write!(
+                f,
+                "`{path}` is no adapter kind — an adapter is filed under {}",
+                AdapterKind::ALL
+                    .map(|kind| format!("{ADAPTERS}/{}/", kind.as_str()))
+                    .join(" or ")
+            ),
+            Defect::AdapterKind(path, Some(kind)) => write!(
+                f,
+                "`{path}/{ADAPTER_MANIFEST}` says kind `{kind}`, and it is filed under `{}`",
+                path.rsplit_once('/')
+                    .map_or(path.as_str(), |(filed, _)| filed)
+            ),
+            Defect::AdapterKey(path, key, why) => {
+                write!(f, "`{path}/{ADAPTER_MANIFEST}`'s `{key}` {why}")
+            }
+            Defect::AdapterHook(path, why) => {
+                write!(f, "`{path}/{ADAPTER_MANIFEST}`'s [{HOOK_TABLE}] {why}")
+            }
+            Defect::AdapterNameMismatch { path, name } => write!(
+                f,
+                "`{path}/{ADAPTER_MANIFEST}` names the adapter `{name}`, and its directory is `{}`",
+                path.rsplit('/').next().unwrap_or(path)
+            ),
+            Defect::AdapterEntryMissing { path, entry } => write!(
+                f,
+                "`{path}`'s entry `{entry}` is not a file in its directory"
+            ),
+            Defect::AdapterEntryNotExecutable(file) => write!(
+                f,
+                "the adapter entry `{file}` is not executable — `chmod +x {file}` makes it one"
+            ),
         }
     }
 }
@@ -187,7 +405,7 @@ pub struct Slot {
     pub entries: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub manifest: Option<Manifest>,
     pub slots: Vec<Slot>,
@@ -225,7 +443,7 @@ pub fn check(root: &Path) -> Report {
             if root.join(name).is_dir() {
                 slots.push(Slot {
                     name: slot,
-                    entries: dir_names(&root.join(name)).map(|e| e.len()).unwrap_or(0),
+                    entries: entries(&root.join(name), slot),
                 });
             } else {
                 defects.push(Defect::SlotNotADirectory(name.clone()));
@@ -236,15 +454,13 @@ pub fn check(root: &Path) -> Report {
     }
 
     let manifest = if has_manifest {
-        match fs::read_to_string(root.join(MANIFEST)) {
-            Ok(text) => match parse_manifest(&text) {
-                Ok(m) => Some(m),
-                Err(mut found) => {
-                    defects.append(&mut found);
-                    None
-                }
-            },
-            Err(e) => {
+        match read_manifest(root) {
+            Ok(m) => Some(m),
+            Err(ManifestRead::Defects(mut found)) => {
+                defects.append(&mut found);
+                None
+            }
+            Err(ManifestRead::Unreadable(e)) => {
                 defects.push(Defect::Unreadable(e.to_string()));
                 None
             }
@@ -262,6 +478,20 @@ pub fn check(root: &Path) -> Report {
         slots,
         defects,
     }
+}
+
+/// Why a pack's manifest could not be had: the file would not read, or it
+/// read and the format refused it. Each caller words both its own way.
+#[derive(Debug)]
+pub enum ManifestRead {
+    Unreadable(std::io::Error),
+    Defects(Vec<Defect>),
+}
+
+/// The manifest at `root`, read and parsed in one call.
+pub fn read_manifest(root: &Path) -> Result<Manifest, ManifestRead> {
+    let text = fs::read_to_string(root.join(MANIFEST)).map_err(ManifestRead::Unreadable)?;
+    parse_manifest(&text).map_err(ManifestRead::Defects)
 }
 
 /// The manifest's own rules, over its text. Split from [`check`] so a manifest
@@ -334,9 +564,11 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Vec<Defect>> {
         }
     };
 
+    let guards = parse_guard_classes(&pack, &mut defects);
     let imports = parse_imports(&doc, &mut defects);
     let named_sessions = parse_named_sessions(&doc, &mut defects);
     let runtime = parse_runtime(&doc, &mut defects);
+    let config = parse_config(&doc, &mut defects);
 
     if defects.is_empty() {
         Ok(Manifest {
@@ -347,10 +579,41 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Vec<Defect>> {
             imports,
             named_sessions,
             runtime,
+            config,
+            guards,
         })
     } else {
         Err(defects)
     }
+}
+
+/// `[pack] guard_classes`, each name read by [`guard::Class::parse`]: a name
+/// outside the four is a defect naming it, and a value that is not a list of
+/// strings is one naming the key. The key sits in `[pack]` rather than in a
+/// table of its own so it is never mistaken for the fleet's `[guards]`
+/// switches, which turn a class off and never on.
+fn parse_guard_classes(pack: &toml::Table, defects: &mut Vec<Defect>) -> Vec<guard::Class> {
+    let Some(value) = pack.get("guard_classes") else {
+        return Vec::new();
+    };
+    let names = match value.as_array() {
+        Some(values) if values.iter().all(toml::Value::is_str) => values,
+        _ => {
+            defects.push(Defect::ManifestKeyType {
+                key: "pack.guard_classes".into(),
+                want: "a list of strings",
+            });
+            return Vec::new();
+        }
+    };
+    let mut classes = Vec::new();
+    for name in names.iter().filter_map(toml::Value::as_str) {
+        match guard::Class::parse(name) {
+            Some(class) => classes.push(class),
+            None => defects.push(Defect::UnknownGuardClass(name.to_string())),
+        }
+    }
+    classes
 }
 
 /// Every `{name}` a template holds, in order, or the first reason the text is
@@ -435,6 +698,120 @@ fn parse_runtime(doc: &toml::Table, defects: &mut Vec<Defect>) -> Option<Runtime
         version: version?,
         bundle: bundle?,
         run: run?,
+    })
+}
+
+fn parse_config(doc: &toml::Table, defects: &mut Vec<Defect>) -> Vec<Setting> {
+    let table = match doc.get("config") {
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            defects.push(Defect::ManifestKeyType {
+                key: "config".into(),
+                want: "a table",
+            });
+            return Vec::new();
+        }
+        None => return Vec::new(),
+    };
+    let mut settings = Vec::new();
+    declarations(table, "", defects, &mut settings);
+    settings.sort_by(|a, b| a.key.cmp(&b.key));
+
+    for (at, setting) in settings.iter().enumerate() {
+        for other in &settings[at + 1..] {
+            let (short, long) = (&setting.key, &other.key);
+            if short == long || long.starts_with(&format!("{short}.")) {
+                defects.push(Defect::SettingOverlap {
+                    key: short.clone(),
+                    other: long.clone(),
+                });
+            }
+        }
+    }
+    settings
+}
+
+/// A table holding any value that is not itself a table is ONE DECLARATION; a
+/// table holding only tables is a name its children are declared under. That
+/// is the rule that reads `[config.takeoff.test]` and `[config."takeoff.test"]`
+/// as the same setting, and an empty table as a declaration missing its
+/// description rather than as nothing.
+fn declarations(
+    table: &toml::Table,
+    prefix: &str,
+    defects: &mut Vec<Defect>,
+    into: &mut Vec<Setting>,
+) {
+    for (name, value) in table {
+        let key = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        let Some(entry) = value.as_table() else {
+            defects.push(Defect::ManifestKeyType {
+                key: format!("config.{key}"),
+                want: "a table",
+            });
+            continue;
+        };
+        if !entry.is_empty() && entry.values().all(toml::Value::is_table) {
+            declarations(entry, &key, defects, into);
+        } else if let Some(setting) = declaration(&key, entry, defects) {
+            into.push(setting);
+        }
+    }
+}
+
+fn declaration(key: &str, entry: &toml::Table, defects: &mut Vec<Defect>) -> Option<Setting> {
+    let before = defects.len();
+    let named = key.split('.').all(|part| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    });
+    if !named {
+        defects.push(Defect::SettingName(key.to_string()));
+    }
+    for field in entry.keys() {
+        if !SETTING_KEYS.contains(&field.as_str()) {
+            defects.push(Defect::UnknownSettingKey {
+                key: key.to_string(),
+                field: field.clone(),
+            });
+        }
+    }
+    let description = string_key(
+        entry,
+        &format!("config.{key}.description"),
+        "description",
+        defects,
+        true,
+    );
+    let kind = string_key(entry, &format!("config.{key}.type"), "type", defects, false);
+    let default = entry.get("default").cloned();
+    if let Some(kind) = &kind {
+        if !SETTING_TYPES.contains(&kind.as_str()) {
+            defects.push(Defect::SettingType {
+                key: key.to_string(),
+                kind: kind.clone(),
+            });
+        } else if default.as_ref().is_some_and(|d| d.type_str() != kind) {
+            defects.push(Defect::SettingDefault {
+                key: key.to_string(),
+                kind: kind.clone(),
+            });
+        }
+    }
+    if defects.len() > before {
+        return None;
+    }
+    Some(Setting {
+        key: key.to_string(),
+        description: description?,
+        default,
+        kind,
     })
 }
 
@@ -562,8 +939,156 @@ fn string_key(
     }
 }
 
-/// The four slots whose entries carry a shape. `overlay` and `assets` hold
-/// whatever the pack drops there, so neither has a rule to break.
+/// How many entries a slot holds: the names directly under it, except under
+/// `adapters`, whose entries sit one kind directory down.
+fn entries(dir: &Path, slot: &str) -> usize {
+    let names = dir_names(dir).unwrap_or_default();
+    if slot != ADAPTERS {
+        return names.len();
+    }
+    names
+        .iter()
+        .filter(|kind| dir.join(kind).is_dir())
+        .map(|kind| dir_names(&dir.join(kind)).map_or(0, |e| e.len()))
+        .sum()
+}
+
+/// One adapter directory's `adapter.toml`, read and held to where it sits:
+/// its `name` is the directory's, its `kind` the kind directory's, and its
+/// `entry` an executable file inside it. The first defect is the answer.
+///
+/// `dir` is `…/adapters/<kind>/<name>`, and every defect names it by those
+/// three parts — except an entry that is not executable, which is named by
+/// the path handed in, so the `chmod` its line prints runs from here.
+pub fn adapter_manifest(dir: &Path) -> Result<AdapterManifest, Defect> {
+    let part = |path: Option<&Path>| {
+        path.and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let named = part(Some(dir));
+    let filed = part(dir.parent());
+    let path = format!("{ADAPTERS}/{filed}/{named}");
+    let Some(kind) = AdapterKind::parse(&filed) else {
+        return Err(Defect::AdapterKind(format!("{ADAPTERS}/{filed}"), None));
+    };
+    let file = dir.join(ADAPTER_MANIFEST);
+    if !file.is_file() {
+        return Err(Defect::AdapterWithoutManifest(path));
+    }
+    let text = fs::read_to_string(&file).map_err(|e| Defect::Unreadable(e.to_string()))?;
+    let doc: toml::Table = text.parse().map_err(|e: toml::de::Error| Defect::NotToml {
+        path: format!("{path}/{ADAPTER_MANIFEST}"),
+        error: e.to_string(),
+    })?;
+
+    let key = |key: &str, why: &'static str| Defect::AdapterKey(path.clone(), key.to_string(), why);
+    if let Some(table) = doc
+        .keys()
+        .find(|table| *table != "adapter" && *table != HOOK_TABLE)
+    {
+        return Err(key(
+            table,
+            "is not a table it holds — it holds [adapter], and [hook] on an agent adapter",
+        ));
+    }
+    let Some(table) = doc.get("adapter").and_then(toml::Value::as_table) else {
+        return Err(key("[adapter]", "is missing"));
+    };
+    if let Some(unknown) = table
+        .keys()
+        .find(|field| !ADAPTER_KEYS.contains(&field.as_str()))
+    {
+        return Err(key(
+            unknown,
+            "is not a key [adapter] holds — it holds name, kind, version, description and entry",
+        ));
+    }
+    let text_of = |field: &str| match table.get(field) {
+        None => Ok(None),
+        Some(toml::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(key(field, "is not a string")),
+    };
+    let required = |field: &str| text_of(field)?.ok_or_else(|| key(field, "is missing"));
+
+    let name = required("name")?;
+    if name != named {
+        return Err(Defect::AdapterNameMismatch { path, name });
+    }
+    let said = required("kind")?;
+    if AdapterKind::parse(&said) != Some(kind) {
+        return Err(Defect::AdapterKind(path, Some(said)));
+    }
+    let version = required("version")?;
+    let description = text_of("description")?;
+    let entry = required("entry")?;
+    let inside = !entry.is_empty()
+        && Path::new(&entry)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)));
+    if !inside {
+        return Err(key("entry", "is not a path inside the adapter's directory"));
+    }
+    let program = dir.join(&entry);
+    if !program.is_file() {
+        return Err(Defect::AdapterEntryMissing { path, entry });
+    }
+    if !crate::process::is_executable_file(&program) {
+        return Err(Defect::AdapterEntryNotExecutable(
+            program.display().to_string(),
+        ));
+    }
+    let hook = match doc.get(HOOK_TABLE) {
+        None => None,
+        Some(_) if kind != AdapterKind::Agent => {
+            return Err(key(
+                "[hook]",
+                "is a table only an agent adapter holds — a store adapter holds [adapter] alone",
+            ));
+        }
+        Some(toml::Value::Table(table)) => {
+            crate::guard::hook::HookMap::parse(table)
+                .map_err(|why| Defect::AdapterHook(path.clone(), why))?;
+            Some(table.clone())
+        }
+        Some(_) => return Err(key("hook", "is not a table")),
+    };
+    Ok(AdapterManifest {
+        name,
+        kind,
+        version,
+        description,
+        entry,
+        hook,
+    })
+}
+
+/// The adapter `name` of `kind` the installed packs carry: the layer that
+/// carries `adapters/<kind>/<name>/adapter.toml` — the highest holding it,
+/// which carries the adapter WHOLE — and the adapter's directory in it.
+/// `None` where no layer carries it.
+///
+/// A LOOKUP AND NOT A READ: the manifest is not held to the format here, so a
+/// caller reads it through [`adapter_manifest`] before it runs, or reads,
+/// anything the adapter declares.
+pub fn adapter_dir<'p>(
+    packs: &'p crate::item::brief::Packs,
+    kind: AdapterKind,
+    name: &str,
+) -> Option<(&'p crate::resolve::Layer, std::path::PathBuf)> {
+    let declared = format!("{ADAPTERS}/{}/{name}/{ADAPTER_MANIFEST}", kind.as_str());
+    let carrier = packs
+        .resolution
+        .files
+        .get(&declared)
+        .and_then(|carrier| packs.layers.iter().find(|layer| &layer.name == carrier))?;
+    let dir = carrier.root.join(&declared).parent()?.to_path_buf();
+    Some((carrier, dir))
+}
+
+/// The five slots whose entries carry a shape. `overlay`, `assets` and
+/// `workflows` hold whatever the pack drops there, so none has a rule to
+/// break.
 fn check_slots(root: &Path) -> Vec<Defect> {
     let mut defects = Vec::new();
 
@@ -589,6 +1114,24 @@ fn check_slots(root: &Path) -> Vec<Defect> {
             .is_file()
         {
             defects.push(Defect::DoctorWithoutDoctorToml(format!("doctor/{name}")));
+        }
+    }
+
+    let adapters = root.join(ADAPTERS);
+    for filed in dir_names(&adapters).unwrap_or_default() {
+        let kind = adapters.join(&filed);
+        if AdapterKind::parse(&filed).is_none() {
+            defects.push(Defect::AdapterKind(format!("{ADAPTERS}/{filed}"), None));
+            continue;
+        }
+        if !kind.is_dir() {
+            defects.push(Defect::SlotNotADirectory(format!("{ADAPTERS}/{filed}")));
+            continue;
+        }
+        for name in dir_names(&kind).unwrap_or_default() {
+            if let Err(defect) = adapter_manifest(&kind.join(name)) {
+                defects.push(defect);
+            }
         }
     }
 
@@ -632,14 +1175,74 @@ fn check_registry(root: &Path) -> Vec<Defect> {
     }
 }
 
+/// A pack's walks read past OS litter rather than refusing the pack or
+/// resolving the litter as slot files.
+pub use crate::os_litter::is_os_litter;
+
 /// The names directly under a directory, sorted, so a report reads the same on
-/// every filesystem.
+/// every filesystem, with [`OS_LITTER`](crate::os_litter::OS_LITTER) left out. Every walk of a pack — the
+/// check here and the resolver's — lists a directory through this one reader,
+/// which is what keeps them agreeing on what a pack holds.
 pub(crate) fn dir_names(dir: &Path) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        names.push(entry.file_name().to_string_lossy().into_owned());
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_os_litter(&name) {
+            names.push(name);
+        }
     }
     names.sort();
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one reader's three answers: a directory with no manifest to read is
+    /// `Unreadable`, a manifest the format refuses is `Defects` holding what it
+    /// refused, and a valid one is the manifest it declares.
+    #[test]
+    fn read_manifest_answers_unreadable_defects_or_the_manifest() {
+        let dir = std::env::temp_dir().join(format!("fleet-read-manifest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let missing = dir.join("missing");
+        assert!(
+            matches!(read_manifest(&missing), Err(ManifestRead::Unreadable(_))),
+            "a directory that is not there has no manifest to read"
+        );
+
+        let refused = dir.join("refused");
+        fs::create_dir_all(&refused).unwrap();
+        fs::write(
+            refused.join(MANIFEST),
+            "[pack]\nname = \"t\"\nversion = \"1\"\nschema = 3\n\n[exports]\nx = 1\n",
+        )
+        .unwrap();
+        match read_manifest(&refused) {
+            Err(ManifestRead::Defects(defects)) => assert_eq!(
+                defects,
+                vec![Defect::UnknownManifestTable("exports".into())]
+            ),
+            other => panic!("an unknown top table is a defect, got {other:?}"),
+        }
+
+        let valid = dir.join("valid");
+        fs::create_dir_all(&valid).unwrap();
+        let text = "[pack]\nname = \"t\"\nversion = \"1\"\nschema = 3\n";
+        fs::write(valid.join(MANIFEST), text).unwrap();
+        let manifest = read_manifest(&valid).expect("a valid manifest reads");
+        assert_eq!(
+            (
+                manifest.name.as_str(),
+                manifest.version.as_str(),
+                manifest.schema
+            ),
+            ("t", "1", 3)
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

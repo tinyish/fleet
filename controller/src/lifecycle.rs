@@ -1,19 +1,20 @@
 //! `fleet create`, `fleet start`, `fleet stop` — everything about them that is
-//! not argv (cli PRD § Lifecycle; PRD R1–R4, R33).
+//! not argv.
 //!
 //! THERE IS NO `fleet install`. The work an install verb would have done — the
 //! machine directory, the seat list, the `[seats]` render, the service file and
 //! the telemetry disclosure — is [`first_run`], one function `fleet start` calls
 //! before it loads anything and a later installer script can call instead.
-//! Nothing in it starts anything: load is a second deliberate act (R1).
+//! Nothing in it starts anything: load is a second deliberate act.
 //!
 //! The two writers below are the whole of what `fleet create` decides. Neither
 //! touches the project's work-graph store: the controller never initialises and
-//! never rewrites one (R3), and nothing here shells out to it.
+//! never rewrites one, and nothing here shells out to it.
 
-use crate::events::{self, EventLog, CONTROLLER};
-use crate::policy::{self, Policy};
-use crate::{clock, config, platform};
+use crate::events::{self, EventLog};
+use crate::policy::Policy;
+use crate::{config, platform};
+use fleet_core::seat::identity::{basic, roster_in, Kind, SeatRef};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -24,8 +25,6 @@ pub const FLEET_TOML: &str = "fleet.toml";
 pub const PROJECT_TOML: &str = ".fleet/project.toml";
 /// The machine's register of standalone projects.
 pub const PROJECTS: &str = "projects.toml";
-/// The store config a project's item prefix is read out of, where it has one.
-pub const STORE_CONFIG: &str = ".beads/config.yaml";
 
 /// How long a load or an unload is given to show up on the stream.
 ///
@@ -82,14 +81,30 @@ pub fn written_by(flags: &[&str], asked: bool) -> String {
 /// opt-out and so have to be visible to be opted out of, and telemetry, which is
 /// off and said.
 ///
-/// The agent is written on a line of its own rather than read out of the
-/// invocation, because it is a choice this file records and the invocation is
-/// only how the choice was made.
-pub fn embedded_text(agent: &str, written_by: &str) -> String {
+/// The agent is written as `[agent] adapter` even though a missing key opens
+/// the same adapter, because it is a choice this file records and the
+/// invocation is only how the choice was made (ruling 11).
+///
+/// `model` is the model the installed agent adapter's capabilities name as its
+/// default, which the example seat row carries; `None`, for an adapter that
+/// could not be asked, leaves the row's model out rather than guessing one.
+///
+/// `store` is the store adapter `fleet create` installed a pack for, written as
+/// `[store] adapter`; `None` writes no table, for a fleet whose store pack is
+/// installed later.
+pub fn embedded_text(
+    agent: &str,
+    model: Option<&str>,
+    store: Option<&str>,
+    written_by: &str,
+) -> String {
+    let model = match model {
+        Some(model) => format!("#   model = \"{}\"\n", basic(model)),
+        None => String::new(),
+    };
     format!(
         "# This fleet is EMBEDDED: this file is its policy and it sits at the\n\
          # project's root, so the fleet and the project are one directory.\n\
-         # Its agent is `{agent}`.\n\
          # Written by {written_by}.\n\
          #\n\
          # Every key the controller defaults is left out on purpose. Add one here\n\
@@ -104,16 +119,42 @@ pub fn embedded_text(agent: &str, written_by: &str) -> String {
          [telemetry]\n\
          enabled = false\n\
          \n\
-         # One table per seat, rendered into the machine's seat list by\n\
-         # `fleet start`. A row looks like this:\n\
+         # The agent every seat of this fleet runs on: the agent adapter an\n\
+         # installed pack carries under this name.\n\
+         [agent]\n\
+         adapter = \"{agent}\"\n\
+         \n\
+         {store}\
+         # One table per seat, keyed by the seat's id. fleet seat add writes them\n\
+         # and fleet start renders the agent seats into the machine's seat list.\n\
+         # A row looks like this:\n\
          #\n\
-         #   [seats.a-seat]\n\
-         #   model = \"{model}\"\n\
-         #   chosen_name = \"what a person calls it\"\n\
+         #   [seats.01a0d1f1-0aec-765f-9abe-d4f993b9739a]\n\
+         #   kind = \"agent\"\n\
+         #   name = \"what a person calls it\"\n\
+         {model}\
          #   status = \"active\"\n\
          [seats]\n",
-        model = policy::DEFAULT_MODEL,
+        agent = basic(agent),
+        store = store_table(store),
     )
+}
+
+/// The `[store]` table naming the store adapter `fleet create` installed, the
+/// line above it saying what the name is and a blank line after it; the empty
+/// string where it installed none.
+fn store_table(store: Option<&str>) -> String {
+    match store {
+        Some(name) => format!(
+            "# The store this fleet's items live in: the store adapter an installed\n\
+             # pack carries under this name.\n\
+             [store]\n\
+             adapter = \"{}\"\n\
+             \n",
+            basic(name)
+        ),
+        None => String::new(),
+    }
 }
 
 /// A standalone project's declaration.
@@ -121,11 +162,15 @@ pub fn embedded_text(agent: &str, written_by: &str) -> String {
 /// The two directories are written OUT even though an embedded fleet derives
 /// them from where its own file sits: a standalone fleet's file sits somewhere
 /// else entirely, so there is nothing here for it to derive them from.
+///
+/// `store` as [`embedded_text`] takes it: the `[store]` table goes in the
+/// project's own file, which is the one the store is opened by.
 pub fn project_text(
     name: &str,
     item_prefix: Option<&str>,
     primary: &Path,
     worktrees: &Path,
+    store: Option<&str>,
     written_by: &str,
 ) -> String {
     let prefix = match item_prefix {
@@ -144,57 +189,18 @@ pub fn project_text(
          primary = \"{primary}\"\n\
          worktrees = \"{worktrees}\"\n\
          \n\
-         # Owed, and left for the person: a landing gates on the project's own\n\
-         # suite, and a suite this file guessed would gate on nothing.\n\
-         [gates]\n\
-         # suite = \"the command a landing runs\"\n\
+         {store}\
+         # Owed, and left for the person: a marker this file guessed would\n\
+         # skip a pipeline nobody chose to skip. The test commands are not set\n\
+         # here — a workflow hands them to the landing; for takeoff they are\n\
+         # takeoff.test and takeoff.touched under [packs.tiny] in fleet.toml.\n\
+         [landing]\n\
          # ci_marker = \"the marker a landing's commit carries\"\n",
         name = basic(name),
         primary = basic(&primary.display().to_string()),
         worktrees = basic(&worktrees.display().to_string()),
+        store = store_table(store),
     )
-}
-
-/// One value inside a TOML basic string.
-///
-/// A directory basename is whatever a person named it, and a quote or a
-/// backslash in one writes a file that does not parse — which is a declaration
-/// every later verb refuses, from a name nobody thought was special. The set is
-/// the format's own: the two delimiters and the control characters, each as the
-/// short escape where it has one.
-pub fn basic(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\u{:04X}", c as u32))
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// The item prefix this project's own store config carries, where it has one.
-///
-/// A two-line reader rather than a YAML dependency: the one key wanted is at the
-/// top level and is written as `issue-prefix: <value>`, and a file that says it
-/// some other way answers `None`, which is the same as saying nothing.
-pub fn item_prefix_in(store_config: &str) -> Option<String> {
-    store_config
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with('#'))
-        .find_map(|line| line.strip_prefix("issue-prefix:"))
-        .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
-        .filter(|value| !value.is_empty())
 }
 
 /// A declaration somebody already wrote, read for the keys a registration needs.
@@ -213,7 +219,7 @@ pub fn validate_declaration(path: &Path) -> Result<String, String> {
 pub const DECLARED_KEYS: [&str; 4] = ["name", "item_prefix", "primary", "worktrees"];
 
 /// The same file, read for EVERY key a registration needs rather than the one
-/// the register is keyed on (controller PRD § Two modes).
+/// the register is keyed on.
 ///
 /// Held to this only where a person wrote the file: the declaration this verb
 /// writes itself leaves the prefix commented for the person to fill in and names
@@ -336,7 +342,7 @@ pub fn register(machine_dir: &Path, root: &Path, name: &str) -> Result<bool, Str
         basic(&root.display().to_string()),
         basic(name)
     ));
-    platform::write_atomic(&path, body.as_bytes())
+    fleet_core::fs::write_atomic(&path, body.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))?;
     // The read-back this write owes its own record: a file that was written and
     // does not parse is a register the next registration would refuse to read.
@@ -349,10 +355,10 @@ pub fn register(machine_dir: &Path, root: &Path, name: &str) -> Result<bool, Str
 
 /// Write the `project.registered` line the registry owes the stream.
 pub fn registered_event(machine_dir: &Path, root: &Path, name: &str) -> Result<(), String> {
-    EventLog::open(&machine_dir.join("events.jsonl"))
+    EventLog::open(&events::path_in(machine_dir))
         .append(
             events::PROJECT_REGISTERED,
-            CONTROLLER,
+            &events::controller(machine_dir),
             serde_json::json!({ "root": root.display().to_string(), "name": name }),
         )
         .map_err(|e| e.to_string())
@@ -372,6 +378,9 @@ pub struct FirstRun<'a> {
     /// guessed one puts a seat in the wrong checkout.
     pub project: Option<ProjectAt<'a>>,
     pub policy: &'a Policy,
+    /// What the agent declares: the model a rendered seat whose table names
+    /// none, under a policy that names none, is written with.
+    pub agent: &'a fleet_core::agent::Capabilities,
     pub service: &'a platform::Service,
 }
 
@@ -389,8 +398,8 @@ pub struct FirstRunReport {
     pub changed: bool,
 }
 
-/// The install work, in one function, with NOTHING STARTED (R1, lessons
-/// gas-city G1).
+/// The install work, in one function, with NOTHING STARTED (lessons gas-city
+/// G1).
 ///
 /// Every step is idempotent, so a second `fleet start` repeats none of it and
 /// says so line by line. The order is the one a reader needs: the directory
@@ -404,7 +413,7 @@ pub fn first_run(run: &FirstRun) -> Result<FirstRunReport, String> {
         .map_err(|e| format!("{}: {e}", run.machine_dir.display()))?;
     lines.push(format!("machine directory: {}", run.machine_dir.display()));
 
-    let config_path = run.machine_dir.join("config.json");
+    let config_path = config::path_in(run.machine_dir);
     if write_seat_list(&config_path, run.fleet_toml)? {
         changed = true;
         lines.push(format!("seat list: written at {}", config_path.display()));
@@ -424,15 +433,15 @@ pub fn first_run(run: &FirstRun) -> Result<FirstRunReport, String> {
         ));
     }
 
-    let seats = rendered_seats(run)?;
+    let (seats, humans) = rendered_seats(run)?;
     let render = config::render_seats(&config_path, &seats)?;
     changed |= render.moved();
-    lines.push(match (seats.len(), render.moved()) {
+    let mut said = match (seats.len(), render.moved()) {
         (0, _) if run.project.is_none() => "seats: no project resolves from this directory, so \
              no row was rendered — run `fleet start` from inside a registered project to render \
              them"
             .to_string(),
-        (0, _) => "seats: the policy names none, so no row was rendered".to_string(),
+        (0, _) => "seats: the policy names no agent seat, so no row was rendered".to_string(),
         (n, false) => format!("seats: {n} row(s) already rendered"),
         (n, true) => format!(
             "seats: {n} row(s) rendered — {} added, {} updated, {} dropped",
@@ -440,7 +449,16 @@ pub fn first_run(run: &FirstRun) -> Result<FirstRunReport, String> {
             render.updated.len(),
             render.dropped.len()
         ),
-    });
+    };
+    // A person's seat is on the roster and on no row, and the line says so
+    // rather than leave a count that reads one short.
+    if humans > 0 {
+        said.push_str(&format!(
+            "; {humans} human seat(s) listed and not rendered — the controller runs agent seats \
+             only"
+        ));
+    }
+    lines.push(said);
 
     let wrote = run.service.write()?;
     changed |= wrote;
@@ -449,9 +467,7 @@ pub fn first_run(run: &FirstRun) -> Result<FirstRunReport, String> {
         if wrote { "written" } else { "already" },
         run.service.file().display()
     ));
-    for note in run.service.notes() {
-        lines.push(note);
-    }
+    lines.extend(run.service.after_write());
     // The one line that is a promise rather than a report: this function loads
     // nothing, and the arm named for it counts the manager's calls.
     lines.push(format!(
@@ -489,34 +505,77 @@ pub fn write_seat_list(config_path: &Path, fleet_toml: &Path) -> Result<bool, St
         }))
         .map_err(|e| e.to_string())?
     );
-    platform::write_atomic(config_path, body.as_bytes())
+    fleet_core::fs::write_atomic(config_path, body.as_bytes())
         .map_err(|e| format!("{}: {e}", config_path.display()))?;
     Ok(true)
 }
 
-/// The active seats of the fleet's policy file, as rows.
-fn rendered_seats(run: &FirstRun) -> Result<Vec<config::RenderedSeat>, String> {
-    let Some(at) = &run.project else {
-        return Ok(Vec::new());
-    };
+/// The active agent seats of the fleet's policy file, as rows, and beside them
+/// how many human seats it lists.
+///
+/// THE SEATS ARE READ THROUGH CORE'S ROSTER and nowhere else [ASSUMES D2], so
+/// the clean break is refused here as everywhere: a table keyed by a name
+/// stops the start rather than being read around. The roster is read before
+/// the project is asked for, so a start that renders nothing refuses it too.
+///
+/// A PERSON'S SEAT IS LISTED AND NEVER RENDERED: the controller runs agent
+/// seats only, and a parked agent is kept and not run.
+///
+/// RENDERING IS `fleet start`'S ACT and never the loop's: the controller re-reads
+/// `config.json` and never this table, so a changed `[seats]` table is followed
+/// by a stop and a start.
+fn rendered_seats(run: &FirstRun) -> Result<(Vec<config::RenderedSeat>, usize), String> {
     let body = std::fs::read_to_string(run.fleet_toml)
         .map_err(|e| format!("{}: {e}", run.fleet_toml.display()))?;
-    Ok(policy::seats_in(&body)?
+    let roster = roster_in(&body)?;
+    let humans = roster
+        .iter()
+        .filter(|seat| seat.seat.kind == Kind::Human)
+        .count();
+    let Some(at) = &run.project else {
+        return Ok((Vec::new(), humans));
+    };
+    let rows = roster
         .into_iter()
-        .filter(|seat| !seat.parked)
+        .filter(|seat| seat.seat.kind == Kind::Agent && !seat.parked)
         .map(|seat| config::RenderedSeat {
-            model: run.policy.model_for(seat.model.as_deref()),
-            chosen_name: seat.chosen_name,
+            id: seat.seat.id,
+            name: seat.seat.name.clone(),
+            model: run.policy.model_for(seat.model.as_deref(), run.agent),
             worktrees: vec![(
                 at.name.to_string(),
-                at.worktrees_dir.join(&seat.name).display().to_string(),
+                worktree_for(at.worktrees_dir, &seat.seat)
+                    .display()
+                    .to_string(),
             )],
-            name: seat.name,
         })
-        .collect())
+        .collect();
+    Ok((rows, humans))
 }
 
-/// Telemetry: off, and asked (R2, lessons gas-city G2).
+/// A seat's worktree under `dir`: the one entry already there whose name ends
+/// in `-<short>`, and `<dir>/<machine name>` where there is none — or more than
+/// one, which is no answer either.
+///
+/// A RENAME MOVES NO WORKTREE [ASSUMES D1]. The slug is the part of a machine
+/// name a person can change and the short id the part they cannot, so a
+/// worktree made under the seat's old name is found by the part it kept.
+fn worktree_for(dir: &Path, seat: &SeatRef) -> PathBuf {
+    let tail = format!("-{}", seat.id.short());
+    let fallback = || dir.join(seat.machine_name());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return fallback();
+    };
+    let mut found = entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(&tail));
+    match (found.next(), found.next()) {
+        (Some(only), None) => only.path(),
+        _ => fallback(),
+    }
+}
+
+/// Telemetry: off, and asked (lessons gas-city G2).
 ///
 /// NOTHING IS ASKED, and that is the disclosure. A question with nothing behind
 /// it — no metric is collected, none is sent, and there is no endpoint — is a
@@ -626,7 +685,7 @@ fn write_back(fleet_toml: &Path, whole: &str, how: &str) -> Result<(String, bool
             fleet_toml.display()
         )
     })?;
-    platform::write_atomic(fleet_toml, whole.as_bytes())
+    fleet_core::fs::write_atomic(fleet_toml, whole.as_bytes())
         .map_err(|e| format!("{}: {e}", fleet_toml.display()))?;
     Ok((
         format!(
@@ -664,7 +723,7 @@ impl NotConfirmed {
 /// Read BEFORE the load, because an old `controller.started` from a previous
 /// run is exactly what a confirmation must not accept.
 pub fn stream_head(machine_dir: &Path) -> u64 {
-    EventLog::open(&machine_dir.join("events.jsonl")).seq()
+    EventLog::open(&events::path_in(machine_dir)).seq()
 }
 
 /// Wait for one fresh event of `kind` above `above`.
@@ -677,7 +736,7 @@ pub fn confirm(
     above: u64,
     timeout: Duration,
 ) -> Result<u64, NotConfirmed> {
-    let stream = machine_dir.join("events.jsonl");
+    let stream = events::path_in(machine_dir);
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(seq) = events::read_after(&stream, above)
@@ -702,7 +761,7 @@ pub fn confirm(
 /// person can point to. Read FROM THE FILE and never from the process table: a
 /// pid is not a tick.
 pub fn last_tick(machine_dir: &Path) -> Option<String> {
-    let body = std::fs::read_to_string(machine_dir.join("projection.json")).ok()?;
+    let body = std::fs::read_to_string(crate::projection::path_in(machine_dir)).ok()?;
     let document: serde_json::Value = serde_json::from_str(&body).ok()?;
     document
         .get("generated_at")
@@ -710,22 +769,28 @@ pub fn last_tick(machine_dir: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The stamp a lock entry and an event carry.
-pub fn stamp() -> String {
-    clock::now_stamp()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy;
+    use fleet_core::agent::DEFAULT_AGENT_ADAPTER as AGENT;
+
+    /// The model the example seat row carries in these arms: any adapter's
+    /// answer, so none of the vendor's own.
+    const MODEL: &str = "quill-large-2";
+
+    /// The `--agent` flag as a call carrying it spells it.
+    fn agent_flag() -> String {
+        format!("--agent {AGENT}")
+    }
 
     /// A header claiming a flag nobody passed is the only thing a later reader
     /// has to go on, so an answer given at a prompt is said to be one.
     #[test]
     fn the_written_by_line_names_only_the_flags_the_call_carried() {
         assert_eq!(
-            written_by(&["--embedded", "--agent claude_code"], false),
-            "`fleet create --embedded --agent claude_code`"
+            written_by(&["--embedded", &agent_flag()], false),
+            format!("`fleet create --embedded {}`", agent_flag())
         );
         assert_eq!(
             written_by(&[], true),
@@ -744,7 +809,7 @@ mod tests {
 
         // Every rendering reaches the file the same way, so the arm above is
         // about what `create` writes and not about a helper nobody calls.
-        let asked = embedded_text("claude_code", &written_by(&[], true));
+        let asked = embedded_text(AGENT, Some(MODEL), None, &written_by(&[], true));
         assert!(
             asked.contains("# Written by `fleet create`, answered at its prompts."),
             "{asked}"
@@ -752,7 +817,7 @@ mod tests {
         assert!(!asked.contains("--embedded"), "{asked}");
         assert!(!asked.contains("--agent"), "{asked}");
         assert!(
-            asked.contains("# Its agent is `claude_code`."),
+            asked.contains(&format!("[agent]\nadapter = \"{AGENT}\"\n")),
             "the choice survives the flag it was not made with: {asked}"
         );
         let declared = project_text(
@@ -760,6 +825,7 @@ mod tests {
             None,
             Path::new("/p/a-project"),
             Path::new("/p/wt"),
+            None,
             &written_by(&[], true),
         );
         assert!(
@@ -771,25 +837,71 @@ mod tests {
 
     #[test]
     fn the_embedded_file_names_the_mode_the_command_the_guards_and_telemetry() {
-        let text = embedded_text(
-            "claude_code",
-            &written_by(&["--embedded", "--agent claude_code"], false),
-        );
+        let by = written_by(&["--embedded", &agent_flag()], false);
+        let text = embedded_text(AGENT, Some(MODEL), Some("tk"), &by);
         assert!(text.contains("EMBEDDED"), "{text}");
         assert!(
-            text.contains("fleet create --embedded --agent claude_code"),
+            text.contains(&format!(
+                "enabled = false\n\n\
+                 # The agent every seat of this fleet runs on: the agent adapter an\n\
+                 # installed pack carries under this name.\n\
+                 [agent]\nadapter = \"{AGENT}\"\n\n# The store"
+            )),
+            "the agent create installed is named, after telemetry and before the store: {text}"
+        );
+        assert!(
+            text.contains("[store]\nadapter = \"tk\"\n\n# One table per seat"),
+            "the store create installed is named, before the seats table: {text}"
+        );
+        let storeless = embedded_text(AGENT, Some(MODEL), None, &by);
+        assert!(
+            !storeless.contains("[store]")
+                && storeless.contains(&format!("adapter = \"{AGENT}\"\n\n# One table")),
+            "no store installed, no table: {storeless}"
+        );
+        assert!(
+            text.contains(&format!("fleet create --embedded {}", agent_flag())),
             "{text}"
+        );
+        assert!(
+            !text.contains("# Its agent is"),
+            "the key replaces the comment: {text}"
         );
         assert!(
             text.contains("[guards]\nshell-trap.enabled = true\nrecord.enabled = true"),
             "{text}"
         );
         assert!(text.contains("[telemetry]\nenabled = false"), "{text}");
-        assert!(text.trim_end().ends_with("[seats]"), "{text}");
+        assert!(
+            text.ends_with(&format!(
+                "\n\
+                 # One table per seat, keyed by the seat's id. fleet seat add writes them\n\
+                 # and fleet start renders the agent seats into the machine's seat list.\n\
+                 # A row looks like this:\n\
+                 #\n\
+                 #   [seats.01a0d1f1-0aec-765f-9abe-d4f993b9739a]\n\
+                 #   kind = \"agent\"\n\
+                 #   name = \"what a person calls it\"\n\
+                 #   model = \"{MODEL}\"\n\
+                 #   status = \"active\"\n\
+                 [seats]\n",
+            )),
+            "the file ends on the seats table, keyed by an id: {text}"
+        );
+
+        // An adapter that could not be asked for its model leaves the row's
+        // model out rather than guessing one: the row is the same without it.
+        let unasked = embedded_text(AGENT, None, Some("tk"), &by);
+        assert_eq!(
+            unasked,
+            text.replace(&format!("#   model = \"{MODEL}\"\n"), ""),
+            "only the model line is left out"
+        );
+        assert!(!unasked.contains("model ="), "{unasked}");
 
         // Nothing the controller defaults: the keys a reader would otherwise
         // check against the code are absent, and the file still parses.
-        for key in ["poll_seconds", "posture", "first_turn", "nudge_model"] {
+        for key in ["poll_seconds", "posture", "first_turn"] {
             assert!(
                 !text.contains(&format!("\n{key} =")),
                 "{key} is defaulted: {text}"
@@ -797,8 +909,8 @@ mod tests {
         }
         let policy = policy::parse(&text).expect("the written file parses as policy");
         assert_eq!(policy.poll_seconds, policy::DEFAULT_POLL_SECONDS);
-        assert!(policy::seats_in(&text)
-            .expect("the seats table parses")
+        assert!(roster_in(&text)
+            .expect("the seats table parses through core's roster")
             .is_empty());
 
         // The two guards read as ON through core's own reader, which is the
@@ -810,6 +922,16 @@ mod tests {
             "the guard spelling core's reader walks: {text}"
         );
         assert_eq!(table["guards"]["record"]["enabled"].as_bool(), Some(true));
+
+        // The agent reads back through the opener's own key, so the file names
+        // the adapter `fleet start` opens and not a comment about it.
+        assert_eq!(
+            fleet_core::policy::read("agent", "adapter", &table)
+                .expect("[agent] adapter is a key core's policy lists")
+                .and_then(|value| value.as_str()),
+            Some(AGENT),
+            "{text}"
+        );
     }
 
     #[test]
@@ -819,6 +941,7 @@ mod tests {
             Some("ap"),
             Path::new("/p/a-project"),
             Path::new("/p/a-project-worktrees"),
+            Some("tk"),
             &written_by(&["--standalone"], false),
         );
         assert!(text.contains("name = \"a-project\""), "{text}");
@@ -829,8 +952,8 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("# suite ="),
-            "the gates are owed, not guessed: {text}"
+            !text.contains("suite =") && text.contains("takeoff.test"),
+            "no test command is written or owed here, and the file says where it is set: {text}"
         );
         assert!(text.contains("# ci_marker ="), "{text}");
 
@@ -841,38 +964,24 @@ mod tests {
             None,
             Path::new("/p/a-project"),
             Path::new("/p/wt"),
+            None,
             &written_by(&["--standalone"], false),
         );
         assert!(unsaid.contains("# item_prefix ="), "{unsaid}");
         assert!(!unsaid.contains("\nitem_prefix ="), "{unsaid}");
+        assert!(!unsaid.contains("[store]"), "no store installed: {unsaid}");
 
         let table: toml::Table = text.parse().expect("the written file parses");
         assert_eq!(table["project"]["item_prefix"].as_str(), Some("ap"));
+        assert_eq!(
+            table["store"]["adapter"].as_str(),
+            Some("tk"),
+            "the project's own file names its store, which is the file the store opens by: {text}"
+        );
         assert!(
-            table["gates"].as_table().expect("a table").is_empty(),
-            "every gate is commented: {text}"
+            table["landing"].as_table().expect("a table").is_empty(),
+            "the marker is commented: {text}"
         );
-    }
-
-    /// The store config's one key, read four ways: set, quoted, commented, and
-    /// a file that names it not at all.
-    #[test]
-    fn the_item_prefix_is_read_from_the_store_config_or_is_absent() {
-        assert_eq!(
-            item_prefix_in("# a comment\nissue-prefix: ap\n"),
-            Some("ap".to_string())
-        );
-        assert_eq!(
-            item_prefix_in("issue-prefix: \"ap\"\n"),
-            Some("ap".to_string())
-        );
-        assert_eq!(
-            item_prefix_in("# issue-prefix: \"\"\n"),
-            None,
-            "a commented line is not a value"
-        );
-        assert_eq!(item_prefix_in("issue-prefix:\n"), None);
-        assert_eq!(item_prefix_in("database: dolt\n"), None);
     }
 
     /// A root is registered once. A second registration of the same project is
@@ -1102,6 +1211,7 @@ mod tests {
             Some("a\\b"),
             Path::new("/p/a \"quoted\" project"),
             Path::new("/p/wt"),
+            None,
             &written_by(&["--standalone"], false),
         );
         let table: toml::Table = text.parse().expect("the written file parses");
@@ -1164,6 +1274,95 @@ mod tests {
         let rows = registered(&dir).expect("the register still parses");
         assert_eq!(rows[2].name, "a \"name\"");
         assert_eq!(rows[2].root, "/p/\"three\"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A RENAME MOVES NO WORKTREE. The row takes the seat's new name, and its
+    /// worktree is the one directory already standing that ends in
+    /// the seat's short id — which is the part of the name a rename keeps.
+    #[test]
+    fn a_renamed_seat_keeps_the_worktree_that_ends_in_its_short_form() {
+        let dir = std::env::temp_dir().join(format!("fleet-worktree-for-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let worktrees = dir.join("a-project-worktrees");
+        std::fs::create_dir_all(worktrees.join("orla-93b9739a")).unwrap();
+        // Another seat's worktree, which shares no short id with this one.
+        std::fs::create_dir_all(worktrees.join("kite-e8a04b17")).unwrap();
+        let fleet_toml = dir.join("fleet.toml");
+        std::fs::write(
+            &fleet_toml,
+            "[seats.01a0d1f1-0aec-765f-9abe-d4f993b9739a]\nkind = \"agent\"\nname = \"Wren\"\n\
+             \n[seats.01a0d1f1-0aec-765f-9abe-7a9e1c4f05d2]\nkind = \"human\"\nname = \"Orla\"\n",
+        )
+        .unwrap();
+        let machine_dir = dir.join("machine");
+        let policy = policy::parse("").expect("an empty policy parses");
+        let service = platform::Service::resolve(
+            &dir,
+            None,
+            &machine_dir,
+            Path::new("/usr/local/bin/fleet"),
+            Some("/bin/sh"),
+        )
+        .expect("the service is composed");
+        let run = FirstRun {
+            machine_dir: &machine_dir,
+            fleet_toml: &fleet_toml,
+            project: Some(ProjectAt {
+                name: "a-project",
+                worktrees_dir: &worktrees,
+            }),
+            policy: &policy,
+            agent: &crate::test_support::capabilities(),
+            service: &service,
+        };
+
+        let (rows, humans) = rendered_seats(&run).expect("the roster renders");
+        assert_eq!(humans, 1, "the human seat is counted and not rendered");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name.as_deref(), Some("Wren"));
+        assert_eq!(rows[0].machine_name(), "wren-93b9739a");
+        assert_eq!(
+            rows[0].id.to_string(),
+            "01a0d1f1-0aec-765f-9abe-d4f993b9739a"
+        );
+        assert_eq!(
+            rows[0].worktrees,
+            vec![(
+                "a-project".to_string(),
+                worktrees.join("orla-93b9739a").display().to_string()
+            )],
+            "the worktree the seat already had, under the name it had then"
+        );
+
+        // With no directory ending in the short id, the worktree is the one the
+        // seat's machine name gives — and so it is where no directory stands
+        // at all.
+        std::fs::remove_dir_all(worktrees.join("orla-93b9739a")).unwrap();
+        let (rows, _) = rendered_seats(&run).expect("the roster renders");
+        assert_eq!(
+            rows[0].worktrees[0].1,
+            worktrees.join("wren-93b9739a").display().to_string()
+        );
+        let roster = roster_in(&std::fs::read_to_string(&fleet_toml).unwrap()).unwrap();
+        let seat = &roster
+            .iter()
+            .find(|s| s.seat.kind == Kind::Agent)
+            .expect("the agent seat is on the roster")
+            .seat;
+        assert_eq!(
+            worktree_for(&dir.join("no-such-directory"), seat),
+            dir.join("no-such-directory/wren-93b9739a")
+        );
+
+        // The control: two directories ending in the short id are no answer,
+        // so neither is taken and the machine name is.
+        std::fs::create_dir_all(worktrees.join("orla-93b9739a")).unwrap();
+        std::fs::create_dir_all(worktrees.join("kite-93b9739a")).unwrap();
+        assert_eq!(
+            worktree_for(&worktrees, seat),
+            worktrees.join("wren-93b9739a")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
