@@ -160,6 +160,14 @@ None exists yet.
 | state schema | supervisor ↔ state | *directional:* `crates/state/` migrations |
 | config file | person ↔ supervisor | *directional:* `crates/core/` config types |
 | tool interfaces | core ↔ drivers | *directional:* `crates/core/src/tools/` |
+| install | person ↔ the GitHub release | *directional:* `install.sh` at the repository root |
+
+## Install
+
+A one-line shell script downloads the prebuilt `fleet` binary for the
+machine's OS and CPU from the GitHub release and puts it on the `PATH`. No
+Rust toolchain is needed. The release workflow builds the binaries: macOS and
+Linux, on arm64 and x86_64.
 
 ## Toolchain
 
