@@ -3,7 +3,7 @@
 How tinyfleet is built, and how work reaches `main`. Read all of it before
 your first item, whether you are a person or an agent. The first half is the
 method; the second half is branches, commits and releases. The product is
-tinyfleet; its binary, crates and repository are named `fleet`.
+tinyfleet; its repository is named `fleet`.
 
 tinyfleet is being built again from scratch, as a greenfield project, one
 capability at a time. The implementation that existed until 2026-10-15 was
@@ -12,7 +12,7 @@ deleted from this line of history, and nobody building the new one reads it
 
 ## The old code
 
-The old implementation (its crates, its tools and its user manual) survives
+The old implementation (its code, its tools and its user manual) survives
 only on older branches and in git history: `main`, `release/0.1.0`,
 `release/0.2.0` and every other branch or commit from before the deletion,
 and any worktree checked out from one.
@@ -41,7 +41,7 @@ the level it changes, so a rewrite can throw the code away and keep them:
 | Architecture | the backbone: components, who talks to whom, boundaries, invariants | sometimes | `brain/architecture/`, once one is needed, pointing at contracts in code |
 | Program design | how one change reshapes the code | every change | the item's bead |
 | Evals | what any implementation must do: journeys, invariants and edge cases | grows with real use | `tests/cmd/` (visible), fleet-dtu (hidden) |
-| Code | one implementation | freely | the crates |
+| Code | one implementation | freely | the repository, laid out as the architecture doc says |
 
 Provenance, the why behind each layer, is deferred: beads is building it
 (Memory Beads, Provenance V2). Until then commits keep their `Claude-Session:`
@@ -127,12 +127,10 @@ a journey promises edits the PRD first.
 
 ## Architecture
 
-**The architecture doc** lives in `brain/architecture/`. None exists yet: it
-is drawn when the first capability's shape needs one, and Alberto approves
-it. It is one page, mostly diagrams, made with the iterate-on-docs plugin's
-`make-a-project-overview` in diagram-design's style and refined with Alberto
-through `iterate-on-a-document`. It shows reality first; anything not yet true
-carries a visible **directional** mark.
+**The architecture doc** is `brain/architecture/core.md`, and Alberto
+approves it. It holds every architectural fact about tinyfleet, the language
+and toolchain included; this file holds none. It shows reality first; anything
+not yet true carries a visible **directional** mark.
 
 **It points, it never restates.** Each boundary in its table names the file
 that holds the boundary's authoritative form. A complete definition lives in
@@ -166,8 +164,7 @@ code can be thrown away, the evals are kept.
   its journeys, the invariants found while building it, and the old spec
   clauses Alberto keeps at the harvest step.
 - **What one command can show is a visible eval**: a transcript case under
-  `tests/cmd/<verb>/` at the CLI boundary, run by `cargo test` on every
-  change. A script with no terminal never waiting, or a second setup never
+  `tests/cmd/<verb>/` at the CLI boundary, run on every change. A script with no terminal never waiting, or a second setup never
   nesting a fleet, is one command's result.
 - **A journey that needs several steps or faults is a fleet-dtu scenario**,
   hidden from planners and builders (§ Scenarios and fleet-dtu).
@@ -209,11 +206,11 @@ builder's seat.** Its own agents see fleet's `brain/prd/`,
 scenarios test the journeys and not the implementation. Agents draft
 scenarios from the journeys; Alberto approves each one.
 
-**The fakes** stand in for the agent, the work tracker and the service
-manager, with real git and a private terminal multiplexer, so a scenario runs
-the whole stack a user runs. A fake is faithful when it answers as the real
-tool does at its pinned release. Nothing a scenario does reaches the real
-service manager, terminal sessions or home directory.
+**The fakes** stand in for the outside tools tinyfleet runs on (the
+architecture doc names them), so a scenario runs the whole stack a user runs.
+A fake is faithful when it answers as the real tool does at its pinned
+release. Nothing a scenario does reaches the person's real tools, sessions or
+home directory.
 
 **A scenario** is one Markdown file: a journey with checks. `$` lines are
 tinyfleet commands, `!` lines are faults, and every check under `Then` is
@@ -263,9 +260,9 @@ filed as beads.
 ## Code health
 
 - **Mechanical guards** are always on and fail the build:
-  - fitness tests for the architecture doc's invariants: a crate edge or
+  - fitness tests for the architecture doc's invariants: a dependency or
     placement the architecture doc does not allow fails them;
-  - a pinned toolchain and clippy lint set, with warnings denied;
+  - a pinned toolchain and lint set, with warnings denied;
   - size budgets: at most 100 lines per function and 600 lines per file, not
     counting a file's inline tests;
   - no dead code and no unused dependencies.
@@ -293,8 +290,8 @@ work reaches `main`.
 | work branches (a seat's worktree, `worktree-agent-*`) | the open release branch | anything | squashed onto the release branch, then deleted |
 
 - **Cut the release branch first.** Before any work for a release starts,
-  `release/<x.y.z>` is cut from `main`, and its first commit sets the version
-  in every crate's `Cargo.toml` to `x.y.z`.
+  `release/<x.y.z>` is cut from `main`, and its first commit sets the
+  version to `x.y.z`.
 - **Work lands on the release branch, never on `main`.** A builder's branch is
   cut from the open release branch, and the reviewer squash-lands it there.
 - **One release branch open at a time.** Anything for a later version waits
@@ -335,7 +332,7 @@ Every commit on a release or hotfix branch is **one item, squashed**:
 4. **Squash-merge it.** The squash commit's subject is `release: v<x.y.z>`.
 5. **The release workflow runs on that push to `main`** *(directional: not
    written yet)*. It:
-   - reads the version from `Cargo.toml` and refuses if the tag `v<x.y.z>`
+   - reads the version and refuses if the tag `v<x.y.z>`
      already exists or the version does not match the merged branch's name;
    - refuses if the branch carries no docs release pass;
    - tags `v<x.y.z>`;

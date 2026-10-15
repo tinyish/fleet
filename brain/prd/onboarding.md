@@ -1,7 +1,7 @@
 # Onboarding
 
-Put a fleet on a project: get from nothing to agents ready to work, on this
-machine and this project.
+Put a fleet on a project: get from nothing to a fleet running, on this
+machine and this project, ready for agents.
 
 ## The problem
 
@@ -15,7 +15,7 @@ anything to their projects.
 
 ### First time, at a terminal
 
-- **Trying to:** go from tinyfleet not installed to agents ready to work on a
+- **Trying to:** go from tinyfleet not installed to a fleet running on a
   project.
 - **Success:** the whole path, install included, takes a couple of minutes at
   most. Before anything starts, the person knows what is missing on the
@@ -59,15 +59,14 @@ anything to their projects.
 
 ### Restarting after a change
 
-- **Trying to:** change which agents work on the project and have the fleet
-  pick it up, or turn the fleet off for a while.
-- **Success:** agents' sessions keep running while the fleet is down, and each
-  step confirms what happened or says it could not tell.
+- **Trying to:** change the fleet's config and have the fleet pick it up, or
+  turn the fleet off for a while.
+- **Success:** each step confirms what happened or says it could not tell.
 - **Passes through:** stop, start.
 
 ## What success looks like
 
-- From install to a first agent working takes a couple of minutes at most.
+- From install to a running fleet takes a couple of minutes at most.
 - Anything a person does at a terminal, a script can do with nobody there.
 - No onboarding step leaves the person unsure whether it worked.
 

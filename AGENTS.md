@@ -10,9 +10,8 @@ and it binds you. The rules you are most likely to break:
   this conversation what to read. `brain/specs/` describes the old code too:
   read it only at a capability's harvest step, with Alberto.
 - **Intent lives in layers, not in code.** A PRD (`brain/prd/`) says what a
-  person needs. The architecture doc (`brain/architecture/`, drawn once a
-  capability needs one) says how the system is shaped and points at the
-  contracts in code. Program design, in an item's bead, says how that one item
+  person needs. The architecture doc (`brain/architecture/core.md`) says how
+  the system is shaped and points at the contracts in code. Program design, in an item's bead, says how that one item
   changes the code. Planners write program design from the PRD, the architecture
   doc and the contracts; builders build from the program design in their bead.
 - **superpowers' "spec" is program design.** The design superpowers writes
