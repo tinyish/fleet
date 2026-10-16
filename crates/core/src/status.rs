@@ -1,6 +1,7 @@
 //! Why the supervisor says no.
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -168,4 +169,21 @@ pub enum Status {
         /// What was wrong with it.
         error: String,
     },
+}
+
+impl Status {
+    /// Why a path could not be used, from what the system said: it does not
+    /// exist, or it could not be read.
+    #[must_use]
+    pub fn unusable(path: &Path, e: &io::Error) -> Status {
+        let path = path.to_path_buf();
+        if e.kind() == io::ErrorKind::NotFound {
+            Status::Missing { path }
+        } else {
+            Status::Unreadable {
+                path,
+                error: e.to_string(),
+            }
+        }
+    }
 }

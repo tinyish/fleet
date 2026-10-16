@@ -12,9 +12,9 @@ supervisor answers with **facts**: what happened, or why not. It never answers
 with sentences, and neither do the drivers: a `ToolError` (in
 `crates/core/src/tools.rs`) says what failed, not how to say it. The CLI turns
 facts into words and colour. All of a command's wording, its help text
-included, lives in one file, so it can be read, changed and kept consistent in
-one place, and changing a sentence never touches the supervisor, a driver or
-the protocol.
+included, lives in one module, `words` (doctor's report has a file of its own
+in it), so it can be read, changed and kept consistent in one place, and
+changing a sentence never touches the supervisor, a driver or the protocol.
 
 The supervisor's own log is the one exception: `fleet supervise` writes it,
 not a command, so its lines are worded in `crates/supervisor/src/words.rs`,
@@ -35,9 +35,9 @@ the same way and in one place. What the operating system or a parser says
 | Layer | Holds | File |
 | --- | --- | --- |
 | **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, …); `Status` is why not: a rule's verdict (`DirectoryNotRepoRoot { path, root }`, `AlreadyServed { project, fleet }`, …) or a problem with a path or file (`Missing { path }`, `StrayConfig { path }`, …). On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"missing":{…}}}`. | `crates/core/src/protocol.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
-| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`) goes in. | `crates/cli/src/ending.rs`, `crates/cli/src/lib.rs` |
-| **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), and the help text clap shows | `crates/cli/src/words.rs` |
-| **Output** | Where a line goes and how it starts: `Mark`, `line`, `lines` (every line an ending prints, with its mark), `report`, and `Ink` for colouring the parts of a sentence | `crates/cli/src/output.rs` |
+| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`, `Doctor`) goes in. Doctor is the one command that does not end this way: its report is a list of findings (`doctor::Found`, each with its check and verdict) that `output::doctor` prints, and its exit code comes from the findings. | `crates/cli/src/ending.rs`, `crates/cli/src/lib.rs` |
+| **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), the help text clap shows, and doctor's report (`found`, `found_next`, `checked`, `verdict`, in its own submodule) | `crates/cli/src/words.rs`, `crates/cli/src/words/doctor.rs` |
+| **Output** | Where a line goes and how it starts: `Mark`, `line`, `lines` (every line an ending prints, with its mark), `report`, `doctor` (doctor's report), and `Ink` for colouring the parts of a sentence | `crates/cli/src/output.rs` |
 | **Theme** | The symbols, the palette (`Tone`, `paint_on`), and the cliclack `Theme` that draws prompts and spinners | `crates/cli/src/theme.rs` |
 | **Prompts and spinners** | `confirm(question, default)` and `spinner(message)`, drawn with cliclack in the theme | `crates/cli/src/ui.rs` |
 
@@ -57,6 +57,7 @@ only when its stream is a terminal**.
 | Colour | the symbol, and every path, name and command in the sentence | none |
 | Prompt | asked, with `>` and `Yes / No` | never asked: without `--non-interactive` the command ends *supervisor not running* (exit 3) |
 | Spinner | drawn on stderr while waiting | not drawn |
+| Doctor's report (stdout, every line) | a bar `┃` in the verdict's colour, the check in bold, then `healthy` in bold and what was found in gray, or, for anything else, what was found in the verdict's colour: `┃ git  healthy git version 2.50.1`, `┃ supervisor  not running` in yellow; then, after a blank line, a `> …` hint for each thing to do, each once | the verdict spelled in a column (`fine`, `warning`, `missing`, `could not tell`), then the check and what was found; the hints after them, `hint:` before each |
 
 **Streams:** what was done goes to **stdout**. Refusals, warnings, prompts and
 spinners go to **stderr**. A script can capture the result alone with
@@ -85,11 +86,15 @@ pointer for what is active, gray once a step is done.
 
 | Tone | For | Colour |
 | --- | --- | --- |
-| `Accent` | what to notice: paths, names, commands, the `>` pointer and hint | Vite+'s blue `#5892FF` on a true-colour terminal (`COLORTERM=truecolor`); otherwise the terminal's own blue |
-| `Muted` | what is done or secondary: `◇` | gray |
-| `Good` | `◆` | green |
-| `Warn` | `▲` | yellow |
-| `Bad` | `■`, and `fleet:` | red |
+| `Accent` | what to notice: paths, names, commands, the `>` pointer and hint | `#38BDF8` |
+| `Muted` | what is done or secondary: `◇`, doctor's detail for a healthy check | `#64748B` |
+| `Good` | `◆`, a healthy check's bar | `#4ADE80` |
+| `Warn` | `▲`, a check that warns or could not tell | `#FDE047` |
+| `Bad` | `■`, `fleet:`, a missing check | `#F87171` |
+
+Those are Tailwind's sky-400, slate-500, green-400, yellow-300 and red-400,
+used on a true-colour terminal (`COLORTERM=truecolor`); elsewhere each tone is
+the terminal's own named colour (blue, bright black, green, yellow, red).
 
 The spinner is the terminal's magenta, followed by its message and the elapsed
 time, dimmed: `◒ starting the supervisor (2s)`. indicatif's spinner template
@@ -153,7 +158,7 @@ supervisor's types are always written with `protocol::`, never imported bare.
 **A new sentence for the CLI's own step.** Add a `const` or a function to
 `words.rs`, and call it from the command. Wrap paths and commands with
 `ink.path` and `ink.accent`. Never write a sentence anywhere else; a check for
-that is to grep the CLI for English strings outside `words.rs`.
+that is to grep the CLI for English strings outside the `words` module.
 
 **Help text.** Add a `const` to `words.rs` and point clap at it with
 `#[command(about = words::X)]` or `#[arg(help = words::X)]`. The clap types in
@@ -212,7 +217,8 @@ It cannot fall behind: every enum a command can end with has a kind twin
 (strum's `EnumDiscriminants`) under that feature, and the specimen builds a
 sample for each kind in an exhaustive `match`. A new variant does not
 compile with `--all-features` until it has a sample in
-`crates/cli/src/specimen.rs`. What the compiler cannot check is a choice
+`crates/cli/src/specimen/` (`samples.rs` for endings, `doctor.rs` for
+doctor's findings). What the compiler cannot check is a choice
 of values rather than a variant: the shapes of `protocol::response::Create`
 (a struct), wording that depends on a field's value (a tool that failed
 saying nothing), which combinations of nested facts are shown, and whether
@@ -223,7 +229,7 @@ a new status should have a hint (`words::next` falls back to none).
 - **Facts, not sentences, on the socket**: the wording can change without
   touching the supervisor or the protocol, and a protocol test checks
   meaning, not text.
-- **One words file**: the whole voice of the CLI is readable in one sitting,
+- **One words module**: the whole voice of the CLI is readable in one sitting,
   and consistent by construction.
 - **Decoration only on a terminal**: scripts and the visible evals
   (`tests/cmd/`) see stable plain text, while a person gets symbols and

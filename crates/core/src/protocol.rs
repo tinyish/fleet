@@ -104,6 +104,10 @@ pub mod response {
     pub struct Hello {
         /// The supervisor's version.
         pub version: String,
+        /// The state schema the supervisor opened; absent from a supervisor
+        /// older than this field, so every version's hello still reads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub schema_version: Option<i64>,
     }
 
     /// What `fleet create` did: the fleet in `directory`, serving
@@ -341,6 +345,7 @@ mod tests {
         let replies = [
             Reply::Response(Response::Hello(response::Hello {
                 version: "0.0.0".into(),
+                schema_version: Some(1),
             })),
             Reply::Response(Response::Start(response::Start::AllOn(response::AllOn {
                 on: vec![PathBuf::from("/c/app")],
@@ -419,6 +424,18 @@ mod tests {
         };
         write_reply(&mut buf, &Reply::Status(missing)).ok();
         assert_eq!(buf, b"{\"status\":{\"missing\":{\"path\":\"/x\"}}}\n");
+    }
+
+    #[test]
+    fn a_hello_from_an_older_supervisor_still_reads() {
+        let old = b"{\"response\":{\"hello\":{\"version\":\"0.0.0\"}}}\n".to_vec();
+        assert_eq!(
+            read_reply(&mut Cursor::new(old)).ok(),
+            Some(Reply::Response(Response::Hello(response::Hello {
+                version: "0.0.0".into(),
+                schema_version: None,
+            })))
+        );
     }
 
     #[test]

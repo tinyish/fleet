@@ -1,10 +1,10 @@
 //! tinyfleet's look for prompts and spinners: cliclack, restyled after Vite+.
-//! Frameless (no guide bars down the left), a blue `›` for what is active, a
+//! Frameless (no guide bars down the left), a blue `>` for what is active, a
 //! gray `◇` once a step is answered, a magenta spinner, yellow for warnings
-//! and red for errors. On a true-colour terminal the blue is Vite+'s own
-//! (#5892FF); elsewhere it is the terminal's. The spinner is always the
-//! terminal's magenta, since indicatif's template takes named colours only
-//! (Vite+'s true-colour magenta is #BB74F7).
+//! and red for errors. On a true-colour terminal the colours are the
+//! palette's (Tailwind's sky, green, slate, red and yellow); elsewhere they
+//! are the terminal's own. The spinner is always the terminal's magenta,
+//! since indicatif's template takes named colours only.
 
 use std::fmt::Write;
 
@@ -13,8 +13,13 @@ use console::{Style, style};
 
 use crate::words;
 
-/// Vite+'s blue, `rgb(88, 146, 255)`.
-const BLUE: (u8, u8, u8) = (88, 146, 255);
+/// The palette, on a true-colour terminal: Tailwind's sky-400, green-400,
+/// slate-500, red-400 and yellow-300.
+const ACCENT: (u8, u8, u8) = (0x38, 0xBD, 0xF8);
+const GOOD: (u8, u8, u8) = (0x4A, 0xDE, 0x80);
+const MUTED: (u8, u8, u8) = (0x64, 0x74, 0x8B);
+const BAD: (u8, u8, u8) = (0xF8, 0x71, 0x71);
+const WARN_YELLOW: (u8, u8, u8) = (0xFD, 0xE0, 0x47);
 
 /// The colours the theme draws with.
 #[derive(Debug, Clone, Copy)]
@@ -47,8 +52,13 @@ pub(crate) fn paint_on(tone: Tone, stderr: bool) -> Style {
     } else {
         (Style::new().for_stdout(), console::true_colors_enabled())
     };
+    let rgb_of = |(r, g, b): (u8, u8, u8)| style.clone().true_color(r, g, b);
     match tone {
-        Tone::Accent if rgb => style.true_color(BLUE.0, BLUE.1, BLUE.2),
+        Tone::Accent if rgb => rgb_of(ACCENT),
+        Tone::Good if rgb => rgb_of(GOOD),
+        Tone::Muted if rgb => rgb_of(MUTED),
+        Tone::Bad if rgb => rgb_of(BAD),
+        Tone::Warn if rgb => rgb_of(WARN_YELLOW),
         Tone::Accent => style.blue(),
         Tone::Muted => style.black().bright(),
         Tone::Good => style.green(),

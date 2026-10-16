@@ -137,6 +137,7 @@ fn answer(state: &Mutex<State>, stream: &UnixStream) -> Result<(), Error> {
     let reply = match protocol::read_request(&mut BufReader::new(stream)) {
         Ok(Request::Hello) => Reply::Response(Response::Hello(response::Hello {
             version: VERSION.to_owned(),
+            schema_version: Some(state::SCHEMA_VERSION),
         })),
         Ok(Request::Start(request::Start::All)) => projects::all_on(state)?,
         Ok(Request::Start(request::Start::Project { project })) => {
@@ -169,17 +170,4 @@ fn repo_root_of(path: &Path) -> Option<PathBuf> {
     path.ancestors()
         .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf)
-}
-
-/// Why a path could not be used: it does not exist, or it could not be read.
-fn unusable(path: &Path, e: &io::Error) -> Status {
-    let path = path.to_path_buf();
-    if e.kind() == io::ErrorKind::NotFound {
-        Status::Missing { path }
-    } else {
-        Status::Unreadable {
-            path,
-            error: e.to_string(),
-        }
-    }
 }

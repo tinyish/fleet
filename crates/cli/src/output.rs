@@ -9,6 +9,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::doctor::{Found, Verdict};
 use crate::ending::{Response, Status};
 
 use crate::theme::{ERROR, NEXT, SUCCESS, Tone, WARN, paint_on};
@@ -167,6 +168,68 @@ pub(crate) fn report(ending: &Result<Response, Status>) -> ExitCode {
     }
 }
 
+/// Prints doctor's report on stdout.
+pub(crate) fn doctor(report: &[Found]) {
+    let mut out = io::stdout();
+    for line in doctor_lines(report, io::stdout().is_terminal()) {
+        let _ = writeln!(out, "{line}");
+    }
+}
+
+/// Doctor's report as lines: one per check, then what to do about any that
+/// has something to do, each hint once. On a `terminal` a row is a bar in
+/// the verdict's colour, the check in bold, then `healthy` and what was
+/// found in gray, or, for anything else, what was found in the verdict's
+/// colour. Piped, a row starts with the verdict in words so a script can
+/// read the column.
+fn doctor_lines(report: &[Found], terminal: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut hints: Vec<String> = Vec::new();
+    for found in report {
+        let name = words::checked(found.checked());
+        let said = words::found(found, OUT);
+        let verdict = found.verdict();
+        if terminal {
+            // One colour for the whole detail: a path's own accent would
+            // break the row's colour where it ends.
+            let said = console::strip_ansi_codes(&said);
+            let tone = match verdict {
+                Verdict::Fine => Tone::Good,
+                Verdict::Warn | Verdict::CouldNotTell => Tone::Warn,
+                Verdict::Missing => Tone::Bad,
+            };
+            let bar = paint_on(tone, false).apply_to("┃");
+            let name = console::style(format!("{name:<30}")).for_stdout().bold();
+            let state = if verdict == Verdict::Fine {
+                let healthy = console::style(words::HEALTHY).for_stdout().bold();
+                format!("{healthy} {}", paint_on(Tone::Muted, false).apply_to(said))
+            } else {
+                paint_on(tone, false).apply_to(said).to_string()
+            };
+            lines.push(format!("{bar} {name}{state}"));
+        } else {
+            lines.push(format!("{:<15} {name:<16} {said}", words::verdict(verdict)));
+        }
+        if let Some(next) = words::found_next(found, OUT)
+            && !hints.contains(&next)
+        {
+            hints.push(next);
+        }
+    }
+    if !hints.is_empty() {
+        lines.push(String::new());
+    }
+    for next in hints {
+        lines.push(if terminal {
+            let (symbol, tone) = Mark::Next.symbol();
+            format!("{} {next}", paint_on(tone, false).apply_to(symbol))
+        } else {
+            format!("{}{next}", Mark::Next.piped_prefix())
+        });
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +249,52 @@ mod tests {
         assert_eq!(
             shown(Mark::Next, "run fleet start", false),
             "hint: run fleet start"
+        );
+    }
+
+    #[test]
+    fn a_terminal_row_is_a_bar_the_check_then_healthy_and_one_gray_detail() {
+        console::set_colors_enabled(true);
+        let report = [
+            Found::StateOpen {
+                dir: PathBuf::from("/s/fleet"),
+                schema: 1,
+            },
+            Found::NotRunning { unit_serves: None },
+        ];
+        let raw = doctor_lines(&report, true);
+        console::set_colors_enabled(false);
+        let plain: Vec<String> = raw
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        assert_eq!(
+            plain[0],
+            format!("┃ {:<30}healthy /s/fleet: open at schema 1", "state")
+        );
+        assert_eq!(plain[1], format!("┃ {:<30}not running", "supervisor"));
+        let detail = raw[0].split("healthy").nth(1).unwrap_or_default();
+        let colours = detail.matches("\u{1b}[").count() - detail.matches("\u{1b}[0m").count();
+        assert_eq!(colours, 1, "one colour for the whole detail: {detail:?}");
+    }
+
+    #[test]
+    fn doctor_lists_every_result_before_any_hint() {
+        let report = [
+            Found::NoManager,
+            Found::NotRunning { unit_serves: None },
+            Found::StateUnknown,
+        ];
+        let lines = doctor_lines(&report, false);
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert!(
+            lines[..3].iter().all(|l| !l.starts_with("hint:")),
+            "{lines:?}"
+        );
+        assert_eq!(lines[3], "");
+        assert!(
+            lines[4..].iter().all(|l| l.starts_with("hint:")),
+            "{lines:?}"
         );
     }
 

@@ -64,7 +64,7 @@ real tool. The core never runs a tool itself.
 | --- | --- | --- |
 | service manager | launchd (macOS), systemd user units (Linux) | CLI, to start and stop the supervisor; doctor |
 | multiplexer | tmux, on tinyfleet's own socket *(directional: arrives with the agent adapter)* | supervisor; doctor |
-| git | git | supervisor; doctor |
+| git | git | doctor; the supervisor *(directional: when work lands)* |
 | agent | *directional: reached through an adapter, defined later* | supervisor |
 | store | *directional: reached through an adapter, defined later* | supervisor |
 
@@ -137,9 +137,16 @@ one removed from its config is dropped.
 *(Directional, with the agent adapter: on, it launches or adopts each agent's
 session in tmux; off, it leaves the sessions alone.)*
 
-**doctor**: the CLI asks each driver to check its tool and reports
-each as fine, missing or could not tell, and whether the supervisor is
-running. It changes nothing.
+**doctor**: the CLI checks, and reports each as fine, missing or could not
+tell: the service manager (it answers), git (on the `PATH`, its version), the supervisor (whether it
+answers; whether its version matches this binary's; not running is a
+warning, not a failure), the state (only the supervisor opens it, so it is
+reported only through a running supervisor's hello) and the project the
+current directory is in (its fleet's config reads; its projects exist;
+nothing is said outside a fleet directory). It asks the drivers and the
+supervisor, reads the fleet's config, and starts and writes nothing; it runs
+even when the state directory cannot be worked out. It exits 1 when anything
+is missing, otherwise 4 when anything could not be told, otherwise 0.
 
 **Every command ends in one outcome:** done, refused (with a reason),
 supervisor not running, or could not tell. A start that turned some projects
@@ -162,7 +169,8 @@ contract's (see Boundaries).
 9. Every word a command shows is the CLI's. The supervisor and the drivers
    answer with facts (what happened, or why not), never with sentences; the
    CLI writes all of a command's wording and colour, help text included, in
-   one file. The supervisor words only its own log, in one file of its own.
+   one module, `words`. The supervisor words only its own log, in one file of
+   its own.
    How that works: [cli-output.md](cli-output.md).
 10. Every change to state commits in one transaction with the steps that
     record it: the supervisor writes only inside `State::write`, so a change
@@ -187,7 +195,7 @@ None exists yet.
 | CLI | person or script ↔ `fleet` | *directional:* the transcript evals in `tests/cmd/` |
 | protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | *directional:* `crates/core/src/protocol.rs` |
 | state schema | supervisor ↔ state | *directional:* `crates/state/` migrations |
-| config file | person ↔ supervisor | *directional:* `crates/core/` config types |
+| config file | person ↔ supervisor (and doctor, which reads it) | *directional:* `crates/core/src/config.rs`, read through `fleets::read_projects` |
 | tool interfaces | core ↔ drivers | *directional:* `crates/core/src/tools/` |
 | install | person ↔ the GitHub release | *directional:* `install.sh` at the repository root |
 

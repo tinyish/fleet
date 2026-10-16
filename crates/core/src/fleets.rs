@@ -93,6 +93,37 @@ pub fn resolve_projects(
     Ok(sorted)
 }
 
+/// The projects the `fleet.toml` in `directory` says the fleet serves,
+/// resolved as [`resolve_projects`] does. Pure: the file is read with
+/// `read`, each project path is made canonical with `canonicalize`, and
+/// `repo_root_of` says where a repository's root is.
+///
+/// # Errors
+///
+/// Why the config cannot be used: the file is missing or unreadable, it
+/// does not parse, a project it names does not exist, or a project is not a
+/// repository's root.
+pub fn read_projects(
+    directory: &Path,
+    read: impl Fn(&Path) -> std::io::Result<String>,
+    canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    repo_root_of: impl Fn(&Path) -> Option<PathBuf>,
+) -> Result<Vec<PathBuf>, Status> {
+    let path = directory.join(crate::paths::CONFIG_FILE);
+    let text = read(&path).map_err(|e| Status::unusable(&path, &e))?;
+    let parsed = crate::config::parse(&text).map_err(|e| Status::BadConfig {
+        path: path.clone(),
+        line: e.line,
+        column: e.column,
+        error: e.message,
+    })?;
+    let mut canonical = Vec::new();
+    for project in crate::config::projects_of(&parsed, directory) {
+        canonical.push(canonicalize(&project).map_err(|e| Status::unusable(&project, &e))?);
+    }
+    resolve_projects(directory, &canonical, repo_root_of)
+}
+
 /// A project of `wanted` that a fleet in `others` already serves.
 #[must_use]
 pub fn check_shared(others: &[Fleet], wanted: &Fleet) -> Option<Status> {

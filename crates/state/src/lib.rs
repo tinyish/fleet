@@ -49,7 +49,7 @@ impl State {
     ///
     /// When SQLite fails, or the file's schema is newer than this code's.
     pub fn open(state_dir: &Path) -> Result<State, StateError> {
-        let conn = Connection::open(state_dir.join("state.sqlite3"))?;
+        let conn = Connection::open(state_dir.join(fleet_core::paths::STATE_FILE))?;
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > SCHEMA_VERSION {

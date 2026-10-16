@@ -3,6 +3,7 @@
 
 mod client;
 mod create;
+mod doctor;
 mod ending;
 mod output;
 mod projects;
@@ -20,10 +21,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use fleet_core::paths::{Os, state_dir};
-use fleet_core::tools::ServiceManager;
+use fleet_core::paths::{Os, PathError, state_dir};
+use fleet_core::tools::{Git, NoServiceManager, ServiceManager};
 
-use crate::ending::{Problem, Response, Status};
+use crate::ending::{Problem, Status};
 
 // The invocation as clap parses it. Its help text is in words.rs.
 #[derive(Debug, Parser)]
@@ -51,6 +52,9 @@ enum Request {
         #[arg(long = "project", value_name = "PATH", help = words::PROJECT_HELP)]
         projects: Vec<PathBuf>,
     },
+    // `fleet doctor`.
+    #[command(about = words::DOCTOR_ABOUT)]
+    Doctor,
     // `fleet start`, or `fleet start --project` for one project.
     #[command(about = words::START_ABOUT)]
     Start {
@@ -66,8 +70,13 @@ enum Request {
 }
 
 /// Runs one invocation of `fleet` and returns how it ended. `service` is
-/// this machine's service manager, or `None` where tinyfleet does not run.
-pub fn run<I, T>(args: I, service: Option<&dyn ServiceManager>) -> ExitCode
+/// this machine's service manager, or why there is none; `git` is the
+/// person's git.
+pub fn run<I, T>(
+    args: I,
+    service: Result<&dyn ServiceManager, NoServiceManager>,
+    git: &dyn Git,
+) -> ExitCode
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -86,17 +95,6 @@ where
             return ExitCode::from(u8::try_from(code).unwrap_or(2));
         }
     };
-    output::report(&decide(&args, service))
-}
-
-fn decide(args: &Args, service: Option<&dyn ServiceManager>) -> Result<Response, Status> {
-    let (Some(os), Some(service)) = (Os::this(), service) else {
-        return Err(Status::Cannot(Problem::UnsupportedOs));
-    };
-    let dir = match state_dir(os, |name| std::env::var_os(name)) {
-        Ok(dir) => dir,
-        Err(e) => return Err(Status::Cannot(Problem::StateDir(e))),
-    };
     let ask = if args.non_interactive {
         Ask::Yes
     } else if io::stdin().is_terminal() && io::stderr().is_terminal() {
@@ -104,17 +102,42 @@ fn decide(args: &Args, service: Option<&dyn ServiceManager>) -> Result<Response,
     } else {
         Ask::Never
     };
-    match &args.request {
-        Request::Create { projects } => create::run(&dir, service, ask, projects),
-        Request::Start { project: None } => start::run(&dir, service),
+    let ending = match &args.request {
+        Request::Doctor => return doctor::run(service, git),
+        Request::Create { projects } => {
+            setup(service).and_then(|(service, dir)| create::run(&dir, service, ask, projects))
+        }
+        Request::Start { project: None } => {
+            setup(service).and_then(|(service, dir)| start::run(&dir, service))
+        }
         Request::Start {
             project: Some(project),
-        } => projects::start(&dir, service, project),
-        Request::Stop { project: None } => stop::run(&dir, service),
+        } => setup(service).and_then(|(service, dir)| projects::start(&dir, service, project)),
+        Request::Stop { project: None } => {
+            setup(service).and_then(|(service, dir)| stop::run(&dir, service))
+        }
         Request::Stop {
             project: Some(project),
-        } => projects::stop(&dir, project),
-    }
+        } => setup(service).and_then(|(_, dir)| projects::stop(&dir, project)),
+    };
+    output::report(&ending)
+}
+
+/// What every command but doctor needs first: a system tinyfleet runs on,
+/// its service manager, and the state directory.
+fn setup(
+    service: Result<&dyn ServiceManager, NoServiceManager>,
+) -> Result<(&dyn ServiceManager, PathBuf), Status> {
+    let service = service.map_err(|e| {
+        Status::Cannot(match e {
+            NoServiceManager::UnsupportedOs => Problem::UnsupportedOs,
+            NoServiceManager::NoHome => Problem::StateDir(PathError::NoHome),
+        })
+    })?;
+    let os = Os::this().ok_or(Status::Cannot(Problem::UnsupportedOs))?;
+    let dir = state_dir(os, |name| std::env::var_os(name))
+        .map_err(|e| Status::Cannot(Problem::StateDir(e)))?;
+    Ok((service, dir))
 }
 
 /// Whether a command may ask before doing something.

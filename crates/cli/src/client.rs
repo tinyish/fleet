@@ -39,6 +39,41 @@ pub(crate) fn answers(socket: &Path) -> bool {
     )
 }
 
+/// What asking the supervisor for hello came to.
+#[derive(Debug)]
+pub(crate) enum Hello {
+    /// It answered.
+    Answered(response::Hello),
+    /// Nothing listens on the socket.
+    NotListening,
+    /// It did not answer within `ONE`.
+    TimedOut,
+    /// Talking to it failed some other way.
+    Failed(ProtocolError),
+    /// It answered something other than hello.
+    Odd,
+}
+
+/// Asks the supervisor for hello, and says how that went.
+pub(crate) fn hello(socket: &Path) -> Hello {
+    use std::io::ErrorKind;
+    match ask(socket, &Request::Hello) {
+        Ok(Reply::Response(Response::Hello(hello))) => Hello::Answered(hello),
+        Ok(_) => Hello::Odd,
+        Err(ProtocolError::Io(e))
+            if matches!(e.kind(), ErrorKind::ConnectionRefused | ErrorKind::NotFound) =>
+        {
+            Hello::NotListening
+        }
+        Err(ProtocolError::Io(e))
+            if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+        {
+            Hello::TimedOut
+        }
+        Err(e) => Hello::Failed(e),
+    }
+}
+
 /// Waits until `answers` is `want`, or `WAIT` passes. Returns whether it got there.
 pub(crate) fn wait_until(socket: &Path, want: bool) -> bool {
     let start = Instant::now();

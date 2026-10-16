@@ -21,11 +21,6 @@ impl Systemd {
     fn unit_path(&self) -> PathBuf {
         self.units_dir.join(SYSTEMD_UNIT)
     }
-
-    fn installed_state_dir(&self) -> Option<PathBuf> {
-        let text = fs::read_to_string(self.unit_path()).ok()?;
-        render::systemd_state_dir(&text)
-    }
 }
 
 fn systemctl(args: &[&str]) -> Result<(), ToolError> {
@@ -66,5 +61,18 @@ impl ServiceManager for Systemd {
 
     fn where_logs_go(&self, _state_dir: &Path) -> String {
         format!("journalctl --user -u {SYSTEMD_UNIT}")
+    }
+
+    fn name(&self) -> &'static str {
+        "systemd"
+    }
+
+    fn answers(&self) -> Result<(), ToolError> {
+        systemctl(&["show-environment"])
+    }
+
+    fn installed_state_dir(&self) -> Option<PathBuf> {
+        let text = fs::read_to_string(self.unit_path()).ok()?;
+        render::systemd_state_dir(&text)
     }
 }

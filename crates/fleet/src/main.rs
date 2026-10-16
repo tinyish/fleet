@@ -8,5 +8,9 @@ fn main() -> ExitCode {
         return supervisor::main();
     }
     let service = service::for_this_os();
-    cli::run(std::env::args_os(), service.as_deref())
+    cli::run(
+        std::env::args_os(),
+        service.as_deref().map_err(|e| *e),
+        &git::Git,
+    )
 }

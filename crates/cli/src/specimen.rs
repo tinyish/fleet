@@ -3,6 +3,7 @@
 //! Compiled only with the `specimen` feature, so a release build has no such
 //! command. Its labels are code identifiers, never sentences.
 
+mod doctor;
 mod samples;
 
 use std::io::{self, Write};
@@ -24,6 +25,10 @@ pub(crate) fn run() -> ExitCode {
     help();
     prompts();
     spinners();
+    for (label, found) in doctor::doctor() {
+        heading(&label);
+        output::doctor(&[found]);
+    }
     for Sample { label, ending } in endings() {
         let code = match &ending {
             Ok(_) => 0,

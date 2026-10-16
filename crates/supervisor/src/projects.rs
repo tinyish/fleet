@@ -5,12 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use fleet_core::config;
-use fleet_core::fleets::{self, Fleet, conflicts, resolve_projects};
+use fleet_core::fleets::{self, Fleet, conflicts};
 use fleet_core::protocol::{Reply, Response, Status, response};
 use state::{State, StateError, Step, Write};
 
-use crate::{Error, lock, repo_root_of, unusable};
+use crate::{Error, lock, repo_root_of};
 
 fn shown(path: &Path) -> String {
     path.display().to_string()
@@ -19,21 +18,15 @@ fn shown(path: &Path) -> String {
 /// The fleet as its config now describes it: read, parsed and resolved, but
 /// not yet checked against other fleets.
 fn read_resolved(fleet: &Fleet) -> Result<Fleet, Status> {
-    let path = fleet.directory.join("fleet.toml");
-    let text = fs::read_to_string(&path).map_err(|e| unusable(&path, &e))?;
-    let parsed = config::parse(&text).map_err(|e| Status::BadConfig {
-        path: path.clone(),
-        line: e.line,
-        column: e.column,
-        error: e.message,
-    })?;
-    let mut canonical = Vec::new();
-    for project in config::projects_of(&parsed, &fleet.directory) {
-        canonical.push(fs::canonicalize(&project).map_err(|e| unusable(&project, &e))?);
-    }
+    let projects = fleets::read_projects(
+        &fleet.directory,
+        |p| fs::read_to_string(p),
+        |p| fs::canonicalize(p),
+        repo_root_of,
+    )?;
     Ok(Fleet {
         directory: fleet.directory.clone(),
-        projects: resolve_projects(&fleet.directory, &canonical, repo_root_of)?,
+        projects,
     })
 }
 
@@ -201,7 +194,7 @@ fn not_served(fleets: &[Fleet], path: &Path) -> Status {
 pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, Error> {
     let project = match fs::canonicalize(project) {
         Ok(p) => p,
-        Err(e) => return Ok(Reply::Status(unusable(project, &e))),
+        Err(e) => return Ok(Reply::Status(Status::unusable(project, &e))),
     };
     let mut state = lock(state);
     let reread = reread_all(&state)?;

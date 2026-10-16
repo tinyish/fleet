@@ -3,6 +3,12 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+/// The state file's name, in the state directory.
+pub const STATE_FILE: &str = "state.sqlite3";
+
+/// A fleet's config file's name, in the fleet directory.
+pub const CONFIG_FILE: &str = "fleet.toml";
+
 /// The operating systems tinyfleet runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
@@ -27,7 +33,7 @@ impl Os {
 }
 
 /// Why the state directory could not be worked out.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "specimen",
     derive(strum::EnumDiscriminants),

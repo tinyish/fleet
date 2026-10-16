@@ -11,6 +11,9 @@ use fleet_core::tools::{BadUnitPath, FileStep, ToolError, UnitPath};
 use crate::ending::{Doing, Doubt, During, Problem, Response, Startup, Status};
 use crate::output::Ink;
 
+mod doctor;
+pub(crate) use doctor::{HEALTHY, checked, found, found_next, verdict};
+
 /// What `fleet --help` says tinyfleet is.
 pub(crate) const ABOUT: &str = "tinyfleet runs AI coding agents on your projects";
 
@@ -25,6 +28,10 @@ pub(crate) const CREATE_ABOUT: &str =
 /// The help for `--project`.
 pub(crate) const PROJECT_HELP: &str = "A repository the fleet serves; repeat for more. \
      Without it, this directory is the one project";
+
+/// The help for `fleet doctor`.
+pub(crate) const DOCTOR_ABOUT: &str =
+    "Check what tinyfleet runs on: each item fine, missing or could not tell; changes nothing";
 
 /// The help for `fleet start`.
 pub(crate) const START_ABOUT: &str = "Start the supervisor, re-read every fleet's config and \
@@ -99,11 +106,11 @@ pub(crate) fn partly_on(
     ink: Ink,
 ) -> String {
     let on = match response.on.as_slice() {
-        [] => "nothing is on".to_owned(),
-        [one] => format!("{} is on", ink.path(one)),
-        many => format!("{} are on", ink.paths(many)),
+        [] => String::new(),
+        [one] => format!("; {} is enabled", ink.path(one)),
+        many => format!("; {} are enabled", ink.paths(many)),
     };
-    let mut said = format!("{}; {on}", supervisor_was(startup));
+    let mut said = format!("{}{on}", supervisor_was(startup));
     if let Some(picked) = picked_up(&response.picked_up, ink) {
         said = format!("{said}; {picked}");
     }
@@ -418,19 +425,26 @@ fn bad_config(
     }
 }
 
-/// Why the CLI could not go on.
-fn cannot(problem: &Problem, ink: Ink) -> String {
-    match problem {
-        Problem::UnsupportedOs => "tinyfleet runs on macOS and Linux only".into(),
-        Problem::StateDir(fleet_core::paths::PathError::NoHome) => format!(
+/// Why the state directory cannot be worked out.
+fn path_error(error: &fleet_core::paths::PathError, ink: Ink) -> String {
+    match error {
+        fleet_core::paths::PathError::NoHome => format!(
             "{} is not set, so there is nowhere to keep state",
             ink.accent("HOME")
         ),
-        Problem::StateDir(fleet_core::paths::PathError::NotAbsolute { var, value }) => format!(
+        fleet_core::paths::PathError::NotAbsolute { var, value } => format!(
             "{} must be an absolute path, not {}",
             ink.accent(var),
             ink.path(value)
         ),
+    }
+}
+
+/// Why the CLI could not go on.
+fn cannot(problem: &Problem, ink: Ink) -> String {
+    match problem {
+        Problem::UnsupportedOs => "tinyfleet runs on macOS and Linux only".into(),
+        Problem::StateDir(error) => path_error(error, ink),
         Problem::SocketPathTooLong(path) => format!(
             "the socket path {} is longer than {} bytes",
             ink.path(path),
@@ -534,7 +548,7 @@ fn socket(error: &ProtocolError) -> String {
 /// How a command found the supervisor.
 fn supervisor_was(startup: Startup) -> &'static str {
     match startup {
-        Startup::WasRunning => "the supervisor was already running",
+        Startup::WasRunning => "the supervisor is already running",
         Startup::Started => "the supervisor is running",
     }
 }

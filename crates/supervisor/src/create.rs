@@ -10,7 +10,7 @@ use fleet_core::fleets::{CreateDecision, decide_create};
 use fleet_core::protocol::{Reply, Response, Status, response};
 use state::{State, Step};
 
-use crate::{Error, lock, repo_root_of, unusable};
+use crate::{Error, lock, repo_root_of};
 
 /// Creates a fleet, under the state lock so that two creates never race.
 pub(crate) fn create(
@@ -20,13 +20,13 @@ pub(crate) fn create(
 ) -> Result<Reply, Error> {
     let directory = match fs::canonicalize(directory) {
         Ok(d) => d,
-        Err(e) => return Ok(Reply::Status(unusable(directory, &e))),
+        Err(e) => return Ok(Reply::Status(Status::unusable(directory, &e))),
     };
     let mut canonical = Vec::with_capacity(projects.len());
     for project in projects {
         match fs::canonicalize(project) {
             Ok(p) => canonical.push(p),
-            Err(e) => return Ok(Reply::Status(unusable(project, &e))),
+            Err(e) => return Ok(Reply::Status(Status::unusable(project, &e))),
         }
     }
     let mut state = lock(state);
@@ -42,7 +42,7 @@ pub(crate) fn create(
         }
         CreateDecision::Refuse(status) => return Ok(Reply::Status(status)),
     };
-    let path = directory.join("fleet.toml");
+    let path = directory.join(fleet_core::paths::CONFIG_FILE);
     if path.exists() {
         return Ok(Reply::Status(Status::StrayConfig { path }));
     }

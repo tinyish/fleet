@@ -52,14 +52,14 @@ pub(crate) fn endings() -> Vec<Sample> {
     out
 }
 
-const APP: &str = "/code/app";
+pub(super) const APP: &str = "/code/app";
 const SRC: &str = "/code/app/src";
-const WING: &str = "/code/wing";
+pub(super) const WING: &str = "/code/wing";
 const API: &str = "/code/api";
 const WEB: &str = "/code/web";
-const STATE: &str = "/Users/you/Library/Application Support/fleet";
+pub(super) const STATE: &str = "/Users/you/Library/Application Support/fleet";
 
-fn path(p: &str) -> PathBuf {
+pub(super) fn path(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
@@ -70,11 +70,11 @@ fn denied() -> io::Error {
     io::Error::from_raw_os_error(13) // EACCES
 }
 
-fn not_found() -> io::Error {
+pub(super) fn not_found() -> io::Error {
     io::Error::from_raw_os_error(2) // ENOENT
 }
 
-fn broken_pipe() -> io::Error {
+pub(super) fn broken_pipe() -> io::Error {
     io::Error::from_raw_os_error(32) // EPIPE
 }
 
@@ -190,7 +190,7 @@ fn all_ons(broken: bool) -> Vec<response::AllOn> {
     ]
 }
 
-fn bad_config() -> protocol::Status {
+pub(super) fn bad_config() -> protocol::Status {
     protocol::Status::BadConfig {
         path: path("/code/wing/fleet.toml"),
         line: Some(1),

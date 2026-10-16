@@ -1,5 +1,5 @@
 //! The service-manager driver: runs the supervisor under launchd on macOS
-//! and systemd user units on Linux. The only crate that starts programs.
+//! and systemd user units on Linux. A driver, so it may start programs.
 
 mod launchd;
 pub mod render;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use fleet_core::paths::Os;
-use fleet_core::tools::{FileStep, ServiceManager, ToolError};
+use fleet_core::tools::{FileStep, NoServiceManager, ServiceManager, ToolError};
 
 /// The supervisor's launchd label.
 pub const LAUNCHD_LABEL: &str = "com.tinyish.fleet.supervisor";
@@ -18,18 +18,26 @@ pub const LAUNCHD_LABEL: &str = "com.tinyish.fleet.supervisor";
 /// The supervisor's systemd user unit.
 pub const SYSTEMD_UNIT: &str = "fleet-supervisor.service";
 
-/// The driver for this machine's service manager, if tinyfleet runs here.
-#[must_use]
-pub fn for_this_os() -> Option<Box<dyn ServiceManager>> {
+/// The driver for this machine's service manager.
+///
+/// # Errors
+///
+/// `UnsupportedOs` where tinyfleet does not run, and `NoHome` when `HOME`
+/// (or, on Linux, an absolute `XDG_CONFIG_HOME`) is not set.
+pub fn for_this_os() -> Result<Box<dyn ServiceManager>, NoServiceManager> {
     let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-    match Os::this()? {
-        Os::MacOs => Some(Box::new(launchd::Launchd::new(var("HOME")?.into()))),
+    match Os::this().ok_or(NoServiceManager::UnsupportedOs)? {
+        Os::MacOs => {
+            let home = var("HOME").ok_or(NoServiceManager::NoHome)?;
+            Ok(Box::new(launchd::Launchd::new(home.into())))
+        }
         Os::Linux => {
             let config = var("XDG_CONFIG_HOME")
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.is_absolute())
-                .or_else(|| var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
-            Some(Box::new(systemd::Systemd::new(config.join("systemd/user"))))
+                .or_else(|| var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+                .ok_or(NoServiceManager::NoHome)?;
+            Ok(Box::new(systemd::Systemd::new(config.join("systemd/user"))))
         }
     }
 }

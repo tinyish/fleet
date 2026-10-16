@@ -12,6 +12,7 @@ repository = "https://github.com/tinyish/fleet"
 fleet-core = { path = "crates/core" }
 state = { path = "crates/state" }
 service = { path = "crates/service" }
+git = { path = "crates/git" }
 clap = { version = "4", features = ["derive"] }
 cli = { path = "crates/cli" }
 serde = { version = "1", features = ["derive"] }

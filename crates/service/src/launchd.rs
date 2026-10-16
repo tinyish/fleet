@@ -26,11 +26,6 @@ impl Launchd {
             .join(format!("{LAUNCHD_LABEL}.plist"))
     }
 
-    fn installed_state_dir(&self) -> Option<PathBuf> {
-        let text = fs::read_to_string(self.plist_path()).ok()?;
-        render::plist_state_dir(&text)
-    }
-
     fn domain() -> Result<String, ToolError> {
         let out = run("id", &[OsStr::new("-u")])?;
         Ok(format!(
@@ -98,5 +93,19 @@ impl ServiceManager for Launchd {
 
     fn where_logs_go(&self, state_dir: &Path) -> String {
         state_dir.join("supervisor.log").display().to_string()
+    }
+
+    fn name(&self) -> &'static str {
+        "launchd"
+    }
+
+    fn answers(&self) -> Result<(), ToolError> {
+        let domain = Launchd::domain()?;
+        run("launchctl", &[OsStr::new("print"), OsStr::new(&domain)]).map(|_| ())
+    }
+
+    fn installed_state_dir(&self) -> Option<PathBuf> {
+        let text = fs::read_to_string(self.plist_path()).ok()?;
+        render::plist_state_dir(&text)
     }
 }

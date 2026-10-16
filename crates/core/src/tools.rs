@@ -99,6 +99,15 @@ pub enum BadUnitPath {
     Newline,
 }
 
+/// Why there is no service manager to drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoServiceManager {
+    /// tinyfleet does not run on this system.
+    UnsupportedOs,
+    /// `HOME` is not set, so its units cannot be found.
+    NoHome,
+}
+
 /// The service manager that runs the supervisor: launchd or systemd.
 pub trait ServiceManager {
     /// Writes the supervisor's unit, enables it to start at login, and
@@ -121,4 +130,30 @@ pub trait ServiceManager {
 
     /// Where the supervisor's log can be read, for a person.
     fn where_logs_go(&self, state_dir: &Path) -> String;
+
+    /// The service manager's name, as its own tool is called: `launchd` or
+    /// `systemd`.
+    fn name(&self) -> &'static str;
+
+    /// Whether the service manager answers for this user.
+    ///
+    /// # Errors
+    ///
+    /// What went wrong when it does not answer.
+    fn answers(&self) -> Result<(), ToolError>;
+
+    /// The state directory the installed supervisor unit serves, or `None`
+    /// when no unit is installed.
+    fn installed_state_dir(&self) -> Option<PathBuf>;
+}
+
+/// git.
+pub trait Git {
+    /// git's version, as `git --version` says it.
+    ///
+    /// # Errors
+    ///
+    /// When git is not on the `PATH` (`CouldNotRun` with a not-found error)
+    /// or does not run.
+    fn version(&self) -> Result<String, ToolError>;
 }
