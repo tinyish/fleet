@@ -20,6 +20,7 @@ serde_json = "1"
 toml = "1"
 console = { version = "0.16", default-features = false }
 cliclack = "0.5"
+strum = { version = "0.28", features = ["derive"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 supervisor = { path = "crates/supervisor" }
 

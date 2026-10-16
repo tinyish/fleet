@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 /// a file. Facts only: the CLI words them (core.md invariant 9). The CLI and
 /// the protocol write it as `protocol::Status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(StatusKind), derive(strum::EnumIter))
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     /// A default fleet's directory is in no git repository.

@@ -209,6 +209,8 @@ Linux, on arm64 and x86_64.
 - The version is the workspace version in the root `Cargo.toml`: a release
   branch's first commit sets it, and the release workflow reads it there.
 - **clippy** with a pinned lint set, warnings denied.
+- clippy and the tests also run with `--all-features`, so the CLI's
+  specimen ([cli-output.md](cli-output.md)) builds and stays complete.
 - Visible evals are trycmd transcript cases under `tests/cmd/<verb>/`, run by
   `cargo test`.
 - Fitness tests read the workspace's dependency graph (`cargo metadata`).

@@ -111,6 +111,7 @@ pub mod response {
 
     /// What `fleet start` did.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[cfg_attr(feature = "specimen", derive(strum::EnumIter))]
     #[serde(rename_all = "snake_case")]
     pub enum Start {
         /// Every fleet was turned on.
@@ -144,6 +145,11 @@ pub struct SocketPathTooLong(pub PathBuf);
 /// The conversation with the other side failed: the socket, a line that is
 /// garbled, missing or too long. Never a reply.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(ProtocolErrorKind), derive(strum::EnumIter))
+)]
 pub enum ProtocolError {
     /// The socket failed.
     Io(io::Error),

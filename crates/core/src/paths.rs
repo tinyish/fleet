@@ -28,6 +28,11 @@ impl Os {
 
 /// Why the state directory could not be worked out.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(PathErrorKind), derive(strum::EnumIter))
+)]
 pub enum PathError {
     /// `HOME` is unset or empty.
     NoHome,

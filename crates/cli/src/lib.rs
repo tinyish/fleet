@@ -5,6 +5,8 @@ mod client;
 mod create;
 mod ending;
 mod output;
+#[cfg(feature = "specimen")]
+mod specimen;
 mod start;
 mod stop;
 mod theme;
@@ -63,6 +65,11 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    #[cfg(feature = "specimen")]
+    if args.get(1).is_some_and(|a| a == "specimen") {
+        return specimen::run();
+    }
     let args = match Args::try_parse_from(args) {
         Ok(args) => args,
         Err(err) => {
@@ -106,4 +113,19 @@ pub(crate) enum Ask {
     Terminal,
     /// No terminal and no `--non-interactive`: never ask, and do not go on.
     Never,
+}
+
+// Only without the feature: with it, `specimen` is caught before clap.
+#[cfg(all(test, not(feature = "specimen")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specimen_is_not_a_command_in_a_release_build() {
+        let err = Args::try_parse_from(["fleet", "specimen"]).err();
+        assert!(
+            matches!(&err, Some(e) if e.kind() == clap::error::ErrorKind::InvalidSubcommand),
+            "{err:?}"
+        );
+    }
 }

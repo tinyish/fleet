@@ -13,6 +13,11 @@ use protocol::ProtocolError;
 
 /// What a command did.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(ResponseKind), derive(strum::EnumIter))
+)]
 pub(crate) enum Response {
     /// `fleet create` did this.
     Created {
@@ -36,6 +41,7 @@ pub(crate) enum Response {
 
 /// How a command found the supervisor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specimen", derive(strum::EnumIter))]
 pub(crate) enum Startup {
     /// It was already running.
     WasRunning,
@@ -45,6 +51,11 @@ pub(crate) enum Startup {
 
 /// Why a command did not do what was asked, and the exit code that says so.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(StatusKind), derive(strum::EnumIter))
+)]
 pub(crate) enum Status {
     /// The supervisor said no.
     Refused(protocol::Status),
@@ -71,6 +82,11 @@ impl Status {
 
 /// Why the CLI could not go on, before or around asking the supervisor.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(ProblemKind), derive(strum::EnumIter))
+)]
 pub(crate) enum Problem {
     /// This is not macOS or Linux.
     UnsupportedOs,
@@ -100,6 +116,7 @@ pub(crate) enum Problem {
 
 /// What was asked of the service manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specimen", derive(strum::EnumIter))]
 pub(crate) enum Doing {
     /// Start the supervisor.
     Start,
@@ -109,6 +126,11 @@ pub(crate) enum Doing {
 
 /// Why the CLI cannot tell whether something happened.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(DoubtKind), derive(strum::EnumIter))
+)]
 pub(crate) enum Doubt {
     /// The supervisor was started but did not answer in time.
     NoAnswer {
@@ -138,6 +160,11 @@ pub(crate) enum Doubt {
 
 /// What the CLI was asking the supervisor for when talking failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(DuringKind), derive(strum::EnumIter))
+)]
 pub(crate) enum During {
     /// Creating a fleet.
     Creating,

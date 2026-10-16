@@ -15,5 +15,9 @@ cli.workspace = true
 supervisor.workspace = true
 service.workspace = true
 
+[features]
+# `fleet specimen`: every line the CLI can print. Never in a release build.
+specimen = ["cli/specimen"]
+
 [lints]
 workspace = true

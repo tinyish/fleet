@@ -192,6 +192,25 @@ answer that keeps going; with neither, end without asking (core.md
 `theme.rs`. The cliclack `Theme` methods there (`format_header`,
 `format_confirm`, `format_progress_start`, …) are the hooks.
 
+## Seeing every line
+
+`cargo run -p fleet --features specimen -- specimen` prints every line the
+CLI can print, through the same code a command uses: the help text, the
+start prompt in each state, the spinners, and every way a command can end
+with its hint and exit code. Pipe it (`… 2>&1 | cat`) to see what a script
+sees. The `specimen` feature is off by default, so a release binary has no
+such command.
+
+It cannot fall behind: every enum a command can end with has a kind twin
+(strum's `EnumDiscriminants`) under that feature, and the specimen builds a
+sample for each kind in an exhaustive `match`. A new variant does not
+compile with `--all-features` until it has a sample in
+`crates/cli/src/specimen.rs`. What the compiler cannot check is a choice
+of values rather than a variant: the shapes of `protocol::response::Create`
+(a struct), wording that depends on a field's value (a tool that failed
+saying nothing), which combinations of nested facts are shown, and whether
+a new status should have a hint (`words::next` falls back to none).
+
 ## Why it is built this way
 
 - **Facts, not sentences, on the socket**: the wording can change without

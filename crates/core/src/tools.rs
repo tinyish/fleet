@@ -15,6 +15,11 @@ pub struct SupervisorUnit {
 
 /// An outside tool failed, as facts; the CLI words them.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(ToolErrorKind), derive(strum::EnumIter))
+)]
 pub enum ToolError {
     /// The installed unit serves another state directory, so it is left
     /// alone.
@@ -60,6 +65,7 @@ pub enum ToolError {
 
 /// What was being done to a file when it failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specimen", derive(strum::EnumIter))]
 pub enum FileStep {
     /// Creating a directory.
     Create,
@@ -73,6 +79,7 @@ pub enum FileStep {
 
 /// A path the supervisor's unit file holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specimen", derive(strum::EnumIter))]
 pub enum UnitPath {
     /// The `fleet` binary.
     Program,
@@ -84,6 +91,7 @@ pub enum UnitPath {
 
 /// Why a path cannot go into a unit file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specimen", derive(strum::EnumIter))]
 pub enum BadUnitPath {
     /// It is not valid UTF-8.
     NotUtf8,
