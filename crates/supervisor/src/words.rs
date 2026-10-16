@@ -2,10 +2,11 @@
 //! CLI's (`crates/cli/src/words.rs`): the supervisor answers commands with
 //! facts and words only its own log, here (core.md invariant 9).
 
+use fleet_core::protocol;
 use std::io;
 
 use fleet_core::paths::PathError;
-use protocol::ProtocolError;
+use fleet_core::protocol::ProtocolError;
 use state::StateError;
 
 use crate::{Doing, Error};

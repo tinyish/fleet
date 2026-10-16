@@ -46,38 +46,118 @@ pub fn decide_create(
     projects: &[PathBuf],
     repo_root_of: impl Fn(&Path) -> Option<PathBuf>,
 ) -> CreateDecision {
-    let projects = if projects.is_empty() {
-        match repo_root_of(directory) {
-            Some(root) if root == directory => {}
-            Some(root) => {
-                return CreateDecision::Refuse(Status::DirectoryNotRepoRoot {
-                    path: directory.to_path_buf(),
-                    root,
-                });
-            }
-            None => {
-                return CreateDecision::Refuse(Status::DirectoryNotInRepo {
-                    path: directory.to_path_buf(),
-                });
-            }
-        }
-        vec![directory.to_path_buf()]
-    } else {
-        let mut sorted = projects.to_vec();
-        sorted.sort();
-        sorted.dedup();
-        for project in &sorted {
-            if let Some(refusal) = project_refusal(directory, project, repo_root_of(project)) {
-                return CreateDecision::Refuse(refusal);
-            }
-        }
-        sorted
+    let projects = match resolve_projects(directory, projects, repo_root_of) {
+        Ok(projects) => projects,
+        Err(status) => return CreateDecision::Refuse(status),
     };
     let wanted = Fleet {
         directory: directory.to_path_buf(),
         projects,
     };
     refusal_against(registered, &wanted).unwrap_or(CreateDecision::Create(wanted))
+}
+
+/// The projects a fleet in `directory` serves, from the paths it was given
+/// or its config names: sorted and once each. No paths means a default
+/// fleet, `directory` its one project.
+///
+/// # Errors
+///
+/// Why a path cannot be a project of this fleet: not a repository's root,
+/// or the fleet directory is inside it.
+pub fn resolve_projects(
+    directory: &Path,
+    configured: &[PathBuf],
+    repo_root_of: impl Fn(&Path) -> Option<PathBuf>,
+) -> Result<Vec<PathBuf>, Status> {
+    if configured.is_empty() {
+        return match repo_root_of(directory) {
+            Some(root) if root == directory => Ok(vec![directory.to_path_buf()]),
+            Some(root) => Err(Status::DirectoryNotRepoRoot {
+                path: directory.to_path_buf(),
+                root,
+            }),
+            None => Err(Status::DirectoryNotInRepo {
+                path: directory.to_path_buf(),
+            }),
+        };
+    }
+    let mut sorted = configured.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    for project in &sorted {
+        if let Some(refusal) = project_refusal(directory, project, repo_root_of(project)) {
+            return Err(refusal);
+        }
+    }
+    Ok(sorted)
+}
+
+/// A project of `wanted` that a fleet in `others` already serves.
+#[must_use]
+pub fn check_shared(others: &[Fleet], wanted: &Fleet) -> Option<Status> {
+    others.iter().find_map(|other| {
+        wanted
+            .projects
+            .iter()
+            .find(|p| other.projects.contains(p))
+            .map(|shared| Status::AlreadyServed {
+                project: shared.clone(),
+                fleet: other.directory.clone(),
+            })
+    })
+}
+
+/// Each fleet among `claims` that names a project another one also names,
+/// with why. `claims` is every fleet as its config now describes it, so a
+/// project moved from one fleet to another in the same edit is no conflict.
+#[must_use]
+pub fn conflicts(claims: &[Fleet]) -> Vec<(PathBuf, Status)> {
+    claims
+        .iter()
+        .filter_map(|fleet| {
+            claims
+                .iter()
+                .filter(|other| other.directory != fleet.directory)
+                .find_map(|other| {
+                    fleet
+                        .projects
+                        .iter()
+                        .find(|p| other.projects.contains(p))
+                        .map(|shared| Status::AlsoClaimed {
+                            project: shared.clone(),
+                            fleet: other.directory.clone(),
+                        })
+                })
+                .map(|status| (fleet.directory.clone(), status))
+        })
+        .collect()
+}
+
+/// What re-reading a fleet's config changes in its projects.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Change {
+    /// Projects the config names that the fleet did not serve.
+    pub added: Vec<PathBuf>,
+    /// Projects the fleet served that the config no longer names.
+    pub removed: Vec<PathBuf>,
+}
+
+/// The change from the `current` projects to the `wanted` ones.
+#[must_use]
+pub fn sync(current: &[PathBuf], wanted: &[PathBuf]) -> Change {
+    Change {
+        added: wanted
+            .iter()
+            .filter(|p| !current.contains(p))
+            .cloned()
+            .collect(),
+        removed: current
+            .iter()
+            .filter(|p| !wanted.contains(p))
+            .cloned()
+            .collect(),
+    }
 }
 
 fn project_refusal(directory: &Path, project: &Path, root: Option<PathBuf>) -> Option<Status> {
@@ -152,15 +232,7 @@ fn refusal_against(registered: &[Fleet], wanted: &Fleet) -> Option<CreateDecisio
             });
         }
     }
-    for other in registered {
-        if let Some(shared) = wanted.projects.iter().find(|p| other.projects.contains(p)) {
-            return refuse(Status::AlreadyServed {
-                project: shared.clone(),
-                fleet: other.directory.clone(),
-            });
-        }
-    }
-    None
+    check_shared(registered, wanted).map(CreateDecision::Refuse)
 }
 
 #[cfg(test)]
@@ -188,6 +260,78 @@ mod tests {
             directory: p(dir),
             projects: projects.iter().map(|s| p(s)).collect(),
         }
+    }
+
+    #[test]
+    fn sync_names_what_was_added_and_removed() {
+        let change = sync(&[p("/c/api"), p("/c/app")], &[p("/c/app"), p("/c/web")]);
+        assert_eq!(
+            change,
+            Change {
+                added: vec![p("/c/web")],
+                removed: vec![p("/c/api")]
+            }
+        );
+        assert_eq!(sync(&[p("/c/a")], &[p("/c/a")]), Change::default());
+    }
+
+    #[test]
+    fn a_project_moved_between_fleets_is_no_conflict() {
+        let claims = [
+            fleet("/f/a", &["/c/api", "/c/web"]),
+            fleet("/f/w", &["/c/app"]),
+        ];
+        assert_eq!(conflicts(&claims), Vec::new());
+    }
+
+    #[test]
+    fn two_fleets_claiming_one_project_are_both_named() {
+        let claims = [
+            fleet("/f/a", &["/c/api"]),
+            fleet("/f/w", &["/c/api", "/c/app"]),
+        ];
+        assert_eq!(
+            conflicts(&claims),
+            vec![
+                (
+                    p("/f/a"),
+                    Status::AlsoClaimed {
+                        project: p("/c/api"),
+                        fleet: p("/f/w")
+                    }
+                ),
+                (
+                    p("/f/w"),
+                    Status::AlsoClaimed {
+                        project: p("/c/api"),
+                        fleet: p("/f/a")
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_shared_names_the_other_fleet() {
+        let others = [fleet("/f/one", &["/c/api"])];
+        let wanted = fleet("/f/two", &["/c/app", "/c/api"]);
+        assert_eq!(
+            check_shared(&others, &wanted),
+            Some(Status::AlreadyServed {
+                project: p("/c/api"),
+                fleet: p("/f/one")
+            })
+        );
+        assert_eq!(check_shared(&others, &fleet("/f/two", &["/c/app"])), None);
+    }
+
+    #[test]
+    fn resolve_projects_gives_a_default_fleet_its_directory() {
+        assert_eq!(
+            resolve_projects(&p("/c/a"), &[], repos(&["/c/a"])),
+            Ok(vec![p("/c/a")])
+        );
+        assert!(resolve_projects(&p("/f/w"), &[p("/c/x")], repos(&[])).is_err());
     }
 
     #[test]

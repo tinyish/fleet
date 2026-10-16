@@ -15,14 +15,16 @@ pub struct Config {
     pub projects: Vec<String>,
 }
 
-/// The config file could not be read.
+/// The config file could not be read: where, when the parser knows, and
+/// what it said. Facts: the CLI words them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigError(pub String);
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
+pub struct ConfigError {
+    /// The line, counting from 1.
+    pub line: Option<usize>,
+    /// The column on that line, in characters, counting from 1.
+    pub column: Option<usize>,
+    /// What the parser said, in one line.
+    pub message: String,
 }
 
 const HEADER: &str = "# A tinyfleet fleet. With no `projects`, this directory is the fleet's one\n\
@@ -45,6 +47,13 @@ impl Config {
     }
 }
 
+/// The projects `config` names, with paths relative to the fleet
+/// `directory` resolved against it. Empty for a default fleet.
+#[must_use]
+pub fn projects_of(config: &Config, directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    config.projects.iter().map(|p| directory.join(p)).collect()
+}
+
 /// The text of `fleet.toml` for `config`.
 #[must_use]
 pub fn render(config: &Config) -> String {
@@ -62,13 +71,49 @@ pub fn render(config: &Config) -> String {
 ///
 /// When the text is not TOML or holds a key this version does not know.
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
-    toml::from_str(text).map_err(|e| ConfigError(e.to_string()))
+    toml::from_str(text).map_err(|e| {
+        let at = e.span().map(|span| {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                + 1;
+            (line, column)
+        });
+        ConfigError {
+            line: at.map(|(line, _)| line),
+            column: at.map(|(_, column)| column),
+            message: e.message().trim().replace('\n', " "),
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn relative_projects_resolve_against_the_fleet_directory() {
+        let config = Config {
+            projects: vec!["../code/app".into(), "/c/api".into()],
+        };
+        assert_eq!(
+            projects_of(&config, std::path::Path::new("/f/work")),
+            vec![
+                PathBuf::from("/f/work/../code/app"),
+                PathBuf::from("/c/api")
+            ]
+        );
+        assert_eq!(
+            projects_of(&Config::default(), std::path::Path::new("/c/blog")),
+            Vec::<PathBuf>::new()
+        );
+    }
 
     #[test]
     fn a_default_fleet_has_no_projects_key() {
@@ -96,6 +141,19 @@ mod tests {
         let text = render(&config);
         assert!(text.contains("projects = ["), "{text}");
         assert_eq!(parse(&text).ok(), Some(config));
+    }
+
+    #[test]
+    fn a_parse_error_says_where_as_facts_and_what_in_one_line() {
+        let e = parse("projects = [").err();
+        assert_eq!(e.as_ref().and_then(|e| e.line), Some(1));
+        assert_eq!(e.as_ref().and_then(|e| e.column), Some(13));
+        let message = e.map(|e| e.message).unwrap_or_default();
+        assert!(
+            !message.is_empty() && !message.contains('\n'),
+            "{message:?}"
+        );
+        assert!(!message.contains("line 1"), "{message:?}");
     }
 
     #[test]

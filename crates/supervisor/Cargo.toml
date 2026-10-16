@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 fleet-core.workspace = true
-protocol.workspace = true
 state.workspace = true
 
 [lints]

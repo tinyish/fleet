@@ -1,6 +1,7 @@
 //! The steps the record holds, and how one is stored as a row: its name in
 //! AIP-126 spelling in `step`, and its fields as a JSON object in `detail`.
 
+use fleet_core::status::Status;
 use serde::{Deserialize, Serialize};
 
 /// One step tinyfleet records. Its variant name, in AIP-126 spelling, is the
@@ -16,9 +17,9 @@ pub enum Step {
         /// Its process id.
         pid: u32,
     },
-    /// Every fleet was turned on.
+    /// Every project of every fleet whose config read was turned on.
     EveryFleetOn,
-    /// Every fleet was turned off.
+    /// Every project was turned off.
     EveryFleetOff,
     /// A fleet was created.
     FleetCreated {
@@ -26,6 +27,38 @@ pub enum Step {
         directory: String,
         /// The projects it serves.
         projects: Vec<String>,
+    },
+    /// One project was turned on.
+    ProjectOn {
+        /// The project.
+        project: String,
+    },
+    /// One project was turned off.
+    ProjectOff {
+        /// The project.
+        project: String,
+    },
+    /// Re-reading a fleet's config added a project to it.
+    ProjectAdded {
+        /// The fleet's directory.
+        fleet: String,
+        /// The project.
+        project: String,
+    },
+    /// Re-reading a fleet's config removed a project from it.
+    ProjectRemoved {
+        /// The fleet's directory.
+        fleet: String,
+        /// The project.
+        project: String,
+    },
+    /// A fleet's config did not read, or claimed another fleet's project, so
+    /// nothing of it was turned on.
+    FleetConfigBroken {
+        /// The fleet's directory.
+        fleet: String,
+        /// Why, as the facts the CLI words.
+        why: Status,
     },
 }
 
@@ -87,6 +120,26 @@ mod tests {
                 directory: "/f/work".into(),
                 projects: vec!["/c/app".into()],
             },
+            Step::ProjectOn {
+                project: "/c/app".into(),
+            },
+            Step::ProjectOff {
+                project: "/c/app".into(),
+            },
+            Step::ProjectAdded {
+                fleet: "/f".into(),
+                project: "/c/a".into(),
+            },
+            Step::ProjectRemoved {
+                fleet: "/f".into(),
+                project: "/c/a".into(),
+            },
+            Step::FleetConfigBroken {
+                fleet: "/f".into(),
+                why: Status::Missing {
+                    path: "/f/fleet.toml".into(),
+                },
+            },
         ]
     }
 
@@ -111,7 +164,12 @@ mod tests {
                 "SUPERVISOR_STARTED",
                 "EVERY_FLEET_ON",
                 "EVERY_FLEET_OFF",
-                "FLEET_CREATED"
+                "FLEET_CREATED",
+                "PROJECT_ON",
+                "PROJECT_OFF",
+                "PROJECT_ADDED",
+                "PROJECT_REMOVED",
+                "FLEET_CONFIG_BROKEN"
             ]
         );
     }

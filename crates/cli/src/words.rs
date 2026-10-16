@@ -4,8 +4,9 @@
 //! (core.md invariant 9), colouring the variable parts with the ink of the
 //! stream they are written to.
 
+use fleet_core::protocol;
+use fleet_core::protocol::ProtocolError;
 use fleet_core::tools::{BadUnitPath, FileStep, ToolError, UnitPath};
-use protocol::ProtocolError;
 
 use crate::ending::{Doing, Doubt, During, Problem, Response, Startup, Status};
 use crate::output::Ink;
@@ -26,12 +27,19 @@ pub(crate) const PROJECT_HELP: &str = "A repository the fleet serves; repeat for
      Without it, this directory is the one project";
 
 /// The help for `fleet start`.
-pub(crate) const START_ABOUT: &str =
-    "Start the supervisor and turn every fleet on; it comes back after a reboot until stop";
+pub(crate) const START_ABOUT: &str = "Start the supervisor, re-read every fleet's config and \
+     turn every project on; it comes back after a reboot until stop";
+
+/// The help for `fleet start --project`.
+pub(crate) const START_PROJECT_HELP: &str = "Turn only this project on, by its repository's root";
 
 /// The help for `fleet stop`.
 pub(crate) const STOP_ABOUT: &str =
-    "Turn every fleet off and stop the supervisor, so it does not come back";
+    "Turn every project off and stop the supervisor, so it does not come back";
+
+/// The help for `fleet stop --project`.
+pub(crate) const STOP_PROJECT_HELP: &str =
+    "Turn only this project off, leaving the supervisor and the rest of its fleet as they are";
 
 /// The question asked at a terminal when the supervisor is not running.
 pub(crate) const START_PROMPT: &str = "The fleet supervisor is not running. Start it?";
@@ -58,13 +66,9 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
             startup: Startup::Started,
         } => format!("{}; {}", started_supervisor(), created(response, ink)),
         Response::Created { response, .. } => created(response, ink),
-        Response::Started {
-            startup: Startup::Started,
-        } => format!(
-            "{} -- cleared for takeoff",
-            supervisor_was(Startup::Started)
-        ),
-        Response::Started { startup, .. } => supervisor_was(*startup).to_owned(),
+        Response::Started { response, startup } => started(response, *startup, ink),
+        Response::ProjectOn { response, startup } => project_on(response, *startup, ink),
+        Response::ProjectOff(response) => project_off(response, ink),
         Response::SupervisorStopped => "the supervisor is stopped".into(),
         Response::SupervisorWasNotRunning => "the supervisor was not running".into(),
     }
@@ -77,7 +81,120 @@ pub(crate) fn status(status: &Status, ink: Ink) -> String {
         Status::Cannot(problem) => cannot(problem, ink),
         Status::NotRunning => "the supervisor is not running".into(),
         Status::CouldNotTell(doubt) => unsure(doubt),
+        // output.rs prints these as a done line and one line per fleet that
+        // stayed off; this is the same in one line.
+        Status::PartlyOn { response, .. } => response
+            .stayed_off
+            .iter()
+            .map(|off| stayed_off(off, ink))
+            .collect::<Vec<_>>()
+            .join("; "),
     }
+}
+
+/// The done line of a start that left some fleets off.
+pub(crate) fn partly_on(
+    response: &protocol::response::AllOn,
+    startup: Startup,
+    ink: Ink,
+) -> String {
+    let on = match response.on.as_slice() {
+        [] => "nothing is on".to_owned(),
+        [one] => format!("{} is on", ink.path(one)),
+        many => format!("{} are on", ink.paths(many)),
+    };
+    let mut said = format!("{}; {on}", supervisor_was(startup));
+    if let Some(picked) = picked_up(&response.picked_up, ink) {
+        said = format!("{said}; {picked}");
+    }
+    said
+}
+
+/// One fleet that stayed off, and why.
+pub(crate) fn stayed_off(off: &protocol::response::StayedOff, ink: Ink) -> String {
+    format!(
+        "the fleet in {} stayed off: {}",
+        ink.path(&off.fleet),
+        refused(&off.why, ink)
+    )
+}
+
+/// What to do next after a command that did what was asked, when there is
+/// something to do.
+pub(crate) fn next_after(response: &Response, ink: Ink) -> Option<String> {
+    match response {
+        Response::Started { response, .. } if response.fleets.is_empty() => Some(format!(
+            "run {} in a repository to make one",
+            ink.accent("fleet create")
+        )),
+        _ => None,
+    }
+}
+
+/// What start did when every config read.
+fn started(response: &protocol::response::AllOn, startup: Startup, ink: Ink) -> String {
+    let mut said = supervisor_was(startup).to_owned();
+    if response.fleets.is_empty() {
+        return format!("{said}; there are no fleets yet");
+    }
+    if let Some(picked) = picked_up(&response.picked_up, ink) {
+        said = format!("{said}; {picked}");
+    }
+    if startup == Startup::Started {
+        said.push_str(" -- cleared for takeoff");
+    }
+    said
+}
+
+/// What start --project did.
+fn project_on(response: &protocol::response::ProjectOn, startup: Startup, ink: Ink) -> String {
+    let mut said = format!("{} is on", ink.path(&response.project));
+    if startup == Startup::Started {
+        said = format!("{}; {said}", started_supervisor());
+    }
+    if let Some(picked) = picked_up(&response.picked_up, ink) {
+        said = format!("{said}; {picked}");
+    }
+    said
+}
+
+/// What stop --project did.
+fn project_off(response: &protocol::response::ProjectOff, ink: Ink) -> String {
+    let off = format!("{} is off", ink.path(&response.project));
+    match response.others.as_slice() {
+        [] => off,
+        [one] => format!("{off}; {} keeps its own on or off", ink.path(one)),
+        many => format!("{off}; {} keep their own on or off", ink.paths(many)),
+    }
+}
+
+/// What re-reading the configs changed, if anything.
+fn picked_up(picked: &[protocol::response::PickedUp], ink: Ink) -> Option<String> {
+    let mut parts = Vec::new();
+    for p in picked {
+        if !p.added.is_empty() {
+            parts.push(format!(
+                "added {} to the fleet in {}",
+                ink.paths(&p.added),
+                ink.path(&p.fleet)
+            ));
+        }
+        if !p.removed.is_empty() {
+            parts.push(format!(
+                "removed {} from the fleet in {}",
+                ink.paths(&p.removed),
+                ink.path(&p.fleet)
+            ));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "picked up from {}: {}",
+        ink.accent("fleet.toml"),
+        parts.join(", ")
+    ))
 }
 
 /// What to do about a status, when there is something to do: the hint
@@ -112,6 +229,19 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
                 "FLEET_STATE_DIR={} fleet stop",
                 shell_quoted(&theirs.display().to_string())
             ))
+        ),
+        Status::Refused(protocol::Status::InsideProject { project, .. }) => {
+            format!("name its root, {}", ink.path(project))
+        }
+        Status::Refused(protocol::Status::CannotTurnOn { fleet, .. }) => format!(
+            "fix the {} in {}, then try again",
+            ink.accent("fleet.toml"),
+            ink.path(fleet)
+        ),
+        Status::PartlyOn { .. } => format!(
+            "fix each {} named above, then run {}",
+            ink.accent("fleet.toml"),
+            ink.accent("fleet start")
         ),
         Status::CouldNotTell(Doubt::NoAnswer { log, .. }) => {
             format!("check its log: {}", ink.accent(log))
@@ -172,7 +302,7 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
             format!("{} is not a repository's root", ink.path(path))
         }
         protocol::Status::ProjectIsFleetDirectory { path } => {
-            format!("{} is this directory", ink.path(path))
+            format!("{} is the fleet's own directory", ink.path(path))
         }
         protocol::Status::WingmanInsideProject { directory, project } => format!(
             "a wingman fleet's directory must be outside the repositories it serves; \
@@ -222,9 +352,69 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
                 ink.path(path)
             )
         }
+        protocol::Status::BadConfig {
+            path,
+            line,
+            column,
+            error,
+        } => bad_config(path, *line, *column, error, ink),
+        protocol::Status::AlsoClaimed { project, fleet } => format!(
+            "{} is also claimed by the fleet in {}",
+            ink.path(project),
+            ink.path(fleet)
+        ),
+        protocol::Status::NotServed { path } => format!("no fleet serves {}", ink.path(path)),
+        protocol::Status::InsideProject { path, project } => format!(
+            "{} is inside the project {}",
+            ink.path(path),
+            ink.path(project)
+        ),
+        protocol::Status::NoLongerServed { project, fleet } => format!(
+            "the fleet in {} no longer serves {}: its {} dropped it",
+            ink.path(fleet),
+            ink.path(project),
+            ink.accent("fleet.toml")
+        ),
+        protocol::Status::CannotTurnOn {
+            project,
+            fleet,
+            why,
+        } => cannot_turn_on(project, fleet, why, ink),
         protocol::Status::Malformed { error } => {
             format!("the supervisor could not understand the request: {error}")
         }
+    }
+}
+
+/// A project that could not be turned on because of its fleet's config.
+fn cannot_turn_on(
+    project: &std::path::Path,
+    fleet: &std::path::Path,
+    why: &protocol::Status,
+    ink: Ink,
+) -> String {
+    format!(
+        "{} cannot be turned on: the config of the fleet in {} cannot be used: {}",
+        ink.path(project),
+        ink.path(fleet),
+        refused(why, ink)
+    )
+}
+
+/// A fleet's config that does not read, and where when the parser knows.
+fn bad_config(
+    path: &std::path::Path,
+    line: Option<usize>,
+    column: Option<usize>,
+    error: &str,
+    ink: Ink,
+) -> String {
+    match (line, column) {
+        (Some(line), Some(column)) => format!(
+            "{} does not read: line {line}, column {column}: {error}",
+            ink.path(path)
+        ),
+        _ => format!("{} does not read: {error}", ink.path(path)),
     }
 }
 
@@ -321,9 +511,13 @@ fn during_words(during: During) -> String {
     match during {
         During::Creating => "asking the supervisor to create the fleet".into(),
         During::TurningOn(startup) => {
-            format!("{}, but turning every fleet on", supervisor_was(startup))
+            format!("{}, but turning every project on", supervisor_was(startup))
         }
-        During::TurningOff => "turning every fleet off".into(),
+        During::TurningOnProject(startup) => {
+            format!("{}, but turning the project on", supervisor_was(startup))
+        }
+        During::TurningOff => "turning every project off".into(),
+        During::TurningOffProject => "turning the project off".into(),
     }
 }
 
@@ -364,6 +558,14 @@ mod tests {
             crate::output::ERR,
         );
         assert!(!failed.contains("takeoff"), "{failed}");
+    }
+
+    #[test]
+    fn not_served_sends_nobody_to_create() {
+        let status = Status::Refused(protocol::Status::NotServed {
+            path: "/code/web".into(),
+        });
+        assert_eq!(next(&status, crate::output::ERR), None);
     }
 
     #[test]

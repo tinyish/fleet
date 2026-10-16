@@ -128,7 +128,6 @@ dependencies = [
  "cliclack",
  "console",
  "fleet-core",
- "protocol",
  "strum",
 ]
 
@@ -219,6 +218,7 @@ name = "fleet-core"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
  "strum",
  "toml",
 ]
@@ -499,16 +499,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "protocol"
-version = "0.0.0"
-dependencies = [
- "fleet-core",
- "serde",
- "serde_json",
- "strum",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -691,7 +681,6 @@ name = "supervisor"
 version = "0.0.0"
 dependencies = [
  "fleet-core",
- "protocol",
  "state",
 ]
 

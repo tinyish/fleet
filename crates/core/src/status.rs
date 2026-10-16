@@ -114,6 +114,55 @@ pub enum Status {
         /// What the system said.
         error: String,
     },
+    /// A fleet's config is not valid TOML, or holds a key this version does
+    /// not know.
+    BadConfig {
+        /// The config file.
+        path: PathBuf,
+        /// The line, counting from 1, when the parser knows.
+        line: Option<usize>,
+        /// The column on that line, counting from 1, when the parser knows.
+        column: Option<usize>,
+        /// What the parser said, in one line.
+        error: String,
+    },
+    /// Two fleets' configs both name this project.
+    AlsoClaimed {
+        /// The project.
+        project: PathBuf,
+        /// The other fleet that names it.
+        fleet: PathBuf,
+    },
+    /// No fleet serves this path.
+    NotServed {
+        /// The path asked about.
+        path: PathBuf,
+    },
+    /// This path is inside a project, not at its root.
+    InsideProject {
+        /// The path asked about.
+        path: PathBuf,
+        /// The project it is inside.
+        project: PathBuf,
+    },
+    /// Re-reading its fleet's config just dropped this project.
+    NoLongerServed {
+        /// The project.
+        project: PathBuf,
+        /// The fleet whose config no longer names it.
+        fleet: PathBuf,
+    },
+    /// This project could not be turned on: its fleet's config did not read,
+    /// or clashed with another fleet's. Its own on or off, and its fleet's
+    /// other projects', stay as they were.
+    CannotTurnOn {
+        /// The project.
+        project: PathBuf,
+        /// Its fleet.
+        fleet: PathBuf,
+        /// Why the fleet's config cannot be used.
+        why: Box<Status>,
+    },
     /// The request could not be understood.
     Malformed {
         /// What was wrong with it.

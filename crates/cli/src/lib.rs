@@ -5,6 +5,7 @@ mod client;
 mod create;
 mod ending;
 mod output;
+mod projects;
 #[cfg(feature = "specimen")]
 mod specimen;
 mod start;
@@ -50,12 +51,18 @@ enum Request {
         #[arg(long = "project", value_name = "PATH", help = words::PROJECT_HELP)]
         projects: Vec<PathBuf>,
     },
-    // `fleet start`.
+    // `fleet start`, or `fleet start --project` for one project.
     #[command(about = words::START_ABOUT)]
-    Start,
-    // `fleet stop`.
+    Start {
+        #[arg(long, value_name = "PATH", help = words::START_PROJECT_HELP)]
+        project: Option<PathBuf>,
+    },
+    // `fleet stop`, or `fleet stop --project` for one project.
     #[command(about = words::STOP_ABOUT)]
-    Stop,
+    Stop {
+        #[arg(long, value_name = "PATH", help = words::STOP_PROJECT_HELP)]
+        project: Option<PathBuf>,
+    },
 }
 
 /// Runs one invocation of `fleet` and returns how it ended. `service` is
@@ -99,8 +106,14 @@ fn decide(args: &Args, service: Option<&dyn ServiceManager>) -> Result<Response,
     };
     match &args.request {
         Request::Create { projects } => create::run(&dir, service, ask, projects),
-        Request::Start => start::run(&dir, service),
-        Request::Stop => stop::run(&dir, service),
+        Request::Start { project: None } => start::run(&dir, service),
+        Request::Start {
+            project: Some(project),
+        } => projects::start(&dir, service, project),
+        Request::Stop { project: None } => stop::run(&dir, service),
+        Request::Stop {
+            project: Some(project),
+        } => projects::stop(&dir, project),
     }
 }
 

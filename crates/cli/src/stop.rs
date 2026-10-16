@@ -1,9 +1,8 @@
-//! `fleet stop`: every fleet off, the supervisor down and disabled.
+//! `fleet stop`: every project off, the supervisor down and disabled.
 
 use std::path::Path;
 
 use fleet_core::tools::ServiceManager;
-use protocol::request;
 
 use crate::ending::{Doing, Doubt, Problem, Response, Status};
 use crate::{client, ui, words};
@@ -12,7 +11,7 @@ pub(crate) fn run(state_dir: &Path, service: &dyn ServiceManager) -> Result<Resp
     let socket = client::socket(state_dir)?;
     let was_running = client::answers(&socket);
     if was_running {
-        client::stop(&socket, request::Stop::All)?;
+        client::stop_all(&socket)?;
     }
     service.stop_and_disable(state_dir).map_err(|error| {
         Status::Cannot(Problem::ServiceManager {

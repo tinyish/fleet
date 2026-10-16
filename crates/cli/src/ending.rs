@@ -3,13 +3,14 @@
 //! are always written `protocol::Response` and `protocol::Status`. words.rs
 //! turns these into sentences, and output.rs prints them.
 
+use fleet_core::protocol;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use fleet_core::paths::PathError;
+use fleet_core::protocol::ProtocolError;
 use fleet_core::tools::ToolError;
-use protocol::ProtocolError;
 
 /// What a command did.
 #[derive(Debug)]
@@ -26,12 +27,23 @@ pub(crate) enum Response {
         /// Whether create found the supervisor running or started it.
         startup: Startup,
     },
-    /// `fleet start` did this.
+    /// `fleet start` did this, and every fleet's config read.
     Started {
+        /// What the supervisor said start did.
+        response: protocol::response::AllOn,
         /// Whether start found the supervisor running or started it.
         startup: Startup,
     },
-    /// Every fleet is off and the supervisor is stopped.
+    /// `fleet start --project` turned one project on.
+    ProjectOn {
+        /// What the supervisor said it did.
+        response: protocol::response::ProjectOn,
+        /// Whether start found the supervisor running or started it.
+        startup: Startup,
+    },
+    /// `fleet stop --project` turned one project off.
+    ProjectOff(protocol::response::ProjectOff),
+    /// Every project is off and the supervisor is stopped.
     SupervisorStopped,
     /// Stop was asked for and the supervisor was not running.
     SupervisorWasNotRunning,
@@ -64,14 +76,22 @@ pub(crate) enum Status {
     NotRunning,
     /// Something may or may not have happened.
     CouldNotTell(Doubt),
+    /// `fleet start` turned projects on, but some fleets' configs did not
+    /// read, so those fleets stayed off.
+    PartlyOn {
+        /// What the supervisor said start did.
+        response: protocol::response::AllOn,
+        /// Whether start found the supervisor running or started it.
+        startup: Startup,
+    },
 }
 
 impl Status {
-    /// The exit code a script reads: 1 refused or cannot, 3 not running,
+    /// The exit code a script reads: 1 refused, cannot, or partly on; 3 not running,
     /// 4 could not tell. (A command that finishes exits 0.)
     pub(crate) fn exit_code(&self) -> u8 {
         match self {
-            Status::Refused(_) | Status::Cannot(_) => 1,
+            Status::Refused(_) | Status::Cannot(_) | Status::PartlyOn { .. } => 1,
             Status::NotRunning => 3,
             Status::CouldNotTell(_) => 4,
         }
@@ -166,8 +186,12 @@ pub(crate) enum Doubt {
 pub(crate) enum During {
     /// Creating a fleet.
     Creating,
-    /// Turning every fleet on, after finding or starting the supervisor.
+    /// Turning every project on, after finding or starting the supervisor.
     TurningOn(Startup),
-    /// Turning every fleet off.
+    /// Turning one project on, after finding or starting the supervisor.
+    TurningOnProject(Startup),
+    /// Turning every project off.
     TurningOff,
+    /// Turning one project off.
+    TurningOffProject,
 }

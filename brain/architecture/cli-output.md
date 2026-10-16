@@ -34,10 +34,10 @@ the same way and in one place. What the operating system or a parser says
 
 | Layer | Holds | File |
 | --- | --- | --- |
-| **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, …); `Status` is why not: a rule's verdict (`DirectoryNotRepoRoot { path, root }`, `AlreadyServed { project, fleet }`, …) or a problem with a path or file (`Missing { path }`, `StrayConfig { path }`, …). On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"missing":{…}}}`. | `crates/protocol/src/lib.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
-| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `SupervisorStopped`, `SupervisorWasNotRunning`); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`. The person's `cli::Request` (`Create`, `Start`, `Stop`) goes in. | `crates/cli/src/ending.rs`, `crates/cli/src/lib.rs` |
+| **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, …); `Status` is why not: a rule's verdict (`DirectoryNotRepoRoot { path, root }`, `AlreadyServed { project, fleet }`, …) or a problem with a path or file (`Missing { path }`, `StrayConfig { path }`, …). On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"missing":{…}}}`. | `crates/core/src/protocol.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
+| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`) goes in. | `crates/cli/src/ending.rs`, `crates/cli/src/lib.rs` |
 | **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), and the help text clap shows | `crates/cli/src/words.rs` |
-| **Output** | Where a line goes and how it starts: `Mark`, `line`, `report`, and `Ink` for colouring the parts of a sentence | `crates/cli/src/output.rs` |
+| **Output** | Where a line goes and how it starts: `Mark`, `line`, `lines` (every line an ending prints, with its mark), `report`, and `Ink` for colouring the parts of a sentence | `crates/cli/src/output.rs` |
 | **Theme** | The symbols, the palette (`Tone`, `paint_on`), and the cliclack `Theme` that draws prompts and spinners | `crates/cli/src/theme.rs` |
 | **Prompts and spinners** | `confirm(question, default)` and `spinner(message)`, drawn with cliclack in the theme | `crates/cli/src/ui.rs` |
 
@@ -52,7 +52,8 @@ only when its stream is a terminal**.
 | Done line (stdout) | `◆ created a fleet in /code/app -- welcome aboard` | `created a fleet in /code/app -- welcome aboard` |
 | Refusal (stderr) | `■ /code/app/src is inside the repository at /code/app` | `fleet: /code/app/src is inside the repository at /code/app` |
 | Could not tell (stderr) | `▲ the supervisor did not answer within 10s` | `fleet: the supervisor did not answer within 10s` |
-| Hint (stderr), under the line it follows | `> run fleet create in /code/app, or pass --project for a wingman fleet` | `hint: run fleet create in /code/app, or pass --project for a wingman fleet` |
+| Hint (stderr), under the line it follows | `> run fleet create in /code/app` | `hint: run fleet create in /code/app` |
+| Partly done (stdout, then stderr) | `◆ the supervisor was already running; /code/app is on`<br>`■ the fleet in /code/wing stayed off: …`<br>`> fix each fleet.toml named above, then run fleet start` | the same lines, `fleet:` before the `■` line and `hint:` before the last |
 | Colour | the symbol, and every path, name and command in the sentence | none |
 | Prompt | asked, with `>` and `Yes / No` | never asked: without `--non-interactive` the command ends *supervisor not running* (exit 3) |
 | Spinner | drawn on stderr while waiting | not drawn |
@@ -134,8 +135,13 @@ Err(status)  => {
 ```
 
 The mark is `◆` for done, `■` for refused or cannot, and `▲` for could not tell.
-A status that has something to do about it gets a hint line after it, marked
-`>`: `words::next` says what, or `None`.
+An ending is usually one line; `output::lines` gives every line an ending
+prints with its mark, so a start that left some fleets off prints a `◆` line
+for what came on and a `■` line for each fleet that stayed off. Its exit code
+still comes from the status.
+An ending that has something to do about it gets a hint line after it, marked
+`>`: `words::next` says what for a status, `words::next_after` for something
+done (a start that found no fleets), or `None`.
 
 **Naming:** the two sides share the words `Request`, `Response` and `Status`,
 and the module says which side: `protocol::Response` is what the supervisor
@@ -172,8 +178,9 @@ The supervisor never builds the sentence.
 `Status` in `ending.rs` (a new `Problem` or `Doubt` for a new reason). A
 `Status` variant also gives its exit code in `Status::exit_code`.
 
-**A hint after a status.** Add a match arm to `words::next` for that
-`Status`; `report` prints it under the status line. A status line says what
+**A hint after an ending.** Add a match arm to `words::next` for that
+`Status`, or to `words::next_after` for a `Response`; `report` prints it
+under the ending's lines. A status line says what
 is wrong; what to do about it goes in the hint, never after a semicolon.
 
 **A new kind of line** (say, `● info: …`). Add a variant to

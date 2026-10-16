@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use fleet_core::protocol::request;
 use fleet_core::tools::ServiceManager;
-use protocol::request;
 
 use crate::ending::{Problem, Response, Status};
 use crate::{Ask, client, start};

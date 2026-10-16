@@ -4,7 +4,7 @@
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
-pub use fleet_core::status::Status;
+pub use crate::status::Status;
 use serde::{Deserialize, Serialize};
 
 /// The longest line either side reads, in bytes.
@@ -52,16 +52,27 @@ pub mod request {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Start {
-        /// Turn every fleet on.
+        /// Re-read every fleet's config, then turn every project on.
         All,
+        /// Re-read every fleet's config, then turn this one project on.
+        Project {
+            /// The project, by its repository's root, absolute.
+            project: PathBuf,
+        },
     }
 
     /// What `fleet stop` asks.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Stop {
-        /// Turn every fleet off.
+        /// Turn every project off.
         All,
+        /// Turn this one project off; the rest of its fleet keeps its own on
+        /// or off.
+        Project {
+            /// The project, by its repository's root, absolute.
+            project: PathBuf,
+        },
     }
 }
 
@@ -111,19 +122,75 @@ pub mod response {
 
     /// What `fleet start` did.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    #[cfg_attr(feature = "specimen", derive(strum::EnumIter))]
     #[serde(rename_all = "snake_case")]
     pub enum Start {
-        /// Every fleet was turned on.
-        AllOn,
+        /// Every config was re-read and every project of each fleet that
+        /// read is on.
+        AllOn(AllOn),
+        /// One project is on.
+        ProjectOn(ProjectOn),
     }
 
     /// What `fleet stop` did.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Stop {
-        /// Every fleet was turned off.
+        /// Every project was turned off.
         AllOff,
+        /// One project is off.
+        ProjectOff(ProjectOff),
+    }
+
+    /// Every config was re-read; every project of each fleet whose config
+    /// read is on, and the rest stayed off.
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct AllOn {
+        /// The projects now on.
+        pub on: Vec<PathBuf>,
+        /// The fleets they belong to.
+        pub fleets: Vec<PathBuf>,
+        /// What re-reading the configs changed.
+        pub picked_up: Vec<PickedUp>,
+        /// The fleets whose config did not read, so their projects are off.
+        pub stayed_off: Vec<StayedOff>,
+    }
+
+    /// One project is on.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct ProjectOn {
+        /// The project.
+        pub project: PathBuf,
+        /// What re-reading the configs changed.
+        pub picked_up: Vec<PickedUp>,
+    }
+
+    /// One project is off; the rest of its fleet keeps its own on or off.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct ProjectOff {
+        /// The project.
+        pub project: PathBuf,
+        /// The other projects of its fleet, left as they were.
+        pub others: Vec<PathBuf>,
+    }
+
+    /// What re-reading one fleet's config changed in its projects.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct PickedUp {
+        /// The fleet.
+        pub fleet: PathBuf,
+        /// Projects its config now names.
+        pub added: Vec<PathBuf>,
+        /// Projects its config no longer names.
+        pub removed: Vec<PathBuf>,
+    }
+
+    /// A fleet whose config did not read, and why.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct StayedOff {
+        /// The fleet.
+        pub fleet: PathBuf,
+        /// Why its config did not read.
+        pub why: super::Status,
     }
 }
 
@@ -253,6 +320,12 @@ mod tests {
             Request::Hello,
             Request::Start(request::Start::All),
             Request::Stop(request::Stop::All),
+            Request::Start(request::Start::Project {
+                project: PathBuf::from("/c/app"),
+            }),
+            Request::Stop(request::Stop::Project {
+                project: PathBuf::from("/c/app"),
+            }),
             create,
         ];
         for req in requests {
@@ -269,7 +342,44 @@ mod tests {
             Reply::Response(Response::Hello(response::Hello {
                 version: "0.0.0".into(),
             })),
-            Reply::Response(Response::Start(response::Start::AllOn)),
+            Reply::Response(Response::Start(response::Start::AllOn(response::AllOn {
+                on: vec![PathBuf::from("/c/app")],
+                fleets: vec![PathBuf::from("/c/app")],
+                picked_up: vec![response::PickedUp {
+                    fleet: PathBuf::from("/f/w"),
+                    added: vec![PathBuf::from("/c/web")],
+                    removed: vec![],
+                }],
+                stayed_off: vec![response::StayedOff {
+                    fleet: PathBuf::from("/f/w"),
+                    why: Status::BadConfig {
+                        path: PathBuf::from("/f/w/fleet.toml"),
+                        line: Some(1),
+                        column: None,
+                        error: "expected `]`".into(),
+                    },
+                }],
+            }))),
+            Reply::Response(Response::Start(response::Start::ProjectOn(
+                response::ProjectOn {
+                    project: PathBuf::from("/c/app"),
+                    picked_up: vec![],
+                },
+            ))),
+            Reply::Response(Response::Stop(response::Stop::ProjectOff(
+                response::ProjectOff {
+                    project: PathBuf::from("/c/app"),
+                    others: vec![PathBuf::from("/c/api")],
+                },
+            ))),
+            Reply::Status(Status::CannotTurnOn {
+                project: PathBuf::from("/c/api"),
+                fleet: PathBuf::from("/f/w"),
+                why: Box::new(Status::AlsoClaimed {
+                    project: PathBuf::from("/c/api"),
+                    fleet: PathBuf::from("/f/a"),
+                }),
+            }),
             Reply::Response(Response::Stop(response::Stop::AllOff)),
             Reply::Response(Response::Create(response::Create {
                 directory: PathBuf::from("/f/work"),

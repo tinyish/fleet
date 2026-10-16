@@ -30,8 +30,8 @@ for onboarding; later capabilities appear only as directional slots.
 | Part | Does | Lives |
 | --- | --- | --- |
 | **fleet CLI** | Turns a command into a request to the supervisor and reports the answer. Writes nothing, except starting the supervisor through the service manager. | one command |
-| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns fleets on and off, launches and watches agents' sessions *(directional: arrives with the agent adapter)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
-| **state** | One SQLite file in the per-user state directory: the fleet registry, each fleet's on/off, its agents, the record of every step. | forever |
+| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions *(directional: arrives with the agent adapter)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
+| **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, its agents, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
 | **tmux server** *(directional: arrives with the agent adapter)* | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
 
@@ -42,14 +42,17 @@ keeps going, so it starts the supervisor and says so. With neither, it refuses
 with its own outcome, *supervisor not running*. Doctor never starts it: it
 reports it as not running.
 
-**Start and stop act on everything by default.** Start brings the
-supervisor up and turns every fleet on; stop turns every fleet off and brings
-the supervisor down. Acting on one fleet only is off the default path, and is
-asked for explicitly. Once started, the supervisor comes back after a logout
-or a reboot, and every fleet with it as it was, until stop. Starting a fleet
-re-reads its config. Once agents arrive with the agent adapter (directional),
-stopping leaves agents' sessions running and starting adopts the sessions
-still there.
+**Start and stop act on everything by default.** On and off belong to each
+project, not to its fleet. Start brings the supervisor up, re-reads every
+fleet's config and turns every project on; stop turns every project off and
+brings the supervisor down. Acting on one project only is off the default
+path, asked for with `--project`, one project at a time: in a wingman fleet,
+stopping one project leaves the others as they were. A fleet whose config does
+not read stays off, named with why, and the others still come on. Once
+started, the supervisor comes back after a logout or a reboot, and every
+project with it as it was, until stop. Once agents arrive with the agent
+adapter (directional), stopping leaves agents' sessions running and starting
+adopts the sessions still there.
 
 ## Outside tools
 
@@ -79,10 +82,10 @@ file.
 ```
                 ┌──────── fleet (bin) ────────┐
                 │                              │
-               cli ──────── protocol ──────── supervisor ──── state
+               cli                         supervisor ──── state
                 │                              │
                 └────────────► core ◄──────────┘
-                    rules + tool interfaces
+             rules + protocol + tool interfaces
                                 ▲
                 ┌───────────┬───┴───────┬────────────┐
              service       tmux        git     (agent, store: directional)
@@ -92,9 +95,8 @@ file.
 | --- | --- |
 | `fleet` | the binary: picks the CLI or the supervisor role |
 | `cli` | parsing, prompting, rendering outcomes, the socket client |
-| `protocol` | the requests, answers and outcomes between CLI and supervisor |
-| `supervisor` | the socket server, the loop that tends each fleet that is on |
-| `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle) and the tool interfaces; no I/O except through them |
+| `supervisor` | the socket server, and tending each project that is on |
+| `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle), the protocol the CLI and the supervisor speak (`core::protocol`: the requests and replies, and how they go on a stream), and the tool interfaces; no I/O except through them, and the protocol reads and writes only the stream it is handed |
 | `state` | the SQLite schema and its queries |
 | `service`, `tmux`, `git` | the drivers |
 
@@ -121,12 +123,17 @@ answers; the new fleet's projects come up on. Nothing is committed.
 
 **start / stop**, the default: start enables and loads the supervisor's unit
 through the service manager, waits for the supervisor to answer on the
-socket, then asks it to turn every fleet on. Stop asks the supervisor to turn
-every fleet off, then stops and disables the unit. Either says it could not
+socket, then asks it to re-read every fleet's config and turn every project
+on. Stop asks the supervisor to turn every project off, then stops and
+disables the unit. Either says it could not
 tell when the supervisor does not answer in time.
 
-**start / stop** one fleet, off the default path: the supervisor marks that
-fleet on or off. On, it reads the config; off, it stops tending the fleet.
+**start / stop** one project, off the default path (`--project`): start
+brings the supervisor up if it is down, re-reads every fleet's config so a
+project just added is found, and turns that one project on; stop turns it off.
+The other projects of its fleet keep their own on or off. Re-reading never
+changes an existing project's on or off: a project added comes in off, and
+one removed from its config is dropped.
 *(Directional, with the agent adapter: on, it launches or adopts each agent's
 session in tmux; off, it leaves the sessions alone.)*
 
@@ -135,8 +142,10 @@ each as fine, missing or could not tell, and whether the supervisor is
 running. It changes nothing.
 
 **Every command ends in one outcome:** done, refused (with a reason),
-supervisor not running, or could not tell. How each outcome reaches a script
-is the CLI contract's (see Boundaries).
+supervisor not running, or could not tell. A start that turned some projects
+on but left a fleet off ends refused, saying both what came on and which
+fleets stayed off and why. How each outcome reaches a script is the CLI
+contract's (see Boundaries).
 
 ## Invariants
 
@@ -155,6 +164,9 @@ is the CLI contract's (see Boundaries).
    CLI writes all of a command's wording and colour, help text included, in
    one file. The supervisor words only its own log, in one file of its own.
    How that works: [cli-output.md](cli-output.md).
+10. Every change to state commits in one transaction with the steps that
+    record it: the supervisor writes only inside `State::write`, so a change
+    and its record never part, and a failure part way changes nothing.
 
 ## Where things are on disk
 
@@ -173,7 +185,7 @@ None exists yet.
 | Boundary | Between | Authoritative form |
 | --- | --- | --- |
 | CLI | person or script ↔ `fleet` | *directional:* the transcript evals in `tests/cmd/` |
-| protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | *directional:* `crates/protocol/src/lib.rs` |
+| protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | *directional:* `crates/core/src/protocol.rs` |
 | state schema | supervisor ↔ state | *directional:* `crates/state/` migrations |
 | config file | person ↔ supervisor | *directional:* `crates/core/` config types |
 | tool interfaces | core ↔ drivers | *directional:* `crates/core/src/tools/` |
@@ -221,7 +233,7 @@ Linux, on arm64 and x86_64.
 | --- | --- |
 | fleet | a set of agents working on one or more repositories, defined by one fleet directory |
 | fleet directory | the directory holding a fleet's config file |
-| project | a git repository a fleet serves, named by its root |
+| project | a git repository a fleet serves, named by its root; each has its own on or off |
 | default fleet | a fleet whose directory is its one project's repository; its config file is left uncommitted there |
 | wingman fleet | a fleet whose directory is outside the repositories it serves, so it leaves no trace in them |
 | supervisor | the one long-running tinyfleet process per user |

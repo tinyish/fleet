@@ -1,24 +1,27 @@
-//! `fleet start`: the supervisor up, every fleet on. Also how any command
-//! that needs the supervisor brings it up.
+//! `fleet start`: the supervisor up, every config re-read, every project on.
+//! Also how any command that needs the supervisor brings it up.
 
 use std::path::Path;
 
 use fleet_core::tools::{ServiceManager, SupervisorUnit};
-use protocol::request;
 
-use crate::ending::{Doing, Doubt, During, Problem, Response, Startup, Status};
+use crate::ending::{Doing, Doubt, Problem, Response, Startup, Status};
 use crate::{Ask, client, ui, words};
 
 pub(crate) fn run(state_dir: &Path, service: &dyn ServiceManager) -> Result<Response, Status> {
     let socket = client::socket(state_dir)?;
     let startup = ensure_supervisor(state_dir, &socket, service, Ask::Yes)?;
-    let _ = client::start(&socket, request::Start::All, During::TurningOn(startup))?;
-    Ok(Response::Started { startup })
+    let response = client::start_all(&socket, startup)?;
+    if response.stayed_off.is_empty() {
+        Ok(Response::Started { response, startup })
+    } else {
+        Err(Status::PartlyOn { response, startup })
+    }
 }
 
 /// Makes sure the supervisor answers on `socket`, starting it when `ask`
-/// allows, and says how it found it. Starting it here does not turn any fleet
-/// on.
+/// allows, and says how it found it. Starting it here does not turn any
+/// project on.
 pub(crate) fn ensure_supervisor(
     state_dir: &Path,
     socket: &Path,

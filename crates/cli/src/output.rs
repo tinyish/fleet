@@ -123,31 +123,54 @@ pub(crate) fn line(mark: Mark, text: &str) {
     };
 }
 
-/// Prints how a command ended, in words, then what to do next when there is
-/// something to do, and returns its exit code.
-pub(crate) fn report(ending: &Result<Response, Status>) -> ExitCode {
-    match ending {
-        Ok(response) => {
-            line(Mark::Done, &words::response(response, OUT));
-            ExitCode::SUCCESS
+/// The lines an ending prints, each with its mark, then what to do next when
+/// there is something to do. Most endings are one line; a start that left
+/// some fleets off is a done line, then one error line per fleet.
+pub(crate) fn lines(ending: &Result<Response, Status>) -> Vec<(Mark, String)> {
+    let (mut lines, next) = match ending {
+        Ok(response) => (
+            vec![(Mark::Done, words::response(response, OUT))],
+            words::next_after(response, ERR),
+        ),
+        Err(status @ Status::PartlyOn { response, startup }) => {
+            let mut lines = vec![(Mark::Done, words::partly_on(response, *startup, OUT))];
+            for off in &response.stayed_off {
+                lines.push((Mark::Error, words::stayed_off(off, ERR)));
+            }
+            (lines, words::next(status, ERR))
         }
         Err(status) => {
             let mark = match status {
                 Status::CouldNotTell(_) => Mark::Warn,
                 _ => Mark::Error,
             };
-            line(mark, &words::status(status, ERR));
-            if let Some(next) = words::next(status, ERR) {
-                line(Mark::Next, &next);
-            }
-            ExitCode::from(status.exit_code())
+            (
+                vec![(mark, words::status(status, ERR))],
+                words::next(status, ERR),
+            )
         }
+    };
+    if let Some(next) = next {
+        lines.push((Mark::Next, next));
+    }
+    lines
+}
+
+/// Prints how a command ended and returns its exit code.
+pub(crate) fn report(ending: &Result<Response, Status>) -> ExitCode {
+    for (mark, text) in lines(ending) {
+        line(mark, &text);
+    }
+    match ending {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(status) => ExitCode::from(status.exit_code()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_core::protocol;
 
     #[test]
     fn piped_lines_have_no_symbol_and_errors_and_hints_keep_a_prefix() {
@@ -164,6 +187,27 @@ mod tests {
             shown(Mark::Next, "run fleet start", false),
             "hint: run fleet start"
         );
+    }
+
+    #[test]
+    fn a_partial_start_is_a_done_line_then_an_error_line_per_fleet_left_off() {
+        let off = |fleet: &str| protocol::response::StayedOff {
+            fleet: PathBuf::from(fleet),
+            why: protocol::Status::Missing {
+                path: PathBuf::from(fleet).join("fleet.toml"),
+            },
+        };
+        let ending = Err(Status::PartlyOn {
+            response: protocol::response::AllOn {
+                on: vec![PathBuf::from("/code/app")],
+                fleets: vec![PathBuf::from("/code/app")],
+                picked_up: vec![],
+                stayed_off: vec![off("/code/wing"), off("/code/blog")],
+            },
+            startup: crate::ending::Startup::WasRunning,
+        });
+        let marks: Vec<Mark> = lines(&ending).into_iter().map(|(m, _)| m).collect();
+        assert_eq!(marks, [Mark::Done, Mark::Error, Mark::Error, Mark::Next]);
     }
 
     #[test]

@@ -1,14 +1,15 @@
 //! Talking to the supervisor: one request, one reply, with timeouts.
 
+use fleet_core::protocol;
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::{ProtocolError, Reply, Request, Response, request, response};
+use fleet_core::protocol::{ProtocolError, Reply, Request, Response, request, response};
 
-use crate::ending::{Doubt, During, Problem, Status};
+use crate::ending::{Doubt, During, Problem, Startup, Status};
 
 /// How long one request may take.
 pub(crate) const ONE: Duration = Duration::from_secs(2);
@@ -85,34 +86,65 @@ pub(crate) fn create(socket: &Path, create: request::Create) -> Result<response:
     )
 }
 
-/// `fleet start`'s request, after the supervisor was found or started as
-/// `during` says.
-pub(crate) fn start(
-    socket: &Path,
-    start: request::Start,
-    during: During,
-) -> Result<response::Start, Status> {
+/// `fleet start`'s request for every project, after the supervisor was
+/// found or started as `startup` says.
+pub(crate) fn start_all(socket: &Path, startup: Startup) -> Result<response::AllOn, Status> {
     ask_for(
         socket,
-        &Request::Start(start),
-        during,
+        &Request::Start(request::Start::All),
+        During::TurningOn(startup),
         "start",
         |r| match r {
-            Response::Start(started) => Some(started),
+            Response::Start(response::Start::AllOn(all)) => Some(all),
             _ => None,
         },
     )
 }
 
-/// `fleet stop`'s request.
-pub(crate) fn stop(socket: &Path, stop: request::Stop) -> Result<response::Stop, Status> {
+/// `fleet start --project`'s request.
+pub(crate) fn start_project(
+    socket: &Path,
+    project: PathBuf,
+    startup: Startup,
+) -> Result<response::ProjectOn, Status> {
     ask_for(
         socket,
-        &Request::Stop(stop),
+        &Request::Start(request::Start::Project { project }),
+        During::TurningOnProject(startup),
+        "start --project",
+        |r| match r {
+            Response::Start(response::Start::ProjectOn(on)) => Some(on),
+            _ => None,
+        },
+    )
+}
+
+/// `fleet stop`'s request for every project.
+pub(crate) fn stop_all(socket: &Path) -> Result<(), Status> {
+    ask_for(
+        socket,
+        &Request::Stop(request::Stop::All),
         During::TurningOff,
         "stop",
         |r| match r {
-            Response::Stop(stopped) => Some(stopped),
+            Response::Stop(response::Stop::AllOff) => Some(()),
+            _ => None,
+        },
+    )
+}
+
+/// `fleet stop --project`'s request.
+pub(crate) fn stop_project(
+    socket: &Path,
+    project: PathBuf,
+) -> Result<response::ProjectOff, Status> {
+    ask_for(
+        socket,
+        &Request::Stop(request::Stop::Project { project }),
+        During::TurningOffProject,
+        "stop --project",
+        |r| match r {
+            Response::Stop(response::Stop::ProjectOff(off)) => Some(off),
             _ => None,
         },
     )
