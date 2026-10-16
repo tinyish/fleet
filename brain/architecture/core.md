@@ -41,11 +41,14 @@ CI or a script, it starts the supervisor without asking and says so. With
 neither, it refuses with its own outcome, *supervisor not running*. Doctor
 never starts it: it reports it as not running.
 
-**Start and stop act on one fleet by default**, and on the supervisor when
-pointed at it. Starting a fleet re-reads its config. Once agents arrive
-with the agent adapter (directional), stopping a fleet leaves its agents'
-sessions running, starting it adopts the sessions still there, and stopping
-the supervisor turns every fleet off and leaves every session running.
+**Start and stop act on everything by default.** Start brings the
+supervisor up and turns every fleet on; stop turns every fleet off and brings
+the supervisor down. Acting on one fleet only is off the default path, and is
+asked for explicitly. Once started, the supervisor comes back after a logout
+or a reboot, and every fleet with it as it was, until stop. Starting a fleet
+re-reads its config. Once agents arrive with the agent adapter (directional),
+stopping leaves agents' sessions running and starting adopts the sessions
+still there.
 
 ## Outside tools
 
@@ -109,14 +112,16 @@ directory above or below it, and says what it found. Otherwise it writes the
 config file, registers the fleet, records the step and answers. Nothing is
 committed.
 
-**start / stop** a fleet: the supervisor marks the fleet on or off. On, it
-reads the config; off, it stops tending the fleet. *(Directional, with the
-agent adapter: on, it launches or adopts each agent's session in tmux; off,
-it leaves the sessions alone.)*
+**start / stop**, the default: start enables and loads the supervisor's unit
+through the service manager, waits for the supervisor to answer on the
+socket, then asks it to turn every fleet on. Stop asks the supervisor to turn
+every fleet off, then stops and disables the unit. Either says it could not
+tell when the supervisor does not answer in time.
 
-**start / stop** the supervisor: the CLI loads or unloads its unit through the
-service manager, then waits for the supervisor to answer on the socket, or
-says it could not tell.
+**start / stop** one fleet, off the default path: the supervisor marks that
+fleet on or off. On, it reads the config; off, it stops tending the fleet.
+*(Directional, with the agent adapter: on, it launches or adopts each agent's
+session in tmux; off, it leaves the sessions alone.)*
 
 **doctor**: the CLI asks each driver to check its tool and reports
 each as fine, missing or could not tell, and whether the supervisor is
