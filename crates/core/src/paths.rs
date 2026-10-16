@@ -1,0 +1,166 @@
+//! Where tinyfleet keeps what it writes.
+
+use std::ffi::OsString;
+use std::fmt;
+use std::path::PathBuf;
+
+/// The operating systems tinyfleet runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    /// macOS.
+    MacOs,
+    /// Linux.
+    Linux,
+}
+
+impl Os {
+    /// The system this binary was built for, if tinyfleet runs on it.
+    #[must_use]
+    pub fn this() -> Option<Os> {
+        if cfg!(target_os = "macos") {
+            Some(Os::MacOs)
+        } else if cfg!(target_os = "linux") {
+            Some(Os::Linux)
+        } else {
+            None
+        }
+    }
+}
+
+/// Why the state directory could not be worked out.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PathError {
+    /// `HOME` is unset or empty.
+    NoHome,
+    /// A variable that must hold an absolute path holds a relative one.
+    NotAbsolute {
+        /// The variable's name.
+        var: &'static str,
+        /// What it held.
+        value: PathBuf,
+    },
+}
+
+impl fmt::Display for PathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PathError::NoHome => write!(f, "HOME is not set, so there is nowhere to keep state"),
+            PathError::NotAbsolute { var, value } => {
+                write!(f, "{var} must be an absolute path, not {}", value.display())
+            }
+        }
+    }
+}
+
+fn non_empty(var: &impl Fn(&str) -> Option<OsString>, name: &str) -> Option<PathBuf> {
+    var(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// The directory tinyfleet keeps its state in, for one user.
+///
+/// `FLEET_STATE_DIR` wins when set. Otherwise macOS uses
+/// `~/Library/Application Support/fleet` and Linux uses
+/// `$XDG_STATE_HOME/fleet` (when absolute) or `~/.local/state/fleet`.
+///
+/// # Errors
+///
+/// `NoHome` when the default needs `HOME` and it is unset or empty;
+/// `NotAbsolute` when `FLEET_STATE_DIR` is relative.
+pub fn state_dir(os: Os, var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, PathError> {
+    if let Some(dir) = non_empty(&var, "FLEET_STATE_DIR") {
+        if dir.is_absolute() {
+            return Ok(dir);
+        }
+        return Err(PathError::NotAbsolute {
+            var: "FLEET_STATE_DIR",
+            value: dir,
+        });
+    }
+    if os == Os::Linux
+        && let Some(xdg) = non_empty(&var, "XDG_STATE_HOME").filter(|p| p.is_absolute())
+    {
+        return Ok(xdg.join("fleet"));
+    }
+    let home = non_empty(&var, "HOME").ok_or(PathError::NoHome)?;
+    Ok(match os {
+        Os::MacOs => home.join("Library/Application Support/fleet"),
+        Os::Linux => home.join(".local/state/fleet"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + use<> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    #[test]
+    fn override_wins_on_both_systems() {
+        let var = env(&[("FLEET_STATE_DIR", "/tmp/f"), ("HOME", "/home/a")]);
+        assert_eq!(
+            state_dir(Os::MacOs, &var).ok(),
+            Some(PathBuf::from("/tmp/f"))
+        );
+        assert_eq!(
+            state_dir(Os::Linux, &var).ok(),
+            Some(PathBuf::from("/tmp/f"))
+        );
+    }
+
+    #[test]
+    fn relative_override_is_refused() {
+        let var = env(&[("FLEET_STATE_DIR", "rel/dir"), ("HOME", "/home/a")]);
+        assert!(matches!(
+            state_dir(Os::Linux, &var),
+            Err(PathError::NotAbsolute { .. })
+        ));
+    }
+
+    #[test]
+    fn macos_default_is_application_support() {
+        let var = env(&[("HOME", "/Users/a")]);
+        assert_eq!(
+            state_dir(Os::MacOs, &var).ok(),
+            Some(PathBuf::from("/Users/a/Library/Application Support/fleet"))
+        );
+    }
+
+    #[test]
+    fn linux_uses_absolute_xdg_state_home() {
+        let var = env(&[("XDG_STATE_HOME", "/x/state"), ("HOME", "/home/a")]);
+        assert_eq!(
+            state_dir(Os::Linux, &var).ok(),
+            Some(PathBuf::from("/x/state/fleet"))
+        );
+    }
+
+    #[test]
+    fn linux_ignores_relative_or_empty_xdg_state_home() {
+        for xdg in ["", "rel"] {
+            let var = env(&[("XDG_STATE_HOME", xdg), ("HOME", "/home/a")]);
+            assert_eq!(
+                state_dir(Os::Linux, &var).ok(),
+                Some(PathBuf::from("/home/a/.local/state/fleet"))
+            );
+        }
+    }
+
+    #[test]
+    fn no_home_is_an_error() {
+        let var = env(&[]);
+        assert!(matches!(state_dir(Os::MacOs, &var), Err(PathError::NoHome)));
+        let var = env(&[("HOME", "")]);
+        assert!(matches!(state_dir(Os::Linux, &var), Err(PathError::NoHome)));
+    }
+}

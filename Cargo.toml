@@ -9,8 +9,16 @@ rust-version = "1.99"
 repository = "https://github.com/tinyish/fleet"
 
 [workspace.dependencies]
+fleet-core = { path = "crates/core" }
+protocol = { path = "crates/protocol" }
+state = { path = "crates/state" }
+service = { path = "crates/service" }
 clap = { version = "4", features = ["derive"] }
 cli = { path = "crates/cli" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+supervisor = { path = "crates/supervisor" }
 
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -2 }

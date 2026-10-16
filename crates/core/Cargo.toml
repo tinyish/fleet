@@ -1,0 +1,13 @@
+[package]
+name = "fleet-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "fleet_core"
+
+[lints]
+workspace = true

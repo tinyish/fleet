@@ -93,7 +93,7 @@ file.
 | `cli` | parsing, prompting, rendering outcomes, the socket client |
 | `protocol` | the requests, answers and outcomes between CLI and supervisor |
 | `supervisor` | the socket server, the loop that tends each fleet that is on |
-| `core` | the rules (what a fleet is, when a create is refused, a fleet's lifecycle) and the tool interfaces; no I/O except through them |
+| `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle) and the tool interfaces; no I/O except through them |
 | `state` | the SQLite schema and its queries |
 | `service`, `tmux`, `git` | the drivers |
 
@@ -166,6 +166,16 @@ None exists yet.
 | config file | person ↔ supervisor | *directional:* `crates/core/` config types |
 | tool interfaces | core ↔ drivers | *directional:* `crates/core/src/tools/` |
 | install | person ↔ the GitHub release | *directional:* `install.sh` at the repository root |
+
+## Naming
+
+Names at every boundary (the state schema's tables and columns, the
+protocol's fields, the config file's keys) follow Google's API Improvement
+Proposals, the AIPs at [google.aip.dev](https://google.aip.dev). The one that
+comes up most is AIP-142: a point in time ends in `_time`, with its verb in
+the imperative (`create_time`, never `created_at`), and a time stored as an
+integer adds its unit as a final suffix, one of `seconds`, `millis`, `micros`
+or `nanos` (`occur_time_millis`).
 
 ## Install
 
