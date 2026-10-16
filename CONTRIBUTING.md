@@ -55,6 +55,12 @@ build from the program design. Neither ever sees a fleet-dtu scenario.
 
 **Alberto reviews and tests every piece.** Nothing moves on to the next piece
 until Alberto has reviewed the one before it and tested it on his machine.
+He reviews a piece as unstaged changes: the builder works on the branch the
+piece lands on and commits nothing while it is under review, not per task
+and not per review fix, so he can read and edit the whole piece in his
+working tree. When he says to land it, it becomes one commit (§ Commits). A
+document being refined with him stays uncommitted the same way, until he
+says it is good enough.
 
 **Where each truth lives:**
 
@@ -80,7 +86,7 @@ the same loop:
 2. **Build it piece by piece.** Each piece is an item with its program design
    on the bead. A builder writes the code.
 3. **Alberto reviews each piece and tests it on this machine** before the
-   next one starts.
+   next one starts. The piece waits for him as unstaged changes.
 4. **Write the evals** once the capability is built: from its journeys, and
    from the invariants found while building it (§ Evals).
 5. **Harvest the old specs.** Read the capability's files in `brain/specs/`
@@ -314,6 +320,8 @@ Every commit on a release or hotfix branch is **one item, squashed**:
   reader of the changelog.
 - One item per commit. No merge commits, no "fix review comments" commits:
   the squash hides the work branch's history.
+- Nothing is committed while a piece is under review. It waits as unstaged
+  changes and lands as one commit when Alberto says so.
 - The item's own bead records the verdict and the landing; the commit does
   not repeat them.
 - Board state (`.beads/`) is committed on the branch the work is on, as its

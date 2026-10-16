@@ -20,7 +20,9 @@ and it binds you. The rules you are most likely to break:
   for people; what binds your code is the contract each boundary names and the
   tests that check the invariants.
 - **One piece at a time.** Alberto reviews each piece and tests it on his
-  machine before the next one starts.
+  machine before the next one starts. Leave the piece as unstaged changes on
+  the branch it lands on: no commit per task or per review fix, even when a
+  skill says to commit. It becomes one commit when he says to land it.
 - **Declare the item's kind** (`behaviour`, `fix`, `internal` or `spec`) and
   name the journey, boundary or eval case it touches. A `behaviour` change edits
   the PRD or the architecture doc first. A `fix` adds its failing eval case
