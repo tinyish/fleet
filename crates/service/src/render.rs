@@ -2,17 +2,17 @@
 
 use std::path::{Path, PathBuf};
 
-use fleet_core::tools::{SupervisorUnit, ToolError};
+use fleet_core::tools::{BadUnitPath, SupervisorUnit, ToolError, UnitPath};
 
-fn text<'a>(path: &'a Path, what: &str) -> Result<&'a str, ToolError> {
-    let s = path.to_str().ok_or_else(|| {
-        ToolError(format!(
-            "the {what} path is not valid UTF-8: {}",
-            path.display()
-        ))
-    })?;
+fn text(path: &Path, which: UnitPath) -> Result<&str, ToolError> {
+    let bad = |why| ToolError::UnitPath {
+        which,
+        path: path.to_path_buf(),
+        why,
+    };
+    let s = path.to_str().ok_or_else(|| bad(BadUnitPath::NotUtf8))?;
     if s.contains('\n') {
-        return Err(ToolError(format!("the {what} path contains a newline")));
+        return Err(bad(BadUnitPath::Newline));
     }
     Ok(s)
 }
@@ -80,9 +80,9 @@ pub fn systemd_state_dir(text: &str) -> Option<PathBuf> {
 ///
 /// When a path is not UTF-8 or contains a newline.
 pub fn plist(unit: &SupervisorUnit, log: &Path) -> Result<String, ToolError> {
-    let program = xml(text(&unit.program, "program")?);
-    let state_dir = xml(text(&unit.state_dir, "state directory")?);
-    let log = xml(text(log, "log")?);
+    let program = xml(text(&unit.program, UnitPath::Program)?);
+    let state_dir = xml(text(&unit.state_dir, UnitPath::StateDir)?);
+    let log = xml(text(log, UnitPath::Log)?);
     let label = crate::LAUNCHD_LABEL;
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -124,11 +124,11 @@ pub fn plist(unit: &SupervisorUnit, log: &Path) -> Result<String, ToolError> {
 ///
 /// When a path is not UTF-8 or contains a newline.
 pub fn systemd_unit(unit: &SupervisorUnit) -> Result<String, ToolError> {
-    let program = systemd_quoted(text(&unit.program, "program")?, true);
+    let program = systemd_quoted(text(&unit.program, UnitPath::Program)?, true);
     let env = systemd_quoted(
         &format!(
             "FLEET_STATE_DIR={}",
-            text(&unit.state_dir, "state directory")?
+            text(&unit.state_dir, UnitPath::StateDir)?
         ),
         false,
     );

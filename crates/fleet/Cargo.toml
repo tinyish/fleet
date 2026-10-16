@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 cli.workspace = true
-fleet-core.workspace = true
 supervisor.workspace = true
 service.workspace = true
 

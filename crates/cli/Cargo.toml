@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 clap.workspace = true
+console.workspace = true
+cliclack.workspace = true
 fleet-core.workspace = true
 protocol.workspace = true
 

@@ -1,52 +1,60 @@
-//! `fleet start`: the supervisor up, every fleet on.
+//! `fleet start`: the supervisor up, every fleet on. Also how any command
+//! that needs the supervisor brings it up.
 
 use std::path::Path;
 
-use fleet_core::outcome::Outcome;
 use fleet_core::tools::{ServiceManager, SupervisorUnit};
-use protocol::{Answer, Request};
+use protocol::request;
 
-use crate::client;
+use crate::ending::{Doing, Doubt, During, Problem, Response, Startup, Status};
+use crate::{Ask, client, ui, words};
 
-pub(crate) fn run(state_dir: &Path, service: &dyn ServiceManager) -> Outcome {
-    let socket = match protocol::socket_path(state_dir) {
-        Ok(s) => s,
-        Err(e) => return Outcome::Refused(e.to_string()),
-    };
-    let was_running = client::answers(&socket);
-    if !was_running {
-        let program = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(e) => return Outcome::Refused(format!("cannot find this fleet binary: {e}")),
-        };
-        let unit = SupervisorUnit {
-            program,
-            state_dir: state_dir.to_path_buf(),
-        };
-        if let Err(e) = service.enable_and_start(&unit) {
-            return Outcome::Refused(format!(
-                "the service manager did not start the supervisor: {e}"
-            ));
-        }
-        if !client::wait_until(&socket, true) {
-            return Outcome::CouldNotTell(format!(
-                "the supervisor did not answer within {}s; its log: {}",
-                client::WAIT.as_secs(),
-                service.where_logs_go(state_dir)
-            ));
-        }
+pub(crate) fn run(state_dir: &Path, service: &dyn ServiceManager) -> Result<Response, Status> {
+    let socket = client::socket(state_dir)?;
+    let startup = ensure_supervisor(state_dir, &socket, service, Ask::Yes)?;
+    let response = client::start(&socket, request::Start::All, During::TurningOn(startup))?;
+    Ok(Response::Started { response, startup })
+}
+
+/// Makes sure the supervisor answers on `socket`, starting it when `ask`
+/// allows, and says how it found it. Starting it here does not turn any fleet
+/// on.
+pub(crate) fn ensure_supervisor(
+    state_dir: &Path,
+    socket: &Path,
+    service: &dyn ServiceManager,
+    ask: Ask,
+) -> Result<Startup, Status> {
+    if client::answers(socket) {
+        return Ok(Startup::WasRunning);
     }
-    let first = if was_running {
-        "the supervisor was already running"
-    } else {
-        "the supervisor is running"
+    let go = match ask {
+        Ask::Yes => true,
+        Ask::Never => false,
+        Ask::Terminal => ui::confirm(words::START_PROMPT, true),
     };
-    match client::ask(&socket, &Request::AllOn) {
-        Ok(Answer::Done { said }) => Outcome::Done(format!("{first}; {said}")),
-        Ok(Answer::Refused { reason }) => Outcome::Refused(reason),
-        Ok(Answer::Hello { .. }) => {
-            Outcome::CouldNotTell("the supervisor answered hello to all_on".into())
-        }
-        Err(e) => Outcome::CouldNotTell(format!("{first}, but turning every fleet on: {e}")),
+    if !go {
+        return Err(Status::NotRunning);
     }
+    let program = std::env::current_exe().map_err(|e| Status::Cannot(Problem::NoBinary(e)))?;
+    let unit = SupervisorUnit {
+        program,
+        state_dir: state_dir.to_path_buf(),
+    };
+    service.enable_and_start(&unit).map_err(|error| {
+        Status::Cannot(Problem::ServiceManager {
+            doing: Doing::Start,
+            error,
+        })
+    })?;
+    let spinner = ui::spinner(words::STARTING);
+    let up = client::wait_until(socket, true);
+    spinner.clear();
+    if !up {
+        return Err(Status::CouldNotTell(Doubt::NoAnswer {
+            waited: client::WAIT,
+            log: service.where_logs_go(state_dir),
+        }));
+    }
+    Ok(Startup::Started)
 }

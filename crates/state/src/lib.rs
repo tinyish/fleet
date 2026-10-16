@@ -1,17 +1,19 @@
 //! tinyfleet's state: one SQLite file per user, written only by the
 //! supervisor.
 
-use std::fmt;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fleet_core::fleets::Fleet;
 use rusqlite::{Connection, params};
 
 mod step;
 
 pub use step::{Record, Step};
 
-/// The schema version this code reads and writes.
+/// The schema version this code reads and writes. Until tinyfleet's first
+/// release every schema change goes into version 1 (see core.md § Boundaries).
 pub const SCHEMA_VERSION: i64 = 1;
 
 /// The open state file.
@@ -28,19 +30,10 @@ pub enum StateError {
     Newer(i64),
     /// A row's step could not be written or read back.
     Step(serde_json::Error),
-}
-
-impl fmt::Display for StateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StateError::Sqlite(e) => write!(f, "state: {e}"),
-            StateError::Newer(v) => write!(
-                f,
-                "state was written by a newer tinyfleet (schema {v}, this one knows {SCHEMA_VERSION})"
-            ),
-            StateError::Step(e) => write!(f, "state: a step in the record: {e}"),
-        }
-    }
+    /// A path is not valid UTF-8, so it cannot be stored.
+    NotUtf8(PathBuf),
+    /// Writing the fleet's config file failed; nothing was registered.
+    Config(io::Error),
 }
 
 impl From<rusqlite::Error> for StateError {
@@ -71,11 +64,77 @@ impl State {
                      step              TEXT    NOT NULL,
                      detail            TEXT    NOT NULL
                  );
+                 CREATE TABLE fleets (
+                     directory          TEXT    PRIMARY KEY,
+                     create_time_millis INTEGER NOT NULL
+                 );
+                 CREATE TABLE projects (
+                     directory TEXT    PRIMARY KEY,
+                     fleet     TEXT    NOT NULL REFERENCES fleets (directory) ON DELETE CASCADE,
+                     active    INTEGER NOT NULL
+                 );
                  PRAGMA user_version = 1;
                  COMMIT;",
             )?;
         }
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(State { conn })
+    }
+
+    /// Every registered fleet, by directory, with its projects sorted.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails.
+    pub fn fleets(&self) -> Result<Vec<Fleet>, StateError> {
+        let mut query = self.conn.prepare(
+            "SELECT f.directory, p.directory FROM fleets f
+             JOIN projects p ON p.fleet = f.directory
+             ORDER BY f.directory, p.directory",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut fleets: Vec<Fleet> = Vec::new();
+        for row in rows {
+            let (directory, project) = row?;
+            let directory = PathBuf::from(directory);
+            match fleets.last_mut() {
+                Some(last) if last.directory == directory => last.projects.push(project.into()),
+                _ => fleets.push(Fleet {
+                    directory,
+                    projects: vec![project.into()],
+                }),
+            }
+        }
+        Ok(fleets)
+    }
+
+    /// Registers `fleet`, its projects on, and runs `write_config` inside the
+    /// same transaction: if writing the config fails, nothing is registered.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails, a path is not UTF-8, or `write_config` fails.
+    pub fn create_fleet(
+        &mut self,
+        fleet: &Fleet,
+        write_config: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(), StateError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO fleets (directory, create_time_millis) VALUES (?1, ?2)",
+            params![utf8(&fleet.directory)?, now_millis()],
+        )?;
+        for project in &fleet.projects {
+            tx.execute(
+                "INSERT INTO projects (directory, fleet, active) VALUES (?1, ?2, 1)",
+                params![utf8(project)?, utf8(&fleet.directory)?],
+            )?;
+        }
+        write_config().map_err(StateError::Config)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Appends one step to the record.
@@ -121,6 +180,11 @@ impl State {
         }
         Ok(records)
     }
+}
+
+fn utf8(path: &Path) -> Result<&str, StateError> {
+    path.to_str()
+        .ok_or_else(|| StateError::NotUtf8(path.to_path_buf()))
 }
 
 fn now_millis() -> i64 {

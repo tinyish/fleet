@@ -30,16 +30,17 @@ for onboarding; later capabilities appear only as directional slots.
 | Part | Does | Lives |
 | --- | --- | --- |
 | **fleet CLI** | Turns a command into a request to the supervisor and reports the answer. Writes nothing, except starting the supervisor through the service manager. | one command |
-| **supervisor** | The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns fleets on and off, launches and watches agents' sessions *(directional: arrives with the agent adapter)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
+| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns fleets on and off, launches and watches agents' sessions *(directional: arrives with the agent adapter)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
 | **state** | One SQLite file in the per-user state directory: the fleet registry, each fleet's on/off, its agents, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
 | **tmux server** *(directional: arrives with the agent adapter)* | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
 
 **When the supervisor is down,** a command that needs it (create, and later
-commands) asks at a terminal whether to start it. With the opt-in flag, for
-CI or a script, it starts the supervisor without asking and says so. With
-neither, it refuses with its own outcome, *supervisor not running*. Doctor
-never starts it: it reports it as not running.
+commands) asks at a terminal whether to start it. With `--non-interactive`,
+for CI or a script, it never asks: wherever it would, it takes the answer that
+keeps going, so it starts the supervisor and says so. With neither, it refuses
+with its own outcome, *supervisor not running*. Doctor never starts it: it
+reports it as not running.
 
 **Start and stop act on everything by default.** Start brings the
 supervisor up and turns every fleet on; stop turns every fleet off and brings
@@ -106,11 +107,17 @@ Fitness tests fail the build when:
 
 ## How a command flows
 
-**create**, in a directory: the CLI sends the directory to the supervisor. The
-supervisor refuses if the registry already has a fleet there or in a
-directory above or below it, and says what it found. Otherwise it writes the
-config file, registers the fleet, records the step and answers. Nothing is
-committed.
+**create**, in a directory: the CLI sends the directory, and any `--project`
+paths, to the supervisor. With no `--project` the directory must be a git
+repository's root and is the fleet's one project: a default fleet. With
+`--project` it is a wingman fleet, outside the repositories it serves. The
+supervisor refuses a project that is not a repository's root, a wingman fleet
+inside one of its own projects, a fleet in a directory above or below another
+fleet's, a project another fleet already serves, and a config file already in
+the directory that no fleet owns. The same fleet asked for again is done,
+saying what it found. Otherwise, in one transaction, it registers the fleet,
+writes the config file without overwriting anything, records the step and
+answers; the new fleet's projects come up on. Nothing is committed.
 
 **start / stop**, the default: start enables and loads the supervisor's unit
 through the service manager, waits for the supervisor to answer on the
@@ -136,13 +143,18 @@ is the CLI contract's (see Boundaries).
 1. Only the supervisor writes state or any file in a fleet directory. The CLI's
    one write is the supervisor's service unit.
 2. No onboarding step commits to a repository.
-3. A directory holds at most one fleet, and no fleet directory is inside
-   another's.
+3. A directory holds at most one fleet, no fleet directory is inside
+   another's, and a repository belongs to at most one fleet.
 4. Stopping a fleet or the supervisor never ends an agent's session *(directional: arrives with the agent adapter)*.
 5. Nothing waits for an answer when there is no terminal.
 6. tinyfleet uses only its own tmux socket *(directional: arrives with the agent adapter)*.
 7. Only drivers start outside programs.
 8. Doctor changes nothing.
+9. Every word a command shows is the CLI's. The supervisor and the drivers
+   answer with facts (what happened, or why not), never with sentences; the
+   CLI writes all of a command's wording and colour, help text included, in
+   one file. The supervisor words only its own log, in one file of its own.
+   How that works: [cli-output.md](cli-output.md).
 
 ## Where things are on disk
 
@@ -161,11 +173,17 @@ None exists yet.
 | Boundary | Between | Authoritative form |
 | --- | --- | --- |
 | CLI | person or script ↔ `fleet` | *directional:* the transcript evals in `tests/cmd/` |
-| protocol | CLI ↔ supervisor | *directional:* `crates/protocol/src/lib.rs` |
+| protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | *directional:* `crates/protocol/src/lib.rs` |
 | state schema | supervisor ↔ state | *directional:* `crates/state/` migrations |
 | config file | person ↔ supervisor | *directional:* `crates/core/` config types |
 | tool interfaces | core ↔ drivers | *directional:* `crates/core/src/tools/` |
 | install | person ↔ the GitHub release | *directional:* `install.sh` at the repository root |
+
+**Until tinyfleet's first release, the state schema stays at version 1.** No
+state file exists outside development, so a schema change edits the one
+version-1 migration in place rather than adding a version; after such a change,
+delete your local state file (or point `FLEET_STATE_DIR` at a fresh
+directory). This holds until Alberto says otherwise.
 
 ## Naming
 
@@ -201,6 +219,9 @@ Linux, on arm64 and x86_64.
 | --- | --- |
 | fleet | a set of agents working on one or more repositories, defined by one fleet directory |
 | fleet directory | the directory holding a fleet's config file |
+| project | a git repository a fleet serves, named by its root |
+| default fleet | a fleet whose directory is its one project's repository; its config file is left uncommitted there |
+| wingman fleet | a fleet whose directory is outside the repositories it serves, so it leaves no trace in them |
 | supervisor | the one long-running tinyfleet process per user |
 | state | everything tinyfleet writes about its fleets, in one SQLite file |
 | store | where task items live, reached through an adapter (defined later) |

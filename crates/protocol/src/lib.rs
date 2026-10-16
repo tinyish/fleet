@@ -1,10 +1,10 @@
 //! What the CLI and the supervisor say to each other: one request and one
 //! answer per connection, each a single line of JSON.
 
-use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
+pub use fleet_core::status::Status;
 use serde::{Deserialize, Serialize};
 
 /// The longest line either side reads, in bytes.
@@ -14,40 +14,135 @@ pub const MAX_LINE: usize = 64 * 1024;
 /// this leaves room for both.
 pub const MAX_SOCKET_PATH: usize = 100;
 
-/// What the CLI asks the supervisor.
+/// What the CLI asks the supervisor, grouped by the command that asks it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Request {
     /// Are you there, and which version are you?
     Hello,
-    /// Turn every fleet on.
-    AllOn,
-    /// Turn every fleet off.
-    AllOff,
+    /// For `fleet create`.
+    Create(request::Create),
+    /// For `fleet start`.
+    Start(request::Start),
+    /// For `fleet stop`.
+    Stop(request::Stop),
 }
 
-/// What the supervisor answers.
+/// The requests of each command. Always written with the module, as in
+/// `request::Create`, since `response::Create` shares the name.
+pub mod request {
+    use serde::{Deserialize, Serialize};
+    use std::path::PathBuf;
+
+    /// What `fleet create` asks.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Create {
+        /// Create a fleet in `directory`. No `projects` means a default
+        /// fleet, its directory its one project; otherwise a wingman fleet.
+        Fleet {
+            /// The fleet directory, absolute.
+            directory: PathBuf,
+            /// The repositories a wingman fleet serves, absolute.
+            projects: Vec<PathBuf>,
+        },
+    }
+
+    /// What `fleet start` asks.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Start {
+        /// Turn every fleet on.
+        All,
+    }
+
+    /// What `fleet stop` asks.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Stop {
+        /// Turn every fleet off.
+        All,
+    }
+}
+
+/// What a request did, when the supervisor did it, grouped by the command
+/// that asked. Facts only, never sentences: the CLI writes every word a person
+/// reads (core.md invariant 9). The supervisor's whole reply is
+/// a [`Reply`]: this, or a [`Status`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Answer {
+pub enum Response {
     /// The supervisor is there.
-    Hello {
-        /// The supervisor's version.
-        version: String,
-    },
-    /// The request was done.
-    Done {
-        /// What was found or done, for a person.
-        said: String,
-    },
-    /// The request was refused.
-    Refused {
-        /// Why, for a person.
-        reason: String,
-    },
+    Hello(response::Hello),
+    /// What `fleet create` did.
+    Create(response::Create),
+    /// What `fleet start` did.
+    Start(response::Start),
+    /// What `fleet stop` did.
+    Stop(response::Stop),
 }
 
-/// A request or answer could not be sent or read.
+/// The responses of each command. Always written with the module, as in
+/// `response::Create`, since `request::Create` shares the name.
+pub mod response {
+    use serde::{Deserialize, Serialize};
+    use std::path::PathBuf;
+
+    /// The supervisor is there.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Hello {
+        /// The supervisor's version.
+        pub version: String,
+    }
+
+    /// What `fleet create` did: the fleet in `directory`, serving
+    /// `projects` (its directory alone for a default fleet, the repositories
+    /// it serves for a wingman fleet).
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Create {
+        /// The fleet directory.
+        pub directory: PathBuf,
+        /// The projects it serves.
+        pub projects: Vec<PathBuf>,
+        /// Whether create made the fleet; `false` when the same fleet was
+        /// already there and nothing changed.
+        pub created: bool,
+    }
+
+    /// What `fleet start` did.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Start {
+        /// Every fleet was turned on.
+        AllOn,
+    }
+
+    /// What `fleet stop` did.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Stop {
+        /// Every fleet was turned off.
+        AllOff,
+    }
+}
+
+/// The supervisor's whole reply to one request: what it did, or why not.
+/// On the wire, `{"response": …}` or `{"status": …}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reply {
+    /// The request was done; this is what happened.
+    Response(Response),
+    /// The request was refused; this is why.
+    Status(Status),
+}
+
+/// The socket path would not fit in a Unix socket address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SocketPathTooLong(pub PathBuf);
+
+/// The conversation with the other side failed: the socket, a line that is
+/// garbled, missing or too long. Never a reply.
 #[derive(Debug)]
 pub enum ProtocolError {
     /// The socket failed.
@@ -58,25 +153,6 @@ pub enum ProtocolError {
     Empty,
     /// The line was longer than `MAX_LINE`.
     TooLong,
-    /// The socket path would be longer than `MAX_SOCKET_PATH`.
-    PathTooLong(PathBuf),
-}
-
-impl fmt::Display for ProtocolError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProtocolError::Io(e) => write!(f, "{e}"),
-            ProtocolError::Malformed(e) => write!(f, "could not understand the other side: {e}"),
-            ProtocolError::Empty => f.write_str("the other side closed without answering"),
-            ProtocolError::TooLong => write!(f, "a line longer than {MAX_LINE} bytes"),
-            ProtocolError::PathTooLong(p) => write!(
-                f,
-                "the socket path {} is longer than {MAX_SOCKET_PATH} bytes; \
-                 set FLEET_STATE_DIR to a shorter directory",
-                p.display()
-            ),
-        }
-    }
 }
 
 impl From<io::Error> for ProtocolError {
@@ -89,11 +165,11 @@ impl From<io::Error> for ProtocolError {
 ///
 /// # Errors
 ///
-/// `PathTooLong` when the path would not fit in a Unix socket address.
-pub fn socket_path(state_dir: &Path) -> Result<PathBuf, ProtocolError> {
+/// When the path would not fit in a Unix socket address.
+pub fn socket_path(state_dir: &Path) -> Result<PathBuf, SocketPathTooLong> {
     let path = state_dir.join("supervisor.sock");
     if path.as_os_str().len() > MAX_SOCKET_PATH {
-        return Err(ProtocolError::PathTooLong(path));
+        return Err(SocketPathTooLong(path));
     }
     Ok(path)
 }
@@ -138,21 +214,21 @@ pub fn read_request(r: &mut impl BufRead) -> Result<Request, ProtocolError> {
     read_line(r)
 }
 
-/// Sends one answer.
+/// Sends one reply.
 ///
 /// # Errors
 ///
 /// When the socket fails.
-pub fn write_answer(w: &mut impl Write, a: &Answer) -> Result<(), ProtocolError> {
-    write_line(w, a)
+pub fn write_reply(w: &mut impl Write, reply: &Reply) -> Result<(), ProtocolError> {
+    write_line(w, reply)
 }
 
-/// Reads one answer.
+/// Reads one reply.
 ///
 /// # Errors
 ///
-/// When the socket fails or the line is empty, too long or not an answer.
-pub fn read_answer(r: &mut impl BufRead) -> Result<Answer, ProtocolError> {
+/// When the socket fails or the line is empty, too long or not a reply.
+pub fn read_reply(r: &mut impl BufRead) -> Result<Reply, ProtocolError> {
     read_line(r)
 }
 
@@ -163,7 +239,17 @@ mod tests {
 
     #[test]
     fn every_request_round_trips() {
-        for req in [Request::Hello, Request::AllOn, Request::AllOff] {
+        let create = Request::Create(request::Create::Fleet {
+            directory: PathBuf::from("/f/my work"),
+            projects: vec![PathBuf::from("/c/app")],
+        });
+        let requests = [
+            Request::Hello,
+            Request::Start(request::Start::All),
+            Request::Stop(request::Stop::All),
+            create,
+        ];
+        for req in requests {
             let mut buf = Vec::new();
             write_request(&mut buf, &req).ok();
             assert_eq!(buf.last(), Some(&b'\n'));
@@ -172,30 +258,51 @@ mod tests {
     }
 
     #[test]
-    fn every_answer_round_trips() {
-        let answers = [
-            Answer::Hello {
+    fn every_reply_round_trips() {
+        let replies = [
+            Reply::Response(Response::Hello(response::Hello {
                 version: "0.0.0".into(),
-            },
-            Answer::Done {
-                said: "every fleet is on".into(),
-            },
-            Answer::Refused {
-                reason: "no".into(),
-            },
+            })),
+            Reply::Response(Response::Start(response::Start::AllOn)),
+            Reply::Response(Response::Stop(response::Stop::AllOff)),
+            Reply::Response(Response::Create(response::Create {
+                directory: PathBuf::from("/f/work"),
+                projects: vec![PathBuf::from("/c/app")],
+                created: true,
+            })),
+            Reply::Status(Status::AlreadyServed {
+                project: PathBuf::from("/c/app"),
+                fleet: PathBuf::from("/f/work"),
+            }),
+            Reply::Status(Status::Missing {
+                path: PathBuf::from("/x"),
+            }),
         ];
-        for ans in answers {
+        for reply in replies {
             let mut buf = Vec::new();
-            write_answer(&mut buf, &ans).ok();
-            assert_eq!(read_answer(&mut Cursor::new(buf)).ok(), Some(ans));
+            write_reply(&mut buf, &reply).ok();
+            assert_eq!(read_reply(&mut Cursor::new(buf)).ok(), Some(reply));
         }
     }
 
     #[test]
-    fn the_wire_form_is_stable() {
+    fn the_wire_nests_by_command_and_never_carries_a_sentence() {
         let mut buf = Vec::new();
-        write_request(&mut buf, &Request::AllOn).ok();
-        assert_eq!(buf, b"\"all_on\"\n");
+        write_request(&mut buf, &Request::Start(request::Start::All)).ok();
+        assert_eq!(buf, b"{\"start\":\"all\"}\n");
+        let mut buf = Vec::new();
+        write_reply(
+            &mut buf,
+            &Reply::Response(Response::Stop(response::Stop::AllOff)),
+        )
+        .ok();
+        assert_eq!(buf, b"{\"response\":{\"stop\":\"all_off\"}}\n");
+        let mut buf = Vec::new();
+        let missing = Status::Missing {
+            path: PathBuf::from("/x"),
+        };
+        write_reply(&mut buf, &Reply::Status(missing)).ok();
+        assert_eq!(buf, b"{\"status\":{\"missing\":{\"path\":\"/x\"}}}\n");
     }
 
     #[test]
@@ -215,7 +322,7 @@ mod tests {
         let long = format!("/{}", "d".repeat(120));
         assert!(matches!(
             socket_path(Path::new(&long)),
-            Err(ProtocolError::PathTooLong(_))
+            Err(SocketPathTooLong(_))
         ));
     }
 }

@@ -20,6 +20,13 @@ pub enum Step {
     EveryFleetOn,
     /// Every fleet was turned off.
     EveryFleetOff,
+    /// A fleet was created.
+    FleetCreated {
+        /// Its directory.
+        directory: String,
+        /// The projects it serves.
+        projects: Vec<String>,
+    },
 }
 
 /// One row of the record, as read back.
@@ -76,6 +83,10 @@ mod tests {
             },
             Step::EveryFleetOn,
             Step::EveryFleetOff,
+            Step::FleetCreated {
+                directory: "/f/work".into(),
+                projects: vec!["/c/app".into()],
+            },
         ]
     }
 
@@ -96,7 +107,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["SUPERVISOR_STARTED", "EVERY_FLEET_ON", "EVERY_FLEET_OFF"]
+            [
+                "SUPERVISOR_STARTED",
+                "EVERY_FLEET_ON",
+                "EVERY_FLEET_OFF",
+                "FLEET_CREATED"
+            ]
         );
     }
 

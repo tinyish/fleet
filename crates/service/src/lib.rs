@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use fleet_core::paths::Os;
-use fleet_core::tools::{ServiceManager, ToolError};
+use fleet_core::tools::{FileStep, ServiceManager, ToolError};
 
 /// The supervisor's launchd label.
 pub const LAUNCHD_LABEL: &str = "com.tinyish.fleet.supervisor";
@@ -34,22 +34,33 @@ pub fn for_this_os() -> Option<Box<dyn ServiceManager>> {
     }
 }
 
-/// Runs one outside program and returns its output, or the tool's message
+/// Runs one outside program and returns its output, or what went wrong
 /// when it fails to start or exits non-zero.
 fn run(program: &str, args: &[&OsStr]) -> Result<Output, ToolError> {
-    let out = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| ToolError(format!("{program}: {e}")))?;
+    let out =
+        Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|error| ToolError::CouldNotRun {
+                program: program.to_owned(),
+                error,
+            })?;
     if out.status.success() {
         Ok(out)
     } else {
-        let said = String::from_utf8_lossy(&out.stderr);
-        Err(ToolError(format!(
-            "{program} {}: {}",
-            describe(args),
-            said.trim()
-        )))
+        Err(ToolError::Failed {
+            command: format!("{program} {}", describe(args)),
+            said: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        })
+    }
+}
+
+/// A file step that failed, as a `ToolError`.
+fn file(doing: FileStep, path: &Path, error: std::io::Error) -> ToolError {
+    ToolError::File {
+        doing,
+        path: path.to_path_buf(),
+        error,
     }
 }
 
@@ -58,11 +69,10 @@ fn run(program: &str, args: &[&OsStr]) -> Result<Output, ToolError> {
 /// the supervisor of another one.
 fn check_owner(installed: Option<PathBuf>, ours: &Path) -> Result<(), ToolError> {
     match installed {
-        Some(theirs) if theirs != ours => Err(ToolError(format!(
-            "the installed supervisor serves {}, not {}; stop it from that state directory first",
-            theirs.display(),
-            ours.display()
-        ))),
+        Some(theirs) if theirs != ours => Err(ToolError::OwnedElsewhere {
+            theirs,
+            ours: ours.to_path_buf(),
+        }),
         _ => Ok(()),
     }
 }
@@ -83,13 +93,14 @@ mod tests {
         let ours = Path::new("/tmp/ours");
         assert!(check_owner(None, ours).is_ok());
         assert!(check_owner(Some(PathBuf::from("/tmp/ours")), ours).is_ok());
-        let err = check_owner(Some(PathBuf::from("/real/fleet")), ours)
-            .err()
-            .map(|e| e.0)
-            .unwrap_or_default();
+        let err = check_owner(Some(PathBuf::from("/real/fleet")), ours).err();
         assert!(
-            err.contains("/real/fleet") && err.contains("/tmp/ours"),
-            "{err}"
+            matches!(
+                &err,
+                Some(ToolError::OwnedElsewhere { theirs, ours: o })
+                    if theirs == Path::new("/real/fleet") && o == ours
+            ),
+            "{err:?}"
         );
     }
 }

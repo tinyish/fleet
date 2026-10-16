@@ -2,31 +2,57 @@
 //! ends.
 
 mod client;
+mod create;
+mod ending;
+mod output;
 mod start;
 mod stop;
+mod theme;
+mod ui;
+mod words;
 
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use fleet_core::outcome::Outcome;
 use fleet_core::paths::{Os, state_dir};
 use fleet_core::tools::ServiceManager;
 
-/// tinyfleet runs AI coding agents on your projects.
+use crate::ending::{Problem, Response, Status};
+
+// The invocation as clap parses it. Its help text is in words.rs.
 #[derive(Debug, Parser)]
-#[command(name = "fleet", version, arg_required_else_help = true)]
+#[command(
+    name = "fleet",
+    version,
+    about = words::ABOUT,
+    arg_required_else_help = true
+)]
 struct Args {
+    #[arg(long, global = true, help = words::NON_INTERACTIVE_HELP)]
+    non_interactive: bool,
     #[command(subcommand)]
-    command: Command,
+    request: Request,
 }
 
+// What the person asked the CLI to do. The CLI's side of the vocabulary:
+// a `Request` in, `Result<Response, Status>` out (see `ending`). Doc
+// comments here would become help text, so these are plain comments.
 #[derive(Debug, Subcommand)]
-enum Command {
-    /// Start the supervisor and turn every fleet on; it comes back after a reboot until stop
+enum Request {
+    // `fleet create`, with any `--project` paths.
+    #[command(about = words::CREATE_ABOUT)]
+    Create {
+        #[arg(long = "project", value_name = "PATH", help = words::PROJECT_HELP)]
+        projects: Vec<PathBuf>,
+    },
+    // `fleet start`.
+    #[command(about = words::START_ABOUT)]
     Start,
-    /// Turn every fleet off and stop the supervisor, so it does not come back
+    // `fleet stop`.
+    #[command(about = words::STOP_ABOUT)]
     Stop,
 }
 
@@ -46,32 +72,38 @@ where
             return ExitCode::from(u8::try_from(code).unwrap_or(2));
         }
     };
-    report(&decide(&args, service))
+    output::report(&decide(&args, service))
 }
 
-fn decide(args: &Args, service: Option<&dyn ServiceManager>) -> Outcome {
+fn decide(args: &Args, service: Option<&dyn ServiceManager>) -> Result<Response, Status> {
     let (Some(os), Some(service)) = (Os::this(), service) else {
-        return Outcome::Refused("tinyfleet runs on macOS and Linux only".into());
+        return Err(Status::Cannot(Problem::UnsupportedOs));
     };
     let dir = match state_dir(os, |name| std::env::var_os(name)) {
         Ok(dir) => dir,
-        Err(e) => return Outcome::Refused(e.to_string()),
+        Err(e) => return Err(Status::Cannot(Problem::StateDir(e))),
     };
-    match args.command {
-        Command::Start => start::run(&dir, service),
-        Command::Stop => stop::run(&dir, service),
+    let ask = if args.non_interactive {
+        Ask::Yes
+    } else if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        Ask::Terminal
+    } else {
+        Ask::Never
+    };
+    match &args.request {
+        Request::Create { projects } => create::run(&dir, service, ask, projects),
+        Request::Start => start::run(&dir, service),
+        Request::Stop => stop::run(&dir, service),
     }
 }
 
-fn report(outcome: &Outcome) -> ExitCode {
-    let _ = match outcome {
-        Outcome::Done(said) => writeln!(io::stdout(), "{said}"),
-        Outcome::Refused(why) | Outcome::CouldNotTell(why) => {
-            writeln!(io::stderr(), "fleet: {why}")
-        }
-        Outcome::SupervisorNotRunning => {
-            writeln!(io::stderr(), "fleet: the supervisor is not running")
-        }
-    };
-    ExitCode::from(outcome.exit_code())
+/// Whether a command may ask before doing something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ask {
+    /// `--non-interactive`: never ask, take the answer that keeps going.
+    Yes,
+    /// A person at a terminal: ask.
+    Terminal,
+    /// No terminal and no `--non-interactive`: never ask, and do not go on.
+    Never,
 }

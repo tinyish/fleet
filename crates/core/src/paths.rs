@@ -1,7 +1,6 @@
 //! Where tinyfleet keeps what it writes.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::path::PathBuf;
 
 /// The operating systems tinyfleet runs on.
@@ -39,17 +38,6 @@ pub enum PathError {
         /// What it held.
         value: PathBuf,
     },
-}
-
-impl fmt::Display for PathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PathError::NoHome => write!(f, "HOME is not set, so there is nowhere to keep state"),
-            PathError::NotAbsolute { var, value } => {
-                write!(f, "{var} must be an absolute path, not {}", value.display())
-            }
-        }
-    }
 }
 
 fn non_empty(var: &impl Fn(&str) -> Option<OsString>, name: &str) -> Option<PathBuf> {
