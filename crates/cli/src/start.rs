@@ -12,8 +12,8 @@ use crate::{Ask, client, ui, words};
 pub(crate) fn run(state_dir: &Path, service: &dyn ServiceManager) -> Result<Response, Status> {
     let socket = client::socket(state_dir)?;
     let startup = ensure_supervisor(state_dir, &socket, service, Ask::Yes)?;
-    let response = client::start(&socket, request::Start::All, During::TurningOn(startup))?;
-    Ok(Response::Started { response, startup })
+    let _ = client::start(&socket, request::Start::All, During::TurningOn(startup))?;
+    Ok(Response::Started { startup })
 }
 
 /// Makes sure the supervisor answers on `socket`, starting it when `ask`

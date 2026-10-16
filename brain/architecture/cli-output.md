@@ -49,7 +49,7 @@ only when its stream is a terminal**.
 
 | | On a terminal | Piped (a script, a file, `\| less`) |
 | --- | --- | --- |
-| Done line (stdout) | `◆ created a fleet in /code/app; fleet.toml is uncommitted` | `created a fleet in /code/app; fleet.toml is uncommitted` |
+| Done line (stdout) | `◆ created a fleet in /code/app -- welcome aboard` | `created a fleet in /code/app -- welcome aboard` |
 | Refusal (stderr) | `■ /code/app/src is inside the repository at /code/app` | `fleet: /code/app/src is inside the repository at /code/app` |
 | Could not tell (stderr) | `▲ the supervisor did not answer within 10s` | `fleet: the supervisor did not answer within 10s` |
 | Hint (stderr), under the line it follows | `> run fleet create in /code/app, or pass --project for a wingman fleet` | `hint: run fleet create in /code/app, or pass --project for a wingman fleet` |
@@ -104,12 +104,12 @@ variable parts are wrapped:
 
 ```rust
 // words.rs
-// response::Create is { directory, projects, created }; here, created and a default fleet
-if created && default => format!(
-    "created a fleet in {}; {} is uncommitted",
+// response::Create is { directory, projects, created }; here, a new wingman fleet
+format!(
+    "created a wingman fleet in {} serving {}",
     ink.path(directory),          // accent, on the ink's stream
-    ink.accent("fleet.toml"),
-),
+    ink.paths(projects),          // each path accented, joined with commas
+)
 ```
 
 A command never builds a sentence. It ends with data, and `output::report`

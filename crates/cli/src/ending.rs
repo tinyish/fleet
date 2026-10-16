@@ -28,8 +28,6 @@ pub(crate) enum Response {
     },
     /// `fleet start` did this.
     Started {
-        /// What the supervisor said start did.
-        response: protocol::response::Start,
         /// Whether start found the supervisor running or started it.
         startup: Startup,
     },

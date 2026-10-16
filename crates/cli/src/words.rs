@@ -56,12 +56,16 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
         Response::Created {
             response,
             startup: Startup::Started,
-        } => format!("{}; {}", started_supervisor(ink), created(response, ink)),
+        } => format!("{}; {}", started_supervisor(), created(response, ink)),
         Response::Created { response, .. } => created(response, ink),
-        Response::Started { response, startup } => {
-            format!("{}; {}", supervisor_was(*startup), started(response))
-        }
-        Response::SupervisorStopped => "every fleet is off; the supervisor is stopped".into(),
+        Response::Started {
+            startup: Startup::Started,
+        } => format!(
+            "{} -- cleared for takeoff",
+            supervisor_was(Startup::Started)
+        ),
+        Response::Started { startup, .. } => supervisor_was(*startup).to_owned(),
+        Response::SupervisorStopped => "the supervisor is stopped".into(),
         Response::SupervisorWasNotRunning => "the supervisor was not running".into(),
     }
 }
@@ -83,13 +87,12 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
     let project_flag = ink.accent("--project");
     Some(match status {
         Status::NotRunning => format!("run {} to start it", ink.accent("fleet start")),
-        Status::Refused(protocol::Status::DirectoryNotInRepo { .. }) => format!(
-            "run {create} at a repository's root, or pass {project_flag} for a wingman fleet"
-        ),
-        Status::Refused(protocol::Status::DirectoryNotRepoRoot { root, .. }) => format!(
-            "run {create} in {}, or pass {project_flag} for a wingman fleet",
-            ink.path(root)
-        ),
+        Status::Refused(protocol::Status::DirectoryNotInRepo { .. }) => {
+            format!("run {create} at a repository's root")
+        }
+        Status::Refused(protocol::Status::DirectoryNotRepoRoot { root, .. }) => {
+            format!("run {create} in {}", ink.path(root))
+        }
         Status::Refused(protocol::Status::ProjectNotRepoRoot { root, .. }) => {
             format!("pass the repository's root, {}, instead", ink.path(root))
         }
@@ -142,9 +145,8 @@ fn created(response: &protocol::response::Create, ink: Ink) -> String {
     }
     if projects.len() == 1 && projects[0] == *directory {
         return format!(
-            "created a fleet in {}; {} is uncommitted",
+            "created a fleet in {} -- welcome aboard",
             ink.path(directory),
-            ink.accent("fleet.toml")
         );
     }
     format!(
@@ -152,13 +154,6 @@ fn created(response: &protocol::response::Create, ink: Ink) -> String {
         ink.path(directory),
         ink.paths(projects)
     )
-}
-
-/// What the supervisor said start did.
-fn started(response: &protocol::response::Start) -> String {
-    match response {
-        protocol::response::Start::AllOn => "every fleet is on".into(),
-    }
 }
 
 /// Why the supervisor said no.
@@ -351,16 +346,25 @@ fn supervisor_was(startup: Startup) -> &'static str {
 }
 
 /// Said when a command had to start the supervisor itself.
-fn started_supervisor(ink: Ink) -> String {
-    format!(
-        "started the supervisor (it comes back after a reboot until {})",
-        ink.accent("fleet stop")
-    )
+fn started_supervisor() -> String {
+    "started the supervisor".to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flavour_stays_out_of_failures() {
+        let failed = status(
+            &Status::CouldNotTell(Doubt::Socket {
+                during: During::TurningOn(Startup::Started),
+                error: ProtocolError::Empty,
+            }),
+            crate::output::ERR,
+        );
+        assert!(!failed.contains("takeoff"), "{failed}");
+    }
 
     #[test]
     fn a_path_is_quoted_for_the_shell_only_when_it_needs_it() {

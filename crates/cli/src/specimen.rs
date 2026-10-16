@@ -194,12 +194,7 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
             })
             .collect(),
         ResponseKind::Started => response::Start::iter()
-            .flat_map(|response| {
-                Startup::iter().map(move |startup| Response::Started {
-                    response: response.clone(),
-                    startup,
-                })
-            })
+            .flat_map(|_| Startup::iter().map(move |startup| Response::Started { startup }))
             .collect(),
         ResponseKind::SupervisorStopped => vec![Response::SupervisorStopped],
         ResponseKind::SupervisorWasNotRunning => vec![Response::SupervisorWasNotRunning],
