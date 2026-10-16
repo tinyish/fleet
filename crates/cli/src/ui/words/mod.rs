@@ -8,8 +8,8 @@ use fleet_core::protocol;
 use fleet_core::protocol::ProtocolError;
 use fleet_core::tools::{BadUnitPath, FileStep, ToolError, UnitPath};
 
-use crate::ending::{Doing, Doubt, During, Problem, Response, Startup, Status};
-use crate::output::Ink;
+use crate::protocol::{Doing, Doubt, During, Problem, Response, Startup, Status};
+use crate::ui::output::Ink;
 
 mod doctor;
 pub(crate) use doctor::{HEALTHY, checked, found, found_next, verdict};
@@ -88,7 +88,7 @@ pub(crate) fn status(status: &Status, ink: Ink) -> String {
         Status::Cannot(problem) => cannot(problem, ink),
         Status::NotRunning => "the supervisor is not running".into(),
         Status::CouldNotTell(doubt) => unsure(doubt),
-        // output.rs prints these as a done line and one line per fleet that
+        // `output` prints these as a done line and one line per fleet that
         // stayed off; this is the same in one line.
         Status::PartlyOn { response, .. } => response
             .stayed_off
@@ -569,7 +569,7 @@ mod tests {
                 during: During::TurningOn(Startup::Started),
                 error: ProtocolError::Empty,
             }),
-            crate::output::ERR,
+            crate::ui::output::ERR,
         );
         assert!(!failed.contains("takeoff"), "{failed}");
     }
@@ -579,7 +579,7 @@ mod tests {
         let status = Status::Refused(protocol::Status::NotServed {
             path: "/code/web".into(),
         });
-        assert_eq!(next(&status, crate::output::ERR), None);
+        assert_eq!(next(&status, crate::ui::output::ERR), None);
     }
 
     #[test]

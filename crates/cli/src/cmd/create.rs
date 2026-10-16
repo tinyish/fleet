@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use fleet_core::protocol::request;
 use fleet_core::tools::ServiceManager;
 
-use crate::ending::{Problem, Response, Status};
-use crate::{Ask, client, start};
+use crate::cmd::start;
+use crate::protocol::{Problem, Response, Status};
+use crate::{Ask, client};
 
 pub(crate) fn run(
     state_dir: &Path,

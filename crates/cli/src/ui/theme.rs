@@ -11,7 +11,7 @@ use std::fmt::Write;
 use cliclack::{Theme, ThemeState};
 use console::{Style, style};
 
-use crate::words;
+use crate::ui::words;
 
 /// The palette, on a true-colour terminal: Tailwind's sky-400, green-400,
 /// slate-500, red-400 and yellow-300.

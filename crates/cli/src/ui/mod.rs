@@ -2,11 +2,15 @@
 //! cliclack in tinyfleet's theme. Each one shows only on a terminal, so a
 //! script reads plain lines.
 
+pub(crate) mod output;
+pub(crate) mod theme;
+pub(crate) mod words;
+
 use std::sync::Once;
 
 use cliclack::ProgressBar;
 
-use crate::theme::FleetTheme;
+use crate::ui::theme::FleetTheme;
 
 static THEME: Once = Once::new();
 

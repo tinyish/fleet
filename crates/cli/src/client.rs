@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use fleet_core::protocol::{ProtocolError, Reply, Request, Response, request, response};
 
-use crate::ending::{Doubt, During, Problem, Startup, Status};
+use crate::protocol::{Doubt, During, Problem, Startup, Status};
 
 /// How long one request may take.
 pub(crate) const ONE: Duration = Duration::from_secs(2);

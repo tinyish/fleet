@@ -15,8 +15,8 @@ use fleet_core::protocol::{self, ProtocolError, SocketPathTooLong};
 use fleet_core::tools::{Git, NoServiceManager, ServiceManager, ToolError};
 
 use crate::client::{self, Hello};
-use crate::ending::{Problem, Status};
-use crate::output;
+use crate::protocol::{Problem, Status};
+use crate::ui::output;
 
 /// This binary's version, which a running supervisor should match.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -387,7 +387,7 @@ mod tests {
         );
         let hints: Vec<String> = report
             .iter()
-            .filter_map(|f| crate::words::found_next(f, crate::output::OUT))
+            .filter_map(|f| crate::ui::words::found_next(f, crate::ui::output::OUT))
             .collect();
         assert_eq!(hints.len(), 1, "{hints:?}");
         let _ = fs::remove_dir_all(dir);

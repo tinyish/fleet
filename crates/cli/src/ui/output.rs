@@ -9,11 +9,11 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::doctor::{Found, Verdict};
-use crate::ending::{Response, Status};
+use crate::cmd::doctor::{Found, Verdict};
+use crate::protocol::{Response, Status};
 
-use crate::theme::{ERROR, NEXT, SUCCESS, Tone, WARN, paint_on};
-use crate::words;
+use crate::ui::theme::{ERROR, NEXT, SUCCESS, Tone, WARN, paint_on};
+use crate::ui::words;
 
 /// The ink for one stream: colour is decided by whether that stream is a
 /// terminal.
@@ -313,7 +313,7 @@ mod tests {
                 picked_up: vec![],
                 stayed_off: vec![off("/code/wing"), off("/code/blog")],
             },
-            startup: crate::ending::Startup::WasRunning,
+            startup: crate::protocol::Startup::WasRunning,
         });
         let marks: Vec<Mark> = lines(&ending).into_iter().map(|(m, _)| m).collect();
         assert_eq!(marks, [Mark::Done, Mark::Error, Mark::Error, Mark::Next]);

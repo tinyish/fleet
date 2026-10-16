@@ -14,8 +14,9 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use cliclack::{Theme, ThemeState};
 
-use crate::theme::{FleetTheme, Tone, paint};
-use crate::{Args, output, ui, words};
+use crate::Args;
+use crate::ui::theme::{FleetTheme, Tone, paint};
+use crate::ui::{self, output, words};
 
 use samples::{Sample, endings};
 

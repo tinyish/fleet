@@ -7,8 +7,8 @@ use fleet_core::paths::PathError;
 use fleet_core::tools::ToolError;
 
 use super::{path_error, refused, socket, tool};
-use crate::doctor::{Checked, Found, Verdict};
-use crate::output::Ink;
+use crate::cmd::doctor::{Checked, Found, Verdict};
+use crate::ui::output::Ink;
 
 /// What a check is called in the report.
 pub(crate) fn checked(checked: Checked) -> &'static str {

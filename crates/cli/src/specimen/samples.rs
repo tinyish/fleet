@@ -14,7 +14,7 @@ use fleet_core::tools::{BadUnitPath, FileStep, ToolError, ToolErrorKind, UnitPat
 use strum::IntoEnumIterator;
 
 use crate::client;
-use crate::ending::{
+use crate::protocol::{
     Doing, Doubt, DoubtKind, During, DuringKind, Problem, ProblemKind, Response, ResponseKind,
     Startup, Status, StatusKind,
 };
@@ -521,7 +521,7 @@ mod tests {
                 "{kind:?}"
             );
         }
-        for kind in crate::ending::ResponseKind::iter() {
+        for kind in crate::protocol::ResponseKind::iter() {
             assert!(
                 labels
                     .iter()
@@ -535,7 +535,7 @@ mod tests {
         endings()
             .iter()
             .map(|Sample { ending, .. }| {
-                crate::output::lines(ending)
+                crate::ui::output::lines(ending)
                     .into_iter()
                     .map(|(_, text)| text)
                     .collect::<Vec<_>>()
@@ -577,8 +577,8 @@ mod tests {
     fn every_sample_has_words() {
         for Sample { label, ending } in endings() {
             let text = match &ending {
-                Ok(r) => crate::words::response(r, crate::output::OUT),
-                Err(s) => crate::words::status(s, crate::output::ERR),
+                Ok(r) => crate::ui::words::response(r, crate::ui::output::OUT),
+                Err(s) => crate::ui::words::status(s, crate::ui::output::ERR),
             };
             assert!(!text.trim().is_empty(), "{label}");
         }

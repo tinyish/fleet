@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use fleet_core::tools::ServiceManager;
 
-use crate::ending::{Problem, Response, Status};
-use crate::{Ask, client, start};
+use crate::cmd::start;
+use crate::protocol::{Problem, Response, Status};
+use crate::{Ask, client};
 
 fn absolute(project: &Path) -> Result<PathBuf, Status> {
     std::path::absolute(project).map_err(|error| {

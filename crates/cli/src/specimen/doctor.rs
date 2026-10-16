@@ -9,7 +9,7 @@ use strum::IntoEnumIterator;
 
 use super::samples::{APP, STATE, WING, bad_config, broken_pipe, not_found, path};
 use crate::client;
-use crate::doctor::{Found, FoundKind};
+use crate::cmd::doctor::{Found, FoundKind};
 
 /// Every finding doctor can report, each labelled with its kind.
 pub(crate) fn doctor() -> Vec<(String, Found)> {

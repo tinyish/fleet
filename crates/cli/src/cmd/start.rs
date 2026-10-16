@@ -5,8 +5,9 @@ use std::path::Path;
 
 use fleet_core::tools::{ServiceManager, SupervisorUnit};
 
-use crate::ending::{Doing, Doubt, Problem, Response, Startup, Status};
-use crate::{Ask, client, ui, words};
+use crate::protocol::{Doing, Doubt, Problem, Response, Startup, Status};
+use crate::ui::{self, words};
+use crate::{Ask, client};
 
 pub(crate) fn run(state_dir: &Path, service: &dyn ServiceManager) -> Result<Response, Status> {
     let socket = client::socket(state_dir)?;

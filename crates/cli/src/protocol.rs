@@ -1,16 +1,47 @@
-//! How a command ends, as data: `Result<Response, Status>`. The CLI's own
+//! The CLI's side of the vocabulary: what the person asks (`Request`), and
+//! how a command ends, as data (`Result<Response, Status>`). The CLI's own
 //! `Response` and `Status` are what it tells the person; the supervisor's
-//! are always written `protocol::Response` and `protocol::Status`. words.rs
-//! turns these into sentences, and output.rs prints them.
+//! are always written `protocol::Response` and `protocol::Status`.
+//! `ui::words` turns these into sentences, and `ui::output` prints them.
 
-use fleet_core::protocol;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::Subcommand;
+use fleet_core::protocol;
+
 use fleet_core::paths::PathError;
 use fleet_core::protocol::ProtocolError;
 use fleet_core::tools::ToolError;
+
+// What the person asked the CLI to do, as clap parses it: a `Request` in,
+// `Result<Response, Status>` out. Doc comments here would become help text,
+// so these are plain comments.
+#[derive(Debug, Subcommand)]
+pub(crate) enum Request {
+    // `fleet create`, with any `--project` paths.
+    #[command(about = crate::ui::words::CREATE_ABOUT)]
+    Create {
+        #[arg(long = "project", value_name = "PATH", help = crate::ui::words::PROJECT_HELP)]
+        projects: Vec<PathBuf>,
+    },
+    // `fleet doctor`.
+    #[command(about = crate::ui::words::DOCTOR_ABOUT)]
+    Doctor,
+    // `fleet start`, or `fleet start --project` for one project.
+    #[command(about = crate::ui::words::START_ABOUT)]
+    Start {
+        #[arg(long, value_name = "PATH", help = crate::ui::words::START_PROJECT_HELP)]
+        project: Option<PathBuf>,
+    },
+    // `fleet stop`, or `fleet stop --project` for one project.
+    #[command(about = crate::ui::words::STOP_ABOUT)]
+    Stop {
+        #[arg(long, value_name = "PATH", help = crate::ui::words::STOP_PROJECT_HELP)]
+        project: Option<PathBuf>,
+    },
+}
 
 /// What a command did.
 #[derive(Debug)]

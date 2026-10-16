@@ -24,10 +24,10 @@ the same way and in one place. What the operating system or a parser says
 ```
  supervisor                     socket (JSON)                    CLI
  ──────────                     ─────────────                    ───
- decides, from the rules  ──▶   Reply::Response  ──▶  words.rs   turns it into a sentence
- (fleet-core)                   Reply::Status         output.rs  marks it, picks the stream, prints it
-                                                      theme.rs   symbols and colours
-                                                      ui.rs      prompts and spinners
+ decides, from the rules  ──▶   Reply::Response  ──▶  ui/words   turns it into a sentence
+ (fleet-core)                   Reply::Status         ui/output  marks it, picks the stream, prints it
+                                                      ui/theme   symbols and colours
+                                                      ui         prompts and spinners
 ```
 
 ## The layers
@@ -35,11 +35,11 @@ the same way and in one place. What the operating system or a parser says
 | Layer | Holds | File |
 | --- | --- | --- |
 | **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, …); `Status` is why not: a rule's verdict (`DirectoryNotRepoRoot { path, root }`, `AlreadyServed { project, fleet }`, …) or a problem with a path or file (`Missing { path }`, `StrayConfig { path }`, …). On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"missing":{…}}}`. | `crates/core/src/protocol.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
-| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`, `Doctor`) goes in. Doctor is the one command that does not end this way: its report is a list of findings (`doctor::Found`, each with its check and verdict) that `output::doctor` prints, and its exit code comes from the findings. | `crates/cli/src/ending.rs`, `crates/cli/src/lib.rs` |
-| **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), the help text clap shows, and doctor's report (`found`, `found_next`, `checked`, `verdict`, in its own submodule) | `crates/cli/src/words.rs`, `crates/cli/src/words/doctor.rs` |
-| **Output** | Where a line goes and how it starts: `Mark`, `line`, `lines` (every line an ending prints, with its mark), `report`, `doctor` (doctor's report), and `Ink` for colouring the parts of a sentence | `crates/cli/src/output.rs` |
-| **Theme** | The symbols, the palette (`Tone`, `paint_on`), and the cliclack `Theme` that draws prompts and spinners | `crates/cli/src/theme.rs` |
-| **Prompts and spinners** | `confirm(question, default)` and `spinner(message)`, drawn with cliclack in the theme | `crates/cli/src/ui.rs` |
+| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`, `Doctor`) goes in. Doctor is the one command that does not end this way: its report is a list of findings (`doctor::Found`, each with its check and verdict) that `output::doctor` prints, and its exit code comes from the findings. | `crates/cli/src/protocol.rs` (all of them, `Request` included) |
+| **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), the help text clap shows, and doctor's report (`found`, `found_next`, `checked`, `verdict`, in its own submodule) | `crates/cli/src/ui/words/mod.rs`, `crates/cli/src/ui/words/doctor.rs` |
+| **Output** | Where a line goes and how it starts: `Mark`, `line`, `lines` (every line an ending prints, with its mark), `report`, `doctor` (doctor's report), and `Ink` for colouring the parts of a sentence | `crates/cli/src/ui/output.rs` |
+| **Theme** | The symbols, the palette (`Tone`, `paint_on`), and the cliclack `Theme` that draws prompts and spinners | `crates/cli/src/ui/theme.rs` |
+| **Prompts and spinners** | `confirm(question, default)` and `spinner(message)`, drawn with cliclack in the theme | `crates/cli/src/ui/mod.rs` |
 
 ## What a person sees, and what a script sees
 
@@ -71,7 +71,7 @@ off for a pipe. It honours `NO_COLOR`, `CLICOLOR=0` and `CLICOLOR_FORCE`.
 The look follows Vite+'s CLI: frameless (no guide bars down the left), a blue
 pointer for what is active, gray once a step is done.
 
-**Symbols** (`theme.rs`):
+**Symbols** (`ui/theme.rs`):
 
 | Symbol | Means | Where |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ pointer for what is active, gray once a step is done.
 | `◇` | answered | a prompt once answered |
 | `●` | information | cliclack's info log (no `Mark` uses it yet) |
 
-**Palette** (`Tone` in `theme.rs`):
+**Palette** (`Tone` in `ui/theme.rs`):
 
 | Tone | For | Colour |
 | --- | --- | --- |
@@ -103,13 +103,13 @@ takes only named colours, so it cannot use Vite+'s true-colour magenta
 
 ## How a sentence gets its colour
 
-A sentence is built in `words.rs` with an `Ink`: one ink per stream, because
+A sentence is built in `ui/words` with an `Ink`: one ink per stream, because
 whether to colour depends on the stream the line will be written to. `OUT` is
 for done lines (stdout); `ERR` is for refusals and warnings (stderr). Only the
 variable parts are wrapped:
 
 ```rust
-// words.rs
+// ui/words/mod.rs
 // response::Create is { directory, projects, created }; here, a new wingman fleet
 format!(
     "created a wingman fleet in {} serving {}",
@@ -129,7 +129,7 @@ Ok(Response::Created { response, startup })
 // client.rs: one helper per command; another kind of reply is Doubt::OddReply,
 // the supervisor's no is Status::Refused, a failed conversation is CouldNotTell
 
-// output.rs: words it, marks it, picks the stream and the exit code
+// ui/output.rs: words it, marks it, picks the stream and the exit code
 Ok(response) => line(Mark::Done, &words::response(response, OUT)),        // exit 0
 Err(status)  => {
     line(mark_for(status), &words::status(status, ERR));                // status.exit_code()
@@ -150,17 +150,20 @@ done (a start that found no fleets), or `None`.
 
 **Naming:** the two sides share the words `Request`, `Response` and `Status`,
 and the module says which side: `protocol::Response` is what the supervisor
-did, and the CLI's own `Response` is how a command ended. Inside the CLI, the
-supervisor's types are always written with `protocol::`, never imported bare.
+did, and the CLI's own `Response` is how a command ended. The CLI's own live
+in its `protocol` module (`crates/cli/src/protocol.rs`) and are always
+imported by name; core's protocol is imported as `protocol` and its types are
+always written `protocol::…`, never imported bare. So in a CLI file a bare
+`Status` is the CLI's, and `protocol::Status` is the supervisor's.
 
 ## Recipes
 
 **A new sentence for the CLI's own step.** Add a `const` or a function to
-`words.rs`, and call it from the command. Wrap paths and commands with
+`ui/words`, and call it from the command. Wrap paths and commands with
 `ink.path` and `ink.accent`. Never write a sentence anywhere else; a check for
 that is to grep the CLI for English strings outside the `words` module.
 
-**Help text.** Add a `const` to `words.rs` and point clap at it with
+**Help text.** Add a `const` to `ui/words` and point clap at it with
 `#[command(about = words::X)]` or `#[arg(help = words::X)]`. The clap types in
 `lib.rs` take plain comments, not doc comments, because clap turns doc
 comments into help text.
@@ -174,13 +177,13 @@ and word it in `words::tool`. A driver never formats a sentence.
 `Response` variants and a `client` helper) for something it did, or a
 `Status` variant (in `crates/core/src/status.rs`) for a reason it says no. Field names follow the AIPs (core.md § Naming). Then:
 - the supervisor returns the variant;
-- `words.rs` gets one match arm for it (the compiler points at the missing arm);
+- `ui/words` gets one match arm for it (the compiler points at the missing arm);
 - a protocol test round-trips it.
 
 The supervisor never builds the sentence.
 
 **A new way for a command to end.** Add a variant to the CLI's `Response` or
-`Status` in `ending.rs` (a new `Problem` or `Doubt` for a new reason). A
+`Status` in `protocol.rs` (a new `Problem` or `Doubt` for a new reason). A
 `Status` variant also gives its exit code in `Status::exit_code`.
 
 **A hint after an ending.** Add a match arm to `words::next` for that
@@ -189,9 +192,9 @@ under the ending's lines. A status line says what
 is wrong; what to do about it goes in the hint, never after a semicolon.
 
 **A new kind of line** (say, `● info: …`). Add a variant to
-`Mark` in `output.rs`, with its symbol and tone in `Mark::symbol`, its
+`Mark` in `ui/output.rs`, with its symbol and tone in `Mark::symbol`, its
 piped prefix in `Mark::piped_prefix`, and say
-which stream it belongs to in `Mark::on_stderr`. Add the symbol to `theme.rs`
+which stream it belongs to in `Mark::on_stderr`. Add the symbol to `ui/theme.rs`
 if it is new. Unused variants are dead code and fail the build, so a mark
 arrives with the first line that uses it.
 
