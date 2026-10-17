@@ -62,6 +62,14 @@ working tree. When he says to land it, it becomes one commit (§ Commits). A
 document being refined with him stays uncommitted the same way, until he
 says it is good enough.
 
+**Trying a piece by hand** happens in `tools/try`, a shell with a sandbox
+of its own: three git repositories, a state directory, and a supervisor
+run by hand on that state. Leaving the shell stops that supervisor and
+deletes the sandbox; `tools/try -c '…'` runs commands in one instead. It
+never reaches the real state directory or the real supervisor, so while
+that supervisor is installed, plain `fleet stop` and starting a stopped
+supervisor are refused inside it.
+
 **Where each truth lives:**
 
 | Place | Holds | Written by |
