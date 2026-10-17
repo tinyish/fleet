@@ -249,6 +249,8 @@ release whose binary accepts `fleet specimen`.
 - Visible evals are trycmd transcript cases under `tests/cmd/<verb>/`, run by
   `cargo test`.
 - Fitness tests read the workspace's dependency graph (`cargo metadata`).
+- The `Makefile` at the root wraps these commands; `make check` runs every
+  gate.
 
 ## Terms
 
