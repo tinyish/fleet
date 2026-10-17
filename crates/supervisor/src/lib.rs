@@ -6,6 +6,7 @@ mod projects;
 mod words;
 
 use fleet_core::protocol;
+use std::ffi::OsString;
 use std::fs::{self, File, Permissions};
 use std::io::{self, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -52,9 +53,14 @@ enum Doing {
 }
 
 /// Runs the supervisor for this machine's state directory until it is
-/// stopped: what `fleet supervise` does.
+/// stopped: what `fleet supervise` does. `args` are the arguments after
+/// `supervise`; it takes none, and refuses any as a usage error (exit 2).
 #[must_use]
-pub fn main() -> ExitCode {
+pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
+    if let Some(arg) = args.into_iter().next() {
+        log(&words::takes_no_arguments(&arg));
+        return ExitCode::from(2);
+    }
     let Some(os) = Os::this() else {
         log(words::UNSUPPORTED_OS);
         return ExitCode::FAILURE;

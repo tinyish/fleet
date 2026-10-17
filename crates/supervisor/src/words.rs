@@ -3,6 +3,7 @@
 //! facts and words only its own log, here (core.md invariant 9).
 
 use fleet_core::protocol;
+use std::ffi::OsStr;
 use std::io;
 
 use fleet_core::paths::PathError;
@@ -16,6 +17,14 @@ pub(crate) const PREFIX: &str = "fleet supervise: ";
 
 /// Said when `fleet supervise` runs where tinyfleet does not.
 pub(crate) const UNSUPPORTED_OS: &str = "tinyfleet runs on macOS and Linux only";
+
+/// Said when `fleet supervise` is given anything after it.
+pub(crate) fn takes_no_arguments(arg: &OsStr) -> String {
+    format!(
+        "takes no arguments, not {}; the service manager runs it, and `fleet start` installs it",
+        arg.to_string_lossy()
+    )
+}
 
 /// Why there is no state directory to serve.
 pub(crate) fn no_state_dir(error: &PathError) -> String {
