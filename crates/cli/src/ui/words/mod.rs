@@ -219,10 +219,13 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
             format!("run {create} at a repository's root")
         }
         Status::Refused(protocol::Status::DirectoryNotRepoRoot { root, .. }) => {
-            format!("run {create} in {}", ink.path(root))
+            format!("run {create} in {}", ink.whole_path(root))
         }
         Status::Refused(protocol::Status::ProjectNotRepoRoot { root, .. }) => {
-            format!("pass the repository's root, {}, instead", ink.path(root))
+            format!(
+                "pass the repository's root, {}, instead",
+                ink.whole_path(root)
+            )
         }
         Status::Refused(protocol::Status::ProjectIsFleetDirectory { .. }) => {
             format!("run {create} without {project_flag} to make a fleet of this repository itself")
@@ -242,7 +245,7 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
             ))
         ),
         Status::Refused(protocol::Status::InsideProject { project, .. }) => {
-            format!("name its root, {}", ink.path(project))
+            format!("name its root, {}", ink.whole_path(project))
         }
         Status::Refused(protocol::Status::CannotTurnOn { fleet, .. }) => format!(
             "fix the {} in {}, then try again",

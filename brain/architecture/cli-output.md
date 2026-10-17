@@ -54,6 +54,7 @@ only when its stream is a terminal**.
 | Could not tell (stderr) | `▲ the supervisor did not answer within 10s` | `fleet: the supervisor did not answer within 10s` |
 | Hint (stderr), under the line it follows | `> run fleet create in /code/app` | `hint: run fleet create in /code/app` |
 | Partly done (stdout, then stderr) | `◆ the supervisor was already running; /code/app is on`<br>`■ the fleet in /code/wing stayed off: …`<br>`> fix each fleet.toml named above, then run fleet start` | the same lines, `fleet:` before the `■` line and `hint:` before the last |
+| Paths | the last two directories (`code/app` for `/Users/you/code/app`); one with two levels or fewer as it is; a path a hint asks you to type, whole | whole |
 | Colour | the symbol, and every path, name and command in the sentence | none |
 | Prompt | asked, with `>` and `Yes / No` | never asked: without `--non-interactive` the command ends *supervisor not running* (exit 3) |
 | Spinner | drawn on stderr while waiting | not drawn |

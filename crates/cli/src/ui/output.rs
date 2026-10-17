@@ -6,7 +6,7 @@
 
 use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::cmd::doctor::{Found, Verdict};
@@ -38,9 +38,27 @@ impl Ink {
         self.tone(Tone::Accent, text)
     }
 
-    /// One path, as something to notice.
+    /// One path, as something to notice: on a terminal only its last two
+    /// directories, so a line stays readable; piped, whole, for a script.
     pub(crate) fn path(self, path: &Path) -> String {
+        if self.terminal() {
+            self.accent(last_two(path))
+        } else {
+            self.whole_path(path)
+        }
+    }
+
+    /// One path, whole even on a terminal: one a hint asks a person to type.
+    pub(crate) fn whole_path(self, path: &Path) -> String {
         self.accent(path.display())
+    }
+
+    fn terminal(self) -> bool {
+        if self.stderr {
+            io::stderr().is_terminal()
+        } else {
+            io::stdout().is_terminal()
+        }
     }
 
     /// Several paths, each to notice, separated by commas.
@@ -50,6 +68,22 @@ impl Ink {
             .map(|p| self.path(p))
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+/// The last two directories of `path` (`code/app` for `/Users/you/code/app`),
+/// or `path` as it is when it has two or fewer.
+fn last_two(path: &Path) -> String {
+    let names: Vec<&std::ffi::OsStr> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    match names.as_slice() {
+        [_, .., parent, name] => Path::new(parent).join(name).display().to_string(),
+        _ => path.display().to_string(),
     }
 }
 
@@ -234,6 +268,18 @@ fn doctor_lines(report: &[Found], terminal: bool) -> Vec<String> {
 mod tests {
     use super::*;
     use fleet_core::protocol;
+
+    #[test]
+    fn a_path_keeps_its_last_two_directories_or_shows_as_it_is() {
+        assert_eq!(last_two(Path::new("/Users/you/code/app")), "code/app");
+        assert_eq!(
+            last_two(Path::new("/Users/you/Library/Application Support/fleet")),
+            "Application Support/fleet"
+        );
+        assert_eq!(last_two(Path::new("/code/app")), "/code/app");
+        assert_eq!(last_two(Path::new("/app")), "/app");
+        assert_eq!(last_two(Path::new("/")), "/");
+    }
 
     #[test]
     fn piped_lines_have_no_symbol_and_errors_and_hints_keep_a_prefix() {
