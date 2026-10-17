@@ -91,6 +91,11 @@ impl ServiceManager for Launchd {
         }
     }
 
+    fn running(&self, state_dir: &Path) -> bool {
+        self.installed_state_dir().as_deref() == Some(state_dir)
+            && Launchd::domain().is_ok_and(|d| Launchd::loaded(&format!("{d}/{LAUNCHD_LABEL}")))
+    }
+
     fn where_logs_go(&self, state_dir: &Path) -> String {
         state_dir.join("supervisor.log").display().to_string()
     }

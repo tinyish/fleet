@@ -464,6 +464,10 @@ fn doubts(kind: DoubtKind) -> Vec<Doubt> {
                 log: "journalctl --user -u fleet-supervisor.service".into(),
             },
         ],
+        DoubtKind::StoppedUnanswered => vec![Doubt::StoppedUnanswered {
+            waited: client::WAIT,
+            log: format!("{STATE}/supervisor.log"),
+        }],
         DoubtKind::StillAnswers => vec![Doubt::StillAnswers {
             waited: client::WAIT,
         }],

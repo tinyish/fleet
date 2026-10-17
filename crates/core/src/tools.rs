@@ -128,6 +128,12 @@ pub trait ServiceManager {
     /// installed unit serves another state directory.
     fn stop_and_disable(&self, state_dir: &Path) -> Result<(), ToolError>;
 
+    /// Whether the service manager is running the supervisor unit that
+    /// serves `state_dir` (launchd: loaded; systemd: active), whether or not
+    /// the supervisor answers. False when no unit is installed or it serves
+    /// another state directory.
+    fn running(&self, state_dir: &Path) -> bool;
+
     /// Where the supervisor's log can be read, for a person.
     fn where_logs_go(&self, state_dir: &Path) -> String;
 

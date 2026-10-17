@@ -74,14 +74,14 @@ pub(crate) fn hello(socket: &Path) -> Hello {
     }
 }
 
-/// Waits until `answers` is `want`, or `WAIT` passes. Returns whether it got there.
-pub(crate) fn wait_until(socket: &Path, want: bool) -> bool {
+/// Waits until `answers` is `want`, or `within` passes. Returns whether it got there.
+pub(crate) fn wait_until(socket: &Path, want: bool, within: Duration) -> bool {
     let start = Instant::now();
     loop {
         if answers(socket) == want {
             return true;
         }
-        if start.elapsed() >= WAIT {
+        if start.elapsed() >= within {
             return false;
         }
         thread::sleep(Duration::from_millis(100));

@@ -65,6 +65,10 @@ pub(crate) const STARTING: &str = "starting the supervisor";
 /// The spinner's words while the supervisor goes down.
 pub(crate) const STOPPING: &str = "stopping the supervisor";
 
+/// The spinner while `fleet stop` waits for a supervisor that is running but
+/// not answering.
+pub(crate) const WAITING: &str = "waiting for the supervisor to answer";
+
 /// What a command did.
 pub(crate) fn response(response: &Response, ink: Ink) -> String {
     match response {
@@ -250,7 +254,9 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
             ink.accent("fleet.toml"),
             ink.accent("fleet start")
         ),
-        Status::CouldNotTell(Doubt::NoAnswer { log, .. }) => {
+        Status::CouldNotTell(
+            Doubt::NoAnswer { log, .. } | Doubt::StoppedUnanswered { log, .. },
+        ) => {
             format!("check its log: {}", ink.accent(log))
         }
         _ => return None,
@@ -511,6 +517,10 @@ fn unsure(doubt: &Doubt) -> String {
         Doubt::NoAnswer { waited, .. } => {
             format!("the supervisor did not answer within {}s", waited.as_secs())
         }
+        Doubt::StoppedUnanswered { waited, .. } => format!(
+            "the supervisor did not answer within {}s; it is stopped, and its fleets were left as they were",
+            waited.as_secs()
+        ),
         Doubt::StillAnswers { waited } => {
             format!("the supervisor still answers after {}s", waited.as_secs())
         }

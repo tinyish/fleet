@@ -408,6 +408,9 @@ mod tests {
         fn stop_and_disable(&self, _: &Path) -> Result<(), ToolError> {
             Ok(())
         }
+        fn running(&self, _: &Path) -> bool {
+            false
+        }
         fn where_logs_go(&self, _: &Path) -> String {
             String::new()
         }

@@ -188,6 +188,14 @@ pub(crate) enum Doubt {
         /// Where the supervisor's log can be read.
         log: String,
     },
+    /// The service manager was running the supervisor but it did not
+    /// answer, so it was stopped without turning its fleets off.
+    StoppedUnanswered {
+        /// How long the CLI waited.
+        waited: Duration,
+        /// Where the supervisor's log can be read.
+        log: String,
+    },
     /// The supervisor was stopped but still answers.
     StillAnswers {
         /// How long the CLI waited.

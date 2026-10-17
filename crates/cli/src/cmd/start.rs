@@ -52,7 +52,7 @@ pub(crate) fn ensure_supervisor(
         })
     })?;
     let spinner = ui::spinner(words::STARTING);
-    let up = client::wait_until(socket, true);
+    let up = client::wait_until(socket, true, client::WAIT);
     spinner.clear();
     if !up {
         return Err(Status::CouldNotTell(Doubt::NoAnswer {

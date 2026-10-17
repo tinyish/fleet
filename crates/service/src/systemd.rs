@@ -59,6 +59,11 @@ impl ServiceManager for Systemd {
         systemctl(&["daemon-reload"])
     }
 
+    fn running(&self, state_dir: &Path) -> bool {
+        self.installed_state_dir().as_deref() == Some(state_dir)
+            && systemctl(&["is-active", "--quiet", SYSTEMD_UNIT]).is_ok()
+    }
+
     fn where_logs_go(&self, _state_dir: &Path) -> String {
         format!("journalctl --user -u {SYSTEMD_UNIT}")
     }
