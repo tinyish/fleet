@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 
 mod step;
 
-pub use step::{Record, Step};
+pub use step::Step;
 
 /// The schema version this code reads and writes. Until tinyfleet's first
 /// release every schema change goes into version 1 (see core.md § Boundaries).
@@ -108,36 +108,6 @@ impl State {
             }
         }
         Ok(fleets)
-    }
-
-    /// The whole record, oldest first.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or a row's step cannot be read back.
-    pub fn records(&self) -> Result<Vec<Record>, StateError> {
-        let mut query = self
-            .conn
-            .prepare("SELECT id, occur_time_millis, step, detail FROM records ORDER BY id")?;
-        let rows = query.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        let mut records = Vec::new();
-        for row in rows {
-            let (id, occur_time_millis, name, detail) = row?;
-            let step = Step::from_row(&name, &detail).map_err(StateError::Step)?;
-            records.push(Record {
-                id,
-                occur_time_millis,
-                step,
-            });
-        }
-        Ok(records)
     }
 }
 
@@ -313,6 +283,13 @@ mod tests {
             .ok()
     }
 
+    fn records(state: &State) -> Option<i64> {
+        state
+            .conn
+            .query_row("SELECT COUNT(*) FROM records", [], |row| row.get(0))
+            .ok()
+    }
+
     fn fleet(dir: &str, projects: &[&str]) -> Fleet {
         Fleet {
             directory: dir.into(),
@@ -325,7 +302,7 @@ mod tests {
         let (mut state, dir) = fresh("rollback");
         let f = fleet("/f/a", &["/c/app"]);
         assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
-        let before = state.records().map(|r| r.len()).unwrap_or_default();
+        let before = records(&state);
         let failed = state.write(|w| {
             w.set_all_active(false)?;
             w.record(&Step::EveryFleetOff)?;
@@ -333,7 +310,7 @@ mod tests {
         });
         assert!(failed.is_err());
         assert_eq!(active(&state, "/c/app"), Some(true));
-        assert_eq!(state.records().map(|r| r.len()).unwrap_or_default(), before);
+        assert_eq!(records(&state), before);
         let _ = std::fs::remove_dir_all(dir);
     }
 

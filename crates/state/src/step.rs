@@ -2,12 +2,12 @@
 //! AIP-126 spelling in `step`, and its fields as a JSON object in `detail`.
 
 use fleet_core::status::Status;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// One step tinyfleet records. Its variant name, in AIP-126 spelling, is the
 /// row's `step`; its fields are the row's `detail`. No variant may have a
 /// field named `step`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "step", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Step {
     /// A supervisor took the lock and began answering.
@@ -62,17 +62,6 @@ pub enum Step {
     },
 }
 
-/// One row of the record, as read back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Record {
-    /// The row's id; it orders the record.
-    pub id: i64,
-    /// When the step happened, in milliseconds since the Unix epoch.
-    pub occur_time_millis: i64,
-    /// What happened.
-    pub step: Step,
-}
-
 impl Step {
     /// The step as a row: its name and its fields as a JSON object.
     ///
@@ -87,20 +76,6 @@ impl Step {
             .and_then(|name| name.as_str().map(str::to_owned))
             .unwrap_or_default();
         Ok((name, value.to_string()))
-    }
-
-    /// The step a row holds.
-    ///
-    /// # Errors
-    ///
-    /// When `detail` is not a JSON object, the name is not a known step, or
-    /// the fields do not match it.
-    pub fn from_row(name: &str, detail: &str) -> Result<Step, serde_json::Error> {
-        let mut value: serde_json::Value = serde_json::from_str(detail)?;
-        if let Some(fields) = value.as_object_mut() {
-            fields.insert("step".to_owned(), name.into());
-        }
-        serde_json::from_value(value)
     }
 }
 
@@ -144,14 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn every_step_round_trips_through_a_row() {
-        for step in all() {
-            let (name, detail) = step.to_row().unwrap_or_default();
-            assert_eq!(Step::from_row(&name, &detail).ok(), Some(step));
-        }
-    }
-
-    #[test]
     fn names_use_aip_126_spelling() {
         let names: Vec<String> = all()
             .iter()
@@ -188,12 +155,5 @@ mod tests {
             Step::EveryFleetOn.to_row().ok().map(|r| r.1),
             Some("{}".to_owned())
         );
-    }
-
-    #[test]
-    fn an_unknown_step_or_a_broken_detail_is_an_error() {
-        assert!(Step::from_row("NO_SUCH_STEP", "{}").is_err());
-        assert!(Step::from_row("SUPERVISOR_STARTED", "{}").is_err());
-        assert!(Step::from_row("EVERY_FLEET_ON", "not json").is_err());
     }
 }
