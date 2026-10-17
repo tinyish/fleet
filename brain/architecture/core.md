@@ -182,6 +182,7 @@ contract's (see Boundaries).
 | --- | --- |
 | state, and the supervisor's socket | `$XDG_STATE_HOME/fleet/` (default `~/.local/state/fleet/`) on Linux; `~/Library/Application Support/fleet/` on macOS |
 | a fleet's config file | `fleet.toml` in the fleet directory |
+| the installed binary | `~/.local/bin/fleet`, or `FLEET_INSTALL_DIR` |
 | the supervisor's service unit | `~/Library/LaunchAgents/` on macOS; `~/.config/systemd/user/` on Linux |
 | tmux socket | tmux's socket named `fleet` (`tmux -L fleet`) |
 
@@ -198,6 +199,7 @@ None exists yet.
 | config file | person ↔ supervisor (and doctor, which reads it) | *directional:* `crates/core/src/config.rs`, read through `fleets::read_projects` |
 | tool interfaces | core ↔ drivers | *directional:* `crates/core/src/tools/` |
 | install | person ↔ the GitHub release | *directional:* `install.sh` at the repository root |
+| release | a release squash on `main` ↔ the GitHub release | *directional:* `.github/workflows/release.yml` |
 
 **Until tinyfleet's first release, the state schema stays at version 1.** No
 state file exists outside development, so a schema change edits the one
@@ -217,10 +219,23 @@ or `nanos` (`occur_time_millis`).
 
 ## Install
 
-A one-line shell script downloads the prebuilt `fleet` binary for the
-machine's OS and CPU from the GitHub release and puts it on the `PATH`. No
-Rust toolchain is needed. The release workflow builds the binaries: macOS and
-Linux, on arm64 and x86_64.
+`install.sh`, at the repository root, is run as
+`curl -fsSL https://raw.githubusercontent.com/tinyish/fleet/main/install.sh | sh`.
+It downloads the prebuilt `fleet` for the machine's OS and CPU from the
+GitHub release and checks it against its SHA-256 file. It then installs it to
+`~/.local/bin` (`FLEET_INSTALL_DIR` overrides it) by writing a new file and
+renaming it over the old one, so a running `fleet` is never half replaced.
+It never asks anything and changes no shell file: when the directory is not
+on the `PATH`, it prints the line to add. No Rust toolchain is needed, and
+`FLEET_VERSION` pins a release.
+
+**The release binaries** are built by the release workflow on a release
+squash to `main`. There are four: macOS on arm64 and on x86_64, and Linux on
+arm64 and on x86_64, statically linked against musl. Each is
+`fleet-<target>.tar.gz` with its `.sha256` beside it. The names carry no
+version, so the latest release's download links never change. They are built
+without features, so none has the CLI's specimen: the workflow refuses a
+release whose binary accepts `fleet specimen`.
 
 ## Toolchain
 

@@ -337,16 +337,21 @@ Every commit on a release or hotfix branch is **one item, squashed**:
    on the branch. It lands as the branch's last item, subject
    `<item id>: docs release pass for <x.y.z>`.
 3. **Open the release PR** from `release/<x.y.z>` to `main`.
-4. **Squash-merge it.** The squash commit's subject is `release: v<x.y.z>`.
-5. **The release workflow runs on that push to `main`** *(directional: not
-   written yet)*. It:
-   - reads the version and refuses if the tag `v<x.y.z>`
-     already exists or the version does not match the merged branch's name;
+4. **Squash-merge it.** The squash commit's subject is `release: v<x.y.z>`
+   (GitHub's ` (#N)` suffix may stay). Keep the body GitHub fills in, the list
+   of the branch's commits: the workflow reads the docs pass and the
+   changelog from it.
+5. **The release workflow runs on that push to `main`** *(directional:
+   written, not yet run)*. It:
+   - reads the version and refuses if the tag `v<x.y.z>` already exists or
+     the version does not match the release commit's subject;
    - refuses if the branch carries no docs release pass;
-   - tags `v<x.y.z>`;
-   - builds the changelog from the release branch's commit subjects, grouped
-     by item, and creates the GitHub release with it;
+   - builds the changelog from the release branch's item subjects and
+     creates the tag and the GitHub release with it;
    - publishes `docs/` for that version (the renderer is not chosen yet).
+
+   A release that failed part way is run again by hand, with the release
+   commit's SHA.
 6. **Delete the release branch**, and cut the next one when work for it
    starts.
 

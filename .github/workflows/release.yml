@@ -1,0 +1,152 @@
+# The release workflow (CONTRIBUTING.md § Releasing, step 5).
+#
+# Runs on every push to main and does nothing unless the commit is a release
+# squash, `release: v<x.y.z>` (GitHub's ` (#N)` suffix is allowed). Then it
+# checks the release, builds fleet for macOS and Linux (arm64 and x86_64),
+# and creates the tag v<x.y.z> and the GitHub release with the changelog and
+# the binaries install.sh downloads. A release that failed part way can be
+# driven again by hand (workflow_dispatch) with the release commit's SHA.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: The release squash commit on main to release
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.sha || github.sha }}
+      - id: check
+        name: Is this a release, and is it in order?
+        env:
+          SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          message=$(git log -1 --format=%B "$SHA")
+          subject=$(printf '%s\n' "$message" | head -n 1 | sed -E 's/ \(#[0-9]+\)$//')
+          case "$subject" in
+            "release: v"*) ;;
+            *)
+              echo "not a release squash: $subject"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$subject" != "release: v$version" ]; then
+            echo "::error::the commit says ${subject#release: } but Cargo.toml says v$version"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::the tag v$version already exists"
+            exit 1
+          fi
+          if ! printf '%s\n' "$message" | grep -qF ": docs release pass for $version"; then
+            echo "::error::the release carries no docs release pass for $version (the squash body must keep GitHub's list of the branch's commits)"
+            exit 1
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # runs: the runner's own CPU, so the built binary can be run there.
+          - { target: aarch64-apple-darwin, os: macos-14, zig: false, runs: true }
+          - { target: x86_64-apple-darwin, os: macos-14, zig: false, runs: false }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, zig: true, runs: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, zig: true, runs: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+      - name: Toolchain (the version rust-toolchain.toml pins)
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        if: matrix.zig
+        with:
+          python-version: "3.12"
+      - name: Zig, for static musl builds
+        if: matrix.zig
+        run: |
+          pip install ziglang
+          cargo install --locked cargo-zigbuild
+      - name: Build
+        run: |
+          if [ "${{ matrix.zig }}" = true ]; then
+            cargo zigbuild --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+      # The specimen is a cargo feature the release never turns on
+      # (cli-output.md), so a release binary must refuse it like any typo.
+      - name: No specimen in a release binary
+        if: matrix.runs
+        run: |
+          status=0
+          target/${{ matrix.target }}/release/fleet specimen >/dev/null 2>&1 || status=$?
+          if [ "$status" -ne 2 ]; then
+            echo "::error::fleet specimen exited $status; a release binary must refuse it as an unknown command (exit 2)"
+            exit 1
+          fi
+      - name: Package
+        run: |
+          asset=fleet-${{ matrix.target }}.tar.gz
+          tar -czf "$asset" -C target/${{ matrix.target }}/release fleet
+          shasum -a 256 "$asset" > "$asset.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: fleet-${{ matrix.target }}.tar.gz*
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.check.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Changelog, from the release branch's squashed item subjects
+        env:
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          git log -1 --format=%B "$SHA" | grep -E '^\* fleet-[^ :]+: ' > notes.md || true
+      - name: Tag and release, in one step
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: gh release create "v$VERSION" --target "$SHA" --title "v$VERSION" --notes-file notes.md dist/*
+      # Publishing docs/ for this version comes here once its renderer is
+      # chosen (CONTRIBUTING.md § Releasing).

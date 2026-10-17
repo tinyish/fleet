@@ -214,7 +214,7 @@ CLI can print, through the same code a command uses: the help text, the
 start prompt in each state, the spinners, and every way a command can end
 with its hint and exit code. Pipe it (`… 2>&1 | cat`) to see what a script
 sees. The `specimen` feature is off by default, so a release binary has no
-such command.
+such command; the release workflow refuses a binary that accepts it.
 
 It cannot fall behind: every enum a command can end with has a kind twin
 (strum's `EnumDiscriminants`) under that feature, and the specimen builds a
