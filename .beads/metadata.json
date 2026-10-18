@@ -1,7 +1,9 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "embedded",
+  "dolt_mode": "server",
+  "dolt_server_host": "alberto-linux",
+  "dolt_server_user": "beads",
   "dolt_database": "fleet",
   "project_id": "2c501efe-16dc-4f6a-ba02-7716ea515ea0"
 }

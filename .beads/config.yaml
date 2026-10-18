@@ -65,4 +65,13 @@
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
 
-sync.remote: "git+https://github.com/bembot90/tinyfleet.git"
+# No sync.remote: the board is not synced via git. Every machine connects to the
+# one server on alberto-linux:3307, which tinytown's board shares.
+# Off: the server backs the board up every 15m (systemd user timer
+# beads-dolt-backup-fleet -> /mnt/data/beads-backup/fleet on alberto-linux).
+backup:
+    enabled: false
+# Pinned: the Dolt server is alberto-linux:3307 (systemd user unit beads-dolt);
+# bd must never try to start one.
+dolt:
+    auto-start: false
