@@ -41,6 +41,12 @@ pub(crate) enum Request {
         #[arg(long, value_name = "PATH", help = crate::ui::words::STOP_PROJECT_HELP)]
         project: Option<PathBuf>,
     },
+    // `fleet remove`, with any `--project` paths to take out.
+    #[command(about = crate::ui::words::remove::ABOUT)]
+    Remove {
+        #[arg(long = "project", value_name = "PATH", help = crate::ui::words::remove::PROJECT_HELP)]
+        projects: Vec<PathBuf>,
+    },
 }
 
 /// What a command did.
@@ -78,6 +84,15 @@ pub(crate) enum Response {
     SupervisorStopped,
     /// Stop was asked for and the supervisor was not running.
     SupervisorWasNotRunning,
+    /// `fleet remove` was cancelled at its question; nothing was removed.
+    RemoveCancelled,
+    /// `fleet remove` did this.
+    Removed {
+        /// What the supervisor said remove did.
+        response: protocol::response::Remove,
+        /// Whether remove found the supervisor running or started it.
+        startup: Startup,
+    },
 }
 
 /// How a command found the supervisor.
@@ -233,4 +248,6 @@ pub(crate) enum During {
     TurningOff,
     /// Turning one project off.
     TurningOffProject,
+    /// Removing a fleet, or taking projects out of one.
+    Removing,
 }

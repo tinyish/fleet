@@ -35,7 +35,8 @@ pub(crate) fn ensure_supervisor(
     let go = match ask {
         Ask::Yes => true,
         Ask::Never => false,
-        Ask::Terminal => ui::confirm(words::START_PROMPT, true),
+        // A cancel is a no: nothing starts.
+        Ask::Terminal => ui::confirm(words::START_PROMPT, true).unwrap_or(false),
     };
     if !go {
         return Err(Status::NotRunning);

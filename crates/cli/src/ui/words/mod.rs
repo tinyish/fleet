@@ -12,6 +12,7 @@ use crate::protocol::{Doing, Doubt, During, Problem, Response, Startup, Status};
 use crate::ui::output::Ink;
 
 mod doctor;
+pub(crate) mod remove;
 pub(crate) use doctor::{HEALTHY, checked, found, found_next, verdict};
 
 /// What `fleet --help` says tinyfleet is.
@@ -82,6 +83,16 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
         Response::ProjectOff(response) => project_off(response, ink),
         Response::SupervisorStopped => "the supervisor is stopped".into(),
         Response::SupervisorWasNotRunning => "the supervisor was not running".into(),
+        Response::RemoveCancelled => "nothing was removed".into(),
+        Response::Removed {
+            response,
+            startup: Startup::Started,
+        } => format!(
+            "{}; {}",
+            started_supervisor(),
+            remove::removed(response, ink)
+        ),
+        Response::Removed { response, .. } => remove::removed(response, ink),
     }
 }
 
@@ -247,6 +258,11 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
         Status::Refused(protocol::Status::InsideProject { project, .. }) => {
             format!("name its root, {}", ink.whole_path(project))
         }
+        Status::Refused(protocol::Status::NotFleetDirectory { fleet, .. }) => format!(
+            "run {} in {}",
+            ink.accent("fleet remove"),
+            ink.whole_path(fleet)
+        ),
         Status::Refused(protocol::Status::CannotTurnOn { fleet, .. }) => format!(
             "fix the {} in {}, then try again",
             ink.accent("fleet.toml"),
@@ -331,7 +347,8 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
             ink.paths(serving),
             ink.paths(asked)
         ),
-        protocol::Status::InsideFleet { directory, fleet } => format!(
+        protocol::Status::InsideFleet { directory, fleet }
+        | protocol::Status::NotFleetDirectory { directory, fleet } => format!(
             "{} is inside the fleet in {}",
             ink.path(directory),
             ink.path(fleet)
@@ -537,6 +554,7 @@ fn unsure(doubt: &Doubt) -> String {
 fn during_words(during: During) -> String {
     match during {
         During::Creating => "asking the supervisor to create the fleet".into(),
+        During::Removing => "asking the supervisor to remove the fleet".into(),
         During::TurningOn(startup) => {
             format!("{}, but turning every project on", supervisor_was(startup))
         }

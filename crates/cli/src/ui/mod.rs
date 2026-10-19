@@ -18,14 +18,15 @@ fn themed() {
     THEME.call_once(|| cliclack::set_theme(FleetTheme));
 }
 
-/// Asks a yes/no question on the terminal. Enter takes `default`; Esc, a
-/// closed terminal or an error is a no.
-pub(crate) fn confirm(question: &str, default: bool) -> bool {
+/// Asks a yes/no question on the terminal. Enter takes `default`; Esc,
+/// Ctrl-C, a closed terminal or an error is `None`, a cancel, and each caller
+/// says what a cancel means.
+pub(crate) fn confirm(question: &str, default: bool) -> Option<bool> {
     themed();
     cliclack::confirm(question)
         .initial_value(default)
         .interact()
-        .unwrap_or(false)
+        .ok()
 }
 
 /// A spinner on stderr, drawn only when stderr is a terminal. `clear` it when

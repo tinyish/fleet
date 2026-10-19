@@ -57,6 +57,7 @@ const SRC: &str = "/code/app/src";
 pub(super) const WING: &str = "/code/wing";
 const API: &str = "/code/api";
 const WEB: &str = "/code/web";
+const OLD: &str = "/code/old";
 pub(super) const STATE: &str = "/Users/you/Library/Application Support/fleet";
 
 pub(super) fn path(p: &str) -> PathBuf {
@@ -104,6 +105,11 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
                 Startup::iter().map(move |startup| Response::ProjectOn {
                     response: response::ProjectOn {
                         project: path(APP),
+                        forgotten: if picked_up.is_empty() {
+                            vec![]
+                        } else {
+                            vec![path(OLD)]
+                        },
                         picked_up: picked_up.clone(),
                     },
                     startup,
@@ -121,7 +127,51 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
             .collect(),
         ResponseKind::SupervisorStopped => vec![Response::SupervisorStopped],
         ResponseKind::SupervisorWasNotRunning => vec![Response::SupervisorWasNotRunning],
+        ResponseKind::RemoveCancelled => vec![Response::RemoveCancelled],
+        ResponseKind::Removed => removes()
+            .into_iter()
+            .flat_map(|response| {
+                Startup::iter().map(move |startup| Response::Removed {
+                    response: response.clone(),
+                    startup,
+                })
+            })
+            .collect(),
     }
+}
+
+/// Every way remove can end well: a fleet removed with its file deleted,
+/// kept or already gone, a wingman fleet too, projects taken out one or
+/// many, and nothing to remove.
+fn removes() -> Vec<response::Remove> {
+    use response::{ConfigFate, Remove};
+    let mut all: Vec<Remove> = [ConfigFate::Deleted, ConfigFate::Kept, ConfigFate::Missing]
+        .into_iter()
+        .map(|config| Remove::Removed {
+            directory: path(APP),
+            projects: vec![path(APP)],
+            config,
+        })
+        .collect();
+    all.push(Remove::Removed {
+        directory: path(WING),
+        projects: vec![path(API), path(WEB)],
+        config: ConfigFate::Kept,
+    });
+    for taken in [vec![path(WEB)], vec![path(API), path(WEB)]] {
+        all.push(Remove::ProjectsTaken {
+            directory: path(WING),
+            taken,
+            remaining: vec![path(APP)],
+        });
+    }
+    all.push(Remove::Ask {
+        directory: path(APP),
+    });
+    all.push(Remove::NothingHere {
+        directory: path(SRC),
+    });
+    all
 }
 
 /// What re-reading the configs can pick up: a project added to one fleet and
@@ -151,12 +201,17 @@ fn all_ons(broken: bool) -> Vec<response::AllOn> {
         fleets: vec![path(APP), path(WING)],
         picked_up: vec![],
         stayed_off: vec![],
+        forgotten: vec![],
     };
     if !broken {
         return vec![
             fine.clone(),
             response::AllOn {
                 picked_up: picked_up(),
+                ..fine.clone()
+            },
+            response::AllOn {
+                forgotten: vec![path(OLD), path(WEB)],
                 ..fine
             },
             response::AllOn::default(),
@@ -172,6 +227,7 @@ fn all_ons(broken: bool) -> Vec<response::AllOn> {
             fleets: vec![path(APP)],
             picked_up: vec![],
             stayed_off: vec![off(WING, bad_config())],
+            forgotten: vec![path(OLD)],
         },
         response::AllOn {
             on: vec![],
@@ -186,6 +242,7 @@ fn all_ons(broken: bool) -> Vec<response::AllOn> {
                     },
                 ),
             ],
+            forgotten: vec![],
         },
     ]
 }
@@ -331,6 +388,10 @@ fn refusal(kind: fleet_core::status::StatusKind) -> protocol::Status {
         K::InsideProject => S::InsideProject {
             path: path(SRC),
             project: path(APP),
+        },
+        K::NotFleetDirectory => S::NotFleetDirectory {
+            directory: path(SRC),
+            fleet: path(APP),
         },
         K::NoLongerServed => S::NoLongerServed {
             project: path(API),
@@ -507,6 +568,7 @@ fn durings() -> Vec<During> {
             DuringKind::TurningOnProject => Startup::iter().map(During::TurningOnProject).collect(),
             DuringKind::TurningOff => vec![During::TurningOff],
             DuringKind::TurningOffProject => vec![During::TurningOffProject],
+            DuringKind::Removing => vec![During::Removing],
         })
         .collect()
 }

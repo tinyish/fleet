@@ -1,6 +1,7 @@
 //! The steps the record holds, and how one is stored as a row: its name in
 //! AIP-126 spelling in `step`, and its fields as a JSON object in `detail`.
 
+use fleet_core::protocol::response::ConfigFate;
 use fleet_core::status::Status;
 use serde::Serialize;
 
@@ -60,6 +61,27 @@ pub enum Step {
         /// Why, as the facts the CLI words.
         why: Status,
     },
+    /// A fleet was removed, and with it its projects.
+    FleetRemoved {
+        /// The fleet's directory.
+        directory: String,
+        /// The projects it served.
+        projects: Vec<String>,
+        /// What became of its config file.
+        config: ConfigFate,
+    },
+    /// Projects were taken out of a wingman fleet, which stays.
+    ProjectsTaken {
+        /// The fleet's directory.
+        fleet: String,
+        /// The projects taken out.
+        projects: Vec<String>,
+    },
+    /// A fleet whose directory no longer exists was forgotten by a start.
+    FleetForgotten {
+        /// The fleet's directory.
+        directory: String,
+    },
 }
 
 impl Step {
@@ -115,6 +137,18 @@ mod tests {
                     path: "/f/fleet.toml".into(),
                 },
             },
+            Step::FleetRemoved {
+                directory: "/f".into(),
+                projects: vec!["/c/a".into()],
+                config: ConfigFate::Kept,
+            },
+            Step::ProjectsTaken {
+                fleet: "/f".into(),
+                projects: vec!["/c/a".into()],
+            },
+            Step::FleetForgotten {
+                directory: "/f".into(),
+            },
         ]
     }
 
@@ -136,7 +170,10 @@ mod tests {
                 "PROJECT_OFF",
                 "PROJECT_ADDED",
                 "PROJECT_REMOVED",
-                "FLEET_CONFIG_BROKEN"
+                "FLEET_CONFIG_BROKEN",
+                "FLEET_REMOVED",
+                "PROJECTS_TAKEN",
+                "FLEET_FORGOTTEN"
             ]
         );
     }

@@ -57,6 +57,59 @@ pub fn decide_create(
     refusal_against(registered, &wanted).unwrap_or(CreateDecision::Create(wanted))
 }
 
+/// What removing in a directory would do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoveDecision {
+    /// Remove this whole fleet.
+    Whole(Fleet),
+    /// Take these projects out of this wingman fleet; it keeps the rest.
+    Take {
+        /// The fleet, as registered.
+        fleet: Fleet,
+        /// The projects to take out, sorted and once each.
+        taken: Vec<PathBuf>,
+    },
+    /// No fleet is registered in the directory, nor around it.
+    NothingHere,
+    /// Refused, for this reason.
+    Refuse(Status),
+}
+
+/// Decides what removing the fleet in `directory` does, given the fleets
+/// `registered`. No `named` projects means the whole fleet, and so does
+/// naming every one of its projects. Paths arrive canonical.
+#[must_use]
+pub fn decide_remove(registered: &[Fleet], directory: &Path, named: &[PathBuf]) -> RemoveDecision {
+    let Some(fleet) = registered.iter().find(|f| f.directory == directory) else {
+        let around = registered.iter().find(|f| {
+            directory.starts_with(&f.directory)
+                || f.projects.iter().any(|p| directory.starts_with(p))
+        });
+        return match around {
+            Some(f) => RemoveDecision::Refuse(Status::NotFleetDirectory {
+                directory: directory.to_path_buf(),
+                fleet: f.directory.clone(),
+            }),
+            None => RemoveDecision::NothingHere,
+        };
+    };
+    if let Some(stranger) = named.iter().find(|p| !fleet.projects.contains(p)) {
+        return RemoveDecision::Refuse(Status::NotServed {
+            path: stranger.clone(),
+        });
+    }
+    if named.is_empty() || fleet.projects.iter().all(|p| named.contains(p)) {
+        return RemoveDecision::Whole(fleet.clone());
+    }
+    let mut taken = named.to_vec();
+    taken.sort();
+    taken.dedup();
+    RemoveDecision::Take {
+        fleet: fleet.clone(),
+        taken,
+    }
+}
+
 /// The projects a fleet in `directory` serves, from the paths it was given
 /// or its config names: sorted and once each. No paths means a default
 /// fleet, `directory` its one project.
@@ -566,6 +619,68 @@ mod tests {
                 project: p("/c/app"),
                 fleet: p("/f/work")
             })
+        );
+    }
+
+    #[test]
+    fn plain_remove_takes_the_whole_fleet_here() {
+        let registered = [fleet("/w", &["/c/api", "/c/blog"])];
+        assert_eq!(
+            decide_remove(&registered, Path::new("/w"), &[]),
+            RemoveDecision::Whole(registered[0].clone())
+        );
+    }
+
+    #[test]
+    fn naming_some_projects_takes_them_and_naming_all_takes_the_fleet() {
+        let registered = [fleet("/w", &["/c/api", "/c/blog"])];
+        assert_eq!(
+            decide_remove(&registered, Path::new("/w"), &[p("/c/blog")]),
+            RemoveDecision::Take {
+                fleet: registered[0].clone(),
+                taken: vec![p("/c/blog")],
+            }
+        );
+        assert_eq!(
+            decide_remove(&registered, Path::new("/w"), &[p("/c/blog"), p("/c/api")]),
+            RemoveDecision::Whole(registered[0].clone())
+        );
+        let default = [fleet("/c/app", &["/c/app"])];
+        assert_eq!(
+            decide_remove(&default, Path::new("/c/app"), &[p("/c/app")]),
+            RemoveDecision::Whole(default[0].clone())
+        );
+    }
+
+    #[test]
+    fn a_project_this_fleet_does_not_serve_is_refused() {
+        let registered = [fleet("/w", &["/c/api"]), fleet("/c/app", &["/c/app"])];
+        assert_eq!(
+            decide_remove(&registered, Path::new("/w"), &[p("/c/app")]),
+            RemoveDecision::Refuse(Status::NotServed { path: p("/c/app") })
+        );
+    }
+
+    #[test]
+    fn inside_a_fleet_or_its_project_names_the_fleet_and_elsewhere_is_nothing_here() {
+        let registered = [fleet("/c/app", &["/c/app"]), fleet("/w", &["/c/api"])];
+        assert_eq!(
+            decide_remove(&registered, Path::new("/c/app/src"), &[]),
+            RemoveDecision::Refuse(Status::NotFleetDirectory {
+                directory: p("/c/app/src"),
+                fleet: p("/c/app"),
+            })
+        );
+        assert_eq!(
+            decide_remove(&registered, Path::new("/c/api/lib"), &[]),
+            RemoveDecision::Refuse(Status::NotFleetDirectory {
+                directory: p("/c/api/lib"),
+                fleet: p("/w"),
+            })
+        );
+        assert_eq!(
+            decide_remove(&registered, Path::new("/elsewhere"), &[]),
+            RemoveDecision::NothingHere
         );
     }
 }

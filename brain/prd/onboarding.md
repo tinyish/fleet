@@ -49,6 +49,18 @@ anything to their projects.
   never overwrites what is there, and says what it found.
 - **Passes through:** create, start.
 
+### Taking a fleet off a project
+
+- **Trying to:** stop using tinyfleet on a project, or undo a fleet made by
+  mistake or in the wrong place, including one whose directory has since been
+  moved or deleted.
+- **Success:** the fleet is gone from tinyfleet, and starting the fleets that
+  remain no longer mentions it. Its config file is deleted only when the
+  person says so; with nobody there to ask, it stays. Nothing else in the
+  project changes. Removing a fleet that is not there says so and changes
+  nothing.
+- **Passes through:** remove, start.
+
 ### Checking the machine after a change
 
 - **Trying to:** know whether what tinyfleet runs on is still in order after

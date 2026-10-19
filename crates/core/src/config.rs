@@ -92,6 +92,83 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     })
 }
 
+/// `text` with the `projects` entries for which `drop` is true taken out,
+/// and everything else as the person wrote it: comments, spacing, relative
+/// paths. A comment ending an entry's line goes with that entry; the one
+/// ending the line before stays where it is.
+///
+/// # Errors
+///
+/// When the text is not TOML.
+pub fn without_projects(
+    text: &str,
+    mut drop: impl FnMut(&str) -> bool,
+) -> Result<String, ConfigError> {
+    let mut doc: toml_edit::DocumentMut =
+        text.parse()
+            .map_err(|e: toml_edit::TomlError| ConfigError {
+                line: None,
+                column: None,
+                message: e.message().to_owned(),
+            })?;
+    let Some(array) = doc
+        .get_mut("projects")
+        .and_then(toml_edit::Item::as_array_mut)
+    else {
+        return Ok(doc.to_string());
+    };
+    // The prefix of the first entry taken in a run: the end of the line
+    // before it, which stays, and its spacing on a one-line list.
+    let mut kept: Option<String> = None;
+    let mut i = 0;
+    while i < array.len() {
+        if array
+            .get(i)
+            .and_then(toml_edit::Value::as_str)
+            .is_some_and(&mut drop)
+        {
+            let taken = array.remove(i);
+            kept.get_or_insert_with(|| prefix(&taken));
+            continue;
+        }
+        if let Some(before) = kept.take()
+            && let Some(value) = array.get_mut(i)
+        {
+            let own = prefix(value);
+            value.decor_mut().set_prefix(rejoin(&before, &own));
+        }
+        i += 1;
+    }
+    if let Some(before) = kept {
+        let own = array.trailing().as_str().unwrap_or_default().to_owned();
+        array.set_trailing(rejoin(&before, &own));
+    }
+    Ok(doc.to_string())
+}
+
+/// The whitespace and comments before a value in an array.
+fn prefix(value: &toml_edit::Value) -> String {
+    value
+        .decor()
+        .prefix()
+        .and_then(toml_edit::RawString::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// `own`, a prefix whose first line belonged to a taken entry, with that
+/// line replaced by the end of the line before the taken entry, from
+/// `before`, the taken entry's own prefix. On one line, the taken entry's
+/// spacing is kept instead.
+fn rejoin(before: &str, own: &str) -> String {
+    let end = &before[..before.find('\n').unwrap_or(before.len())];
+    match own.find('\n') {
+        Some(newline) => format!("{end}{}", &own[newline..]),
+        None if own.contains('#') => format!("{before}{own}"),
+        None => before.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +237,49 @@ mod tests {
     fn broken_toml_and_unknown_keys_are_errors() {
         assert!(parse("projects = [").is_err());
         assert!(parse("project = []").is_err());
+    }
+
+    #[test]
+    fn taking_a_project_keeps_comments_spelling_and_the_rest() {
+        let text = "# mine\nprojects = [\n  \"../api\", # the api\n  \"/c/blog\",\n]\n";
+        let edited = without_projects(text, |p| p == "/c/blog");
+        assert_eq!(
+            edited.as_deref().ok(),
+            Some("# mine\nprojects = [\n  \"../api\", # the api\n]\n")
+        );
+    }
+
+    #[test]
+    fn a_taken_entrys_own_comment_goes_with_it() {
+        let text =
+            "projects = [\n  \"/c/api\", # api\n  \"/c/blog\", # blog\n  \"/c/web\", # web\n]\n";
+        let edited = without_projects(text, |p| p == "/c/blog");
+        assert_eq!(
+            edited.as_deref().ok(),
+            Some("projects = [\n  \"/c/api\", # api\n  \"/c/web\", # web\n]\n")
+        );
+        let first = without_projects(text, |p| p == "/c/api");
+        assert_eq!(
+            first.as_deref().ok(),
+            Some("projects = [\n  \"/c/blog\", # blog\n  \"/c/web\", # web\n]\n")
+        );
+    }
+
+    #[test]
+    fn a_one_line_list_stays_one_line() {
+        let edited = without_projects("projects = [\"/c/api\", \"/c/blog\"]\n", |p| p == "/c/api");
+        assert_eq!(edited.as_deref().ok(), Some("projects = [\"/c/blog\"]\n"));
+    }
+
+    #[test]
+    fn taking_every_project_keeps_the_key_and_the_comments() {
+        let text = "# mine\nprojects = [\"/c/api\"]\n";
+        let edited = without_projects(text, |_| true);
+        assert_eq!(edited.as_deref().ok(), Some("# mine\nprojects = []\n"));
+    }
+
+    #[test]
+    fn a_text_that_is_not_toml_is_an_error() {
+        assert!(without_projects("projects = [", |_| true).is_err());
     }
 }

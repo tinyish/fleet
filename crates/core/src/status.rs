@@ -146,6 +146,14 @@ pub enum Status {
         /// The project it is inside.
         project: PathBuf,
     },
+    /// Remove was run inside a fleet's directory or one of its projects, not
+    /// at the fleet's directory.
+    NotFleetDirectory {
+        /// The directory remove was run in.
+        directory: PathBuf,
+        /// The fleet it is inside.
+        fleet: PathBuf,
+    },
     /// Re-reading its fleet's config just dropped this project.
     NoLongerServed {
         /// The project.

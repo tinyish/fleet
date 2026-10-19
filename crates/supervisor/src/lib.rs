@@ -3,6 +3,7 @@
 
 mod create;
 mod projects;
+mod remove;
 mod words;
 
 use fleet_core::protocol;
@@ -157,6 +158,11 @@ fn answer(state: &Mutex<State>, stream: &UnixStream) -> Result<(), Error> {
             directory,
             projects,
         })) => create::create(state, &directory, &projects)?,
+        Ok(Request::Remove(request::Remove::Fleet {
+            directory,
+            projects,
+            config,
+        })) => remove::remove(state, &directory, &projects, config)?,
         // The parser's own detail; any other failure means no reply could
         // reach the other side, so it is only logged.
         Err(ProtocolError::Malformed(error)) => Reply::Status(Status::Malformed { error }),

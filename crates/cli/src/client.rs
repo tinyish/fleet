@@ -121,6 +121,20 @@ pub(crate) fn create(socket: &Path, create: request::Create) -> Result<response:
     )
 }
 
+/// `fleet remove`'s request.
+pub(crate) fn remove(socket: &Path, remove: request::Remove) -> Result<response::Remove, Status> {
+    ask_for(
+        socket,
+        &Request::Remove(remove),
+        During::Removing,
+        "remove",
+        |r| match r {
+            Response::Remove(removed) => Some(removed),
+            _ => None,
+        },
+    )
+}
+
 /// `fleet start`'s request for every project, after the supervisor was
 /// found or started as `startup` says.
 pub(crate) fn start_all(socket: &Path, startup: Startup) -> Result<response::AllOn, Status> {

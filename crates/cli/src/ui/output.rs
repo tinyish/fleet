@@ -158,17 +158,37 @@ pub(crate) fn line(mark: Mark, text: &str) {
     };
 }
 
+/// The fleets a start forgot because their directory is gone.
+fn forgotten(ending: &Result<Response, Status>) -> &[PathBuf] {
+    match ending {
+        Ok(Response::Started { response, .. }) | Err(Status::PartlyOn { response, .. }) => {
+            &response.forgotten
+        }
+        Ok(Response::ProjectOn { response, .. }) => &response.forgotten,
+        _ => &[],
+    }
+}
+
 /// The lines an ending prints, each with its mark, then what to do next when
 /// there is something to do. Most endings are one line; a start that left
-/// some fleets off is a done line, then one error line per fleet.
+/// some fleets off is a done line, then one error line per fleet. A start
+/// that forgot fleets says so, one warning line each, after its done line.
 pub(crate) fn lines(ending: &Result<Response, Status>) -> Vec<(Mark, String)> {
+    let gone = forgotten(ending)
+        .iter()
+        .map(|dir| (Mark::Warn, words::remove::forgotten(dir, ERR)));
     let (mut lines, next) = match ending {
         Ok(response) => (
-            vec![(Mark::Done, words::response(response, OUT))],
+            std::iter::once((Mark::Done, words::response(response, OUT)))
+                .chain(gone)
+                .collect(),
             words::next_after(response, ERR),
         ),
         Err(status @ Status::PartlyOn { response, startup }) => {
-            let mut lines = vec![(Mark::Done, words::partly_on(response, *startup, OUT))];
+            let mut lines: Vec<(Mark, String)> =
+                std::iter::once((Mark::Done, words::partly_on(response, *startup, OUT)))
+                    .chain(gone)
+                    .collect();
             for off in &response.stayed_off {
                 lines.push((Mark::Error, words::stayed_off(off, ERR)));
             }
@@ -358,11 +378,15 @@ mod tests {
                 fleets: vec![PathBuf::from("/code/app")],
                 picked_up: vec![],
                 stayed_off: vec![off("/code/wing"), off("/code/blog")],
+                forgotten: vec![PathBuf::from("/code/old")],
             },
             startup: crate::protocol::Startup::WasRunning,
         });
         let marks: Vec<Mark> = lines(&ending).into_iter().map(|(m, _)| m).collect();
-        assert_eq!(marks, [Mark::Done, Mark::Error, Mark::Error, Mark::Next]);
+        assert_eq!(
+            marks,
+            [Mark::Done, Mark::Warn, Mark::Error, Mark::Error, Mark::Next]
+        );
     }
 
     #[test]

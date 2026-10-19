@@ -1,7 +1,7 @@
 //! Where tinyfleet keeps what it writes.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The state file's name, in the state directory.
 pub const STATE_FILE: &str = "state.sqlite3";
@@ -87,6 +87,24 @@ pub fn state_dir(os: Os, var: impl Fn(&str) -> Option<OsString>) -> Result<PathB
     })
 }
 
+/// `path` with `.` and `..` resolved by its text alone, for a path that no
+/// longer exists and so cannot be made canonical. `..` at the root stays at
+/// the root.
+#[must_use]
+pub fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +179,14 @@ mod tests {
         assert!(matches!(state_dir(Os::MacOs, &var), Err(PathError::NoHome)));
         let var = env(&[("HOME", "")]);
         assert!(matches!(state_dir(Os::Linux, &var), Err(PathError::NoHome)));
+    }
+
+    #[test]
+    fn lexical_resolves_dots_by_text() {
+        assert_eq!(
+            lexical(Path::new("/c/wing/../blog/./src")),
+            PathBuf::from("/c/blog/src")
+        );
+        assert_eq!(lexical(Path::new("/../c")), PathBuf::from("/c"));
     }
 }

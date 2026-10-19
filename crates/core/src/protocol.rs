@@ -26,6 +26,8 @@ pub enum Request {
     Start(request::Start),
     /// For `fleet stop`.
     Stop(request::Stop),
+    /// For `fleet remove`.
+    Remove(request::Remove),
 }
 
 /// The requests of each command. Always written with the module, as in
@@ -74,6 +76,36 @@ pub mod request {
             project: PathBuf,
         },
     }
+
+    /// What `fleet remove` asks.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Remove {
+        /// Remove the fleet in `directory`, or, when `projects` are named
+        /// and they are not all of its projects, take them out of it.
+        Fleet {
+            /// The fleet directory, absolute.
+            directory: PathBuf,
+            /// The projects to take out, absolute; none means the fleet.
+            projects: Vec<PathBuf>,
+            /// What to do with the fleet's config file when the whole fleet
+            /// goes.
+            config: ConfigChoice,
+        },
+    }
+
+    /// What to do with a removed fleet's config file.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ConfigChoice {
+        /// Ask the person first: when the whole fleet would go and its file
+        /// is there, change nothing and answer `Ask`.
+        Ask,
+        /// Delete it.
+        Delete,
+        /// Leave it where it is.
+        Keep,
+    }
 }
 
 /// What a request did, when the supervisor did it, grouped by the command
@@ -91,6 +123,8 @@ pub enum Response {
     Start(response::Start),
     /// What `fleet stop` did.
     Stop(response::Stop),
+    /// What `fleet remove` did.
+    Remove(response::Remove),
 }
 
 /// The responses of each command. Always written with the module, as in
@@ -157,6 +191,10 @@ pub mod response {
         pub picked_up: Vec<PickedUp>,
         /// The fleets whose config did not read, so their projects are off.
         pub stayed_off: Vec<StayedOff>,
+        /// The fleets whose directory no longer exists, so they were
+        /// forgotten; absent from a supervisor older than this field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub forgotten: Vec<PathBuf>,
     }
 
     /// One project is on.
@@ -166,6 +204,10 @@ pub mod response {
         pub project: PathBuf,
         /// What re-reading the configs changed.
         pub picked_up: Vec<PickedUp>,
+        /// The fleets whose directory no longer exists, so they were
+        /// forgotten; absent from a supervisor older than this field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub forgotten: Vec<PathBuf>,
     }
 
     /// One project is off; the rest of its fleet keeps its own on or off.
@@ -186,6 +228,54 @@ pub mod response {
         pub added: Vec<PathBuf>,
         /// Projects its config no longer names.
         pub removed: Vec<PathBuf>,
+    }
+
+    /// What `fleet remove` did.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Remove {
+        /// The fleet is gone, with what became of its config file.
+        Removed {
+            /// The fleet directory.
+            directory: PathBuf,
+            /// The projects it served.
+            projects: Vec<PathBuf>,
+            /// What became of its config file.
+            config: ConfigFate,
+        },
+        /// The wingman fleet stays; these projects are no longer its.
+        ProjectsTaken {
+            /// The fleet directory.
+            directory: PathBuf,
+            /// The projects taken out.
+            taken: Vec<PathBuf>,
+            /// The projects it still serves.
+            remaining: Vec<PathBuf>,
+        },
+        /// The whole fleet would go and its config file is there, and the
+        /// request said to ask first: nothing changed. Ask the person, then
+        /// send the request again with their answer.
+        Ask {
+            /// The fleet directory.
+            directory: PathBuf,
+        },
+        /// No fleet is registered in `directory`; nothing changed.
+        NothingHere {
+            /// The directory remove was run in.
+            directory: PathBuf,
+        },
+    }
+
+    /// What became of a removed fleet's config file.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ConfigFate {
+        /// It was deleted.
+        Deleted,
+        /// It was left where it is.
+        Kept,
+        /// There was none.
+        Missing,
     }
 
     /// A fleet whose config did not read, and why.
@@ -364,11 +454,13 @@ mod tests {
                         error: "expected `]`".into(),
                     },
                 }],
+                forgotten: vec![PathBuf::from("/f/old")],
             }))),
             Reply::Response(Response::Start(response::Start::ProjectOn(
                 response::ProjectOn {
                     project: PathBuf::from("/c/app"),
                     picked_up: vec![],
+                    forgotten: vec![],
                 },
             ))),
             Reply::Response(Response::Stop(response::Stop::ProjectOff(
@@ -457,5 +549,48 @@ mod tests {
             socket_path(Path::new(&long)),
             Err(SocketPathTooLong(_))
         ));
+    }
+
+    #[test]
+    fn a_remove_and_its_answers_round_trip() {
+        let request = Request::Remove(request::Remove::Fleet {
+            directory: "/w".into(),
+            projects: vec!["/c/api".into()],
+            config: request::ConfigChoice::Ask,
+        });
+        let line = serde_json::to_string(&request).unwrap_or_default();
+        assert_eq!(serde_json::from_str::<Request>(&line).ok(), Some(request));
+        for answer in [
+            response::Remove::Removed {
+                directory: "/w".into(),
+                projects: vec!["/c/api".into()],
+                config: response::ConfigFate::Kept,
+            },
+            response::Remove::ProjectsTaken {
+                directory: "/w".into(),
+                taken: vec!["/c/blog".into()],
+                remaining: vec!["/c/api".into()],
+            },
+            response::Remove::Ask {
+                directory: "/w".into(),
+            },
+            response::Remove::NothingHere {
+                directory: "/w".into(),
+            },
+        ] {
+            let reply = Reply::Response(Response::Remove(answer));
+            let line = serde_json::to_string(&reply).unwrap_or_default();
+            assert_eq!(serde_json::from_str::<Reply>(&line).ok(), Some(reply));
+        }
+    }
+
+    #[test]
+    fn a_start_answer_without_forgotten_still_reads() {
+        let line = r#"{"response":{"start":{"all_on":{"on":[],"fleets":[],"picked_up":[],"stayed_off":[]}}}}"#;
+        let reply = serde_json::from_str::<Reply>(line).ok();
+        assert!(
+            matches!(&reply, Some(Reply::Response(Response::Start(response::Start::AllOn(all)))) if all.forgotten.is_empty()),
+            "{reply:?}"
+        );
     }
 }

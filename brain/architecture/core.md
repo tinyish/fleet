@@ -133,9 +133,24 @@ brings the supervisor up if it is down, re-reads every fleet's config so a
 project just added is found, and turns that one project on; stop turns it off.
 The other projects of its fleet keep their own on or off. Re-reading never
 changes an existing project's on or off: a project added comes in off, and
-one removed from its config is dropped.
+one removed from its config is dropped. A fleet whose directory no longer
+exists is forgotten by the re-read, and start says so; one whose directory
+cannot be looked at is not gone, and stays off.
 *(Directional, with the agent adapter: on, it launches or adopts each agent's
 session in tmux; off, it leaves the sessions alone.)*
+
+**remove**: the CLI asks the supervisor to remove the fleet whose directory
+is the current one, or, with `--project`, to take those projects out of a
+wingman fleet. The request says what to do with the fleet's `fleet.toml`:
+delete it, keep it, or ask. At a terminal it says ask. Then, when a whole
+registered fleet would go and its `fleet.toml` is there, the supervisor
+changes nothing and asks back; the CLI asks the person and sends the request
+again with the answer. Anywhere else the file is kept. Under its lock the
+supervisor removes the fleet, deleting its `fleet.toml` when told to, or edits
+the wingman's `fleet.toml` in place without the taken projects. The file is
+deleted or rewritten inside the same state write, so a file that cannot be
+changed leaves the registry as it was. Taking every project removes the
+fleet; a directory with no fleet is nothing to remove, and says so.
 
 **doctor**: the CLI checks, and reports each as fine, missing or could not
 tell: the service manager (it answers), git (on the `PATH`, its version), the supervisor (whether it

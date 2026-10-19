@@ -179,6 +179,34 @@ impl Write<'_> {
         Ok(())
     }
 
+    /// Removes the fleet in `directory`; its projects go with it.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails or the path is not UTF-8.
+    pub fn remove_fleet(&mut self, directory: &Path) -> Result<(), StateError> {
+        self.tx.execute(
+            "DELETE FROM fleets WHERE directory = ?1",
+            params![utf8(directory)?],
+        )?;
+        Ok(())
+    }
+
+    /// Takes `projects` out of the fleet that serves them.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails or a path is not UTF-8.
+    pub fn remove_projects(&mut self, projects: &[PathBuf]) -> Result<(), StateError> {
+        for project in projects {
+            self.tx.execute(
+                "DELETE FROM projects WHERE directory = ?1",
+                params![utf8(project)?],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Turns one project on or off.
     ///
     /// # Errors
@@ -350,6 +378,31 @@ mod tests {
             fleets,
             vec![fleet("/f/b", &["/c/api", "/c/app", "/c/new", "/c/web"])]
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn removing_a_fleet_takes_its_projects_with_it() {
+        let (mut state, dir) = fresh("remove");
+        let f = fleet("/f/a", &["/c/api", "/c/app"]);
+        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
+        assert!(state.write(|w| w.remove_fleet(Path::new("/f/a"))).is_ok());
+        assert_eq!(state.fleets().ok(), Some(vec![]));
+        assert_eq!(active(&state, "/c/app"), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn taking_projects_keeps_the_fleet_and_the_rest() {
+        let (mut state, dir) = fresh("take");
+        let f = fleet("/f/a", &["/c/api", "/c/app"]);
+        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
+        assert!(
+            state
+                .write(|w| w.remove_projects(&[PathBuf::from("/c/app")]))
+                .is_ok()
+        );
+        assert_eq!(state.fleets().ok(), Some(vec![fleet("/f/a", &["/c/api"])]));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -39,6 +39,9 @@ struct Reread {
     broken: Vec<(Fleet, Status)>,
     /// What each fleet that read gains and loses.
     changes: Vec<(PathBuf, fleets::Change)>,
+    /// Fleets whose directory no longer exists: they are forgotten. One that
+    /// cannot be looked at (permission denied) is not gone; it is broken.
+    gone: Vec<Fleet>,
 }
 
 /// Re-reads every fleet's config, in two phases: first every config is
@@ -49,7 +52,12 @@ fn reread_all(state: &State) -> Result<Reread, Error> {
     let registered = state.fleets()?;
     let mut read = Vec::new();
     let mut broken = Vec::new();
+    let mut gone = Vec::new();
     for fleet in registered {
+        if matches!(fleet.directory.try_exists(), Ok(false)) {
+            gone.push(fleet);
+            continue;
+        }
         match read_resolved(&fleet) {
             Ok(wanted) => read.push((fleet, wanted)),
             Err(why) => broken.push((fleet, why)),
@@ -76,10 +84,16 @@ fn reread_all(state: &State) -> Result<Reread, Error> {
         ok,
         broken,
         changes,
+        gone,
     })
 }
 
 impl Reread {
+    /// The fleets the re-read forgets, for the answer.
+    fn forgotten(&self) -> Vec<PathBuf> {
+        self.gone.iter().map(|f| f.directory.clone()).collect()
+    }
+
     /// What the re-read changed, for the answer.
     fn picked_up(&self) -> Vec<response::PickedUp> {
         self.changes
@@ -118,6 +132,12 @@ impl Reread {
                 why: why.clone(),
             })?;
         }
+        for fleet in &self.gone {
+            w.remove_fleet(&fleet.directory)?;
+            w.record(&Step::FleetForgotten {
+                directory: shown(&fleet.directory),
+            })?;
+        }
         Ok(())
     }
 }
@@ -138,6 +158,7 @@ pub(crate) fn all_on(state: &Mutex<State>) -> Result<Reply, Error> {
         }
         w.record(&Step::EveryFleetOn)
     })?;
+    let forgotten = reread.forgotten();
     let all_on = response::AllOn {
         on: reread
             .ok
@@ -154,6 +175,7 @@ pub(crate) fn all_on(state: &Mutex<State>) -> Result<Reply, Error> {
                 why,
             })
             .collect(),
+        forgotten,
     };
     Ok(Reply::Response(Response::Start(response::Start::AllOn(
         all_on,
@@ -240,6 +262,7 @@ pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, 
         response::Start::ProjectOn(response::ProjectOn {
             project,
             picked_up: reread.picked_up(),
+            forgotten: reread.forgotten(),
         }),
     )))
 }
@@ -330,6 +353,68 @@ mod tests {
             "{reply:?}"
         );
         assert_eq!(lock(&state).fleets().ok(), Some(vec![before]));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn registered(state: &Mutex<State>, directory: &Path, projects: &[PathBuf]) {
+        let fleet = Fleet {
+            directory: directory.to_path_buf(),
+            projects: projects.to_vec(),
+        };
+        assert!(
+            lock(state)
+                .write(|w| w.create_fleet(&fleet, || Ok(())))
+                .is_ok()
+        );
+    }
+
+    fn all_on_reply(state: &Mutex<State>) -> Option<response::AllOn> {
+        match all_on(state) {
+            Ok(Reply::Response(Response::Start(response::Start::AllOn(all)))) => Some(all),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_fleet_whose_directory_is_gone_is_forgotten_by_start() {
+        let (root, state) = tree("gone", &["app", "api"]);
+        let app = root.join("code").join("app");
+        let _ = fs::write(app.join("fleet.toml"), "");
+        registered(&state, &app, std::slice::from_ref(&app));
+        let wing = wingman(&root, &state, &["api"]);
+        write_config(&root, &["api"]);
+        let _ = fs::remove_dir_all(&wing.directory);
+        let all = all_on_reply(&state);
+        assert_eq!(
+            all.as_ref().map(|a| a.forgotten.clone()),
+            Some(vec![wing.directory.clone()])
+        );
+        assert_eq!(all.map(|a| a.stayed_off.len()), Some(0));
+        let left = lock(&state).fleets().ok();
+        assert_eq!(
+            left.map(|f| f.into_iter().map(|f| f.directory).collect::<Vec<_>>()),
+            Some(vec![app])
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_looked_at_is_not_forgotten() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var("USER").is_ok_and(|u| u == "root") {
+            return;
+        }
+        let (root, state) = tree("locked", &["api"]);
+        let locked = root.join("locked");
+        let fleet = locked.join("wing");
+        let _ = fs::create_dir_all(&fleet);
+        registered(&state, &fleet, &[root.join("code").join("api")]);
+        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o000));
+        let all = all_on_reply(&state);
+        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o755));
+        assert_eq!(all.as_ref().map(|a| a.forgotten.len()), Some(0), "{all:?}");
+        assert_eq!(all.map(|a| a.stayed_off.len()), Some(1));
+        assert_eq!(lock(&state).fleets().map(|f| f.len()).ok(), Some(1));
         let _ = fs::remove_dir_all(root);
     }
 }
