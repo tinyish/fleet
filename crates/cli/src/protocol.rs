@@ -41,6 +41,9 @@ pub(crate) enum Request {
         #[arg(long, value_name = "PATH", help = crate::ui::words::STOP_PROJECT_HELP)]
         project: Option<PathBuf>,
     },
+    // `fleet uninstall`.
+    #[command(about = crate::ui::words::uninstall::ABOUT)]
+    Uninstall,
     // `fleet remove`, with any `--project` paths to take out.
     #[command(about = crate::ui::words::remove::ABOUT)]
     Remove {
@@ -84,8 +87,19 @@ pub(crate) enum Response {
     SupervisorStopped,
     /// Stop was asked for and the supervisor was not running.
     SupervisorWasNotRunning,
-    /// `fleet remove` was cancelled at its question; nothing was removed.
-    RemoveCancelled,
+    /// The person said no, or cancelled, at a command's question; nothing
+    /// was removed.
+    Cancelled,
+    /// `fleet uninstall` took tinyfleet off this machine.
+    Uninstalled {
+        /// The `fleet` binary it deleted.
+        binary: PathBuf,
+        /// The state directory it emptied.
+        state_dir: PathBuf,
+        /// Whether the state directory was kept, holding files tinyfleet did
+        /// not write.
+        kept_state_dir: bool,
+    },
     /// `fleet remove` did this.
     Removed {
         /// What the supervisor said remove did.
@@ -120,6 +134,9 @@ pub(crate) enum Status {
     /// The command needs the supervisor, it is not running, and nobody may
     /// start it (no terminal to ask, no `--non-interactive`).
     NotRunning,
+    /// The command asks first, and there is no terminal to ask and no
+    /// `--non-interactive`; nothing was done.
+    NeedsAnswer,
     /// Something may or may not have happened.
     CouldNotTell(Doubt),
     /// `fleet start` turned projects on, but some fleets' configs did not
@@ -133,12 +150,14 @@ pub(crate) enum Status {
 }
 
 impl Status {
-    /// The exit code a script reads: 1 refused, cannot, or partly on; 3 not running,
-    /// 4 could not tell. (A command that finishes exits 0.)
+    /// The exit code a script reads: 1 refused, cannot, or partly on; 3 it
+    /// needed a person and there was none (the supervisor not running, or a
+    /// question with no terminal); 4 could not tell. (A command that finishes
+    /// exits 0.)
     pub(crate) fn exit_code(&self) -> u8 {
         match self {
             Status::Refused(_) | Status::Cannot(_) | Status::PartlyOn { .. } => 1,
-            Status::NotRunning => 3,
+            Status::NotRunning | Status::NeedsAnswer => 3,
             Status::CouldNotTell(_) => 4,
         }
     }
@@ -169,6 +188,13 @@ pub(crate) enum Problem {
     },
     /// This binary's own path could not be found.
     NoBinary(io::Error),
+    /// Uninstall stopped the supervisor but could not remove this file.
+    Uninstall {
+        /// What is left.
+        path: PathBuf,
+        /// What the system said.
+        error: io::Error,
+    },
     /// The service manager would not start or stop the supervisor.
     ServiceManager {
         /// What was asked of it.
@@ -250,4 +276,15 @@ pub(crate) enum During {
     TurningOffProject,
     /// Removing a fleet, or taking projects out of one.
     Removing,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_that_needed_a_person_and_had_none_exits_3() {
+        assert_eq!(Status::NeedsAnswer.exit_code(), 3);
+        assert_eq!(Status::NotRunning.exit_code(), 3);
+    }
 }

@@ -6,6 +6,17 @@ use std::path::{Path, PathBuf};
 /// The state file's name, in the state directory.
 pub const STATE_FILE: &str = "state.sqlite3";
 
+/// Every file tinyfleet keeps in its state directory, so uninstall deletes
+/// those and nothing else.
+pub const OWN_FILES: [&str; 6] = [
+    STATE_FILE,
+    "state.sqlite3-wal",
+    "state.sqlite3-shm",
+    "supervisor.log",
+    "supervisor.sock",
+    "supervisor.lock",
+];
+
 /// A fleet's config file's name, in the fleet directory.
 pub const CONFIG_FILE: &str = "fleet.toml";
 
@@ -188,5 +199,17 @@ mod tests {
             PathBuf::from("/c/blog/src")
         );
         assert_eq!(lexical(Path::new("/../c")), PathBuf::from("/c"));
+    }
+
+    #[test]
+    fn own_files_name_the_state_file_and_the_supervisors_files() {
+        for name in [
+            STATE_FILE,
+            "supervisor.sock",
+            "supervisor.lock",
+            "supervisor.log",
+        ] {
+            assert!(OWN_FILES.contains(&name), "{name}");
+        }
     }
 }

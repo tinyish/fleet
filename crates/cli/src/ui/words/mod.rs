@@ -14,6 +14,7 @@ use crate::ui::output::Ink;
 mod create;
 mod doctor;
 pub(crate) mod remove;
+pub(crate) mod uninstall;
 use create::created;
 pub(crate) use doctor::{HEALTHY, checked, found, found_next, verdict};
 
@@ -85,7 +86,12 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
         Response::ProjectOff(response) => project_off(response, ink),
         Response::SupervisorStopped => "the supervisor is stopped".into(),
         Response::SupervisorWasNotRunning => "the supervisor was not running".into(),
-        Response::RemoveCancelled => "nothing was removed".into(),
+        Response::Cancelled => "nothing was removed".into(),
+        Response::Uninstalled {
+            binary,
+            state_dir,
+            kept_state_dir,
+        } => uninstall::uninstalled(binary, state_dir, *kept_state_dir, ink),
         Response::Removed {
             response,
             startup: Startup::Started,
@@ -104,6 +110,7 @@ pub(crate) fn status(status: &Status, ink: Ink) -> String {
         Status::Refused(status) => refused(status, ink),
         Status::Cannot(problem) => cannot(problem, ink),
         Status::NotRunning => "the supervisor is not running".into(),
+        Status::NeedsAnswer => uninstall::NEEDS_ANSWER.into(),
         Status::CouldNotTell(doubt) => unsure(doubt),
         // `output` prints these as a done line and one line per fleet that
         // stayed off; this is the same in one line.
@@ -228,6 +235,8 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
     let project_flag = ink.accent("--project");
     Some(match status {
         Status::NotRunning => format!("run {} to start it", ink.accent("fleet start")),
+        Status::NeedsAnswer => uninstall::add_flag(ink),
+        Status::Cannot(Problem::Uninstall { .. }) => uninstall::try_again(ink),
         Status::Refused(protocol::Status::DirectoryNotInRepo { .. }) => {
             format!("run {create} at a repository's root")
         }
@@ -455,6 +464,7 @@ fn cannot(problem: &Problem, ink: Ink) -> String {
         Problem::NoCurrentDir(error) => format!("cannot read the current directory: {error}"),
         Problem::BadPath { path, error } => format!("{}: {error}", ink.path(path)),
         Problem::NoBinary(error) => format!("cannot find this fleet binary: {error}"),
+        Problem::Uninstall { path, error } => uninstall::could_not_remove(path, error, ink),
         Problem::ServiceManager { doing, error } => format!(
             "the service manager did not {} the supervisor: {}",
             match doing {

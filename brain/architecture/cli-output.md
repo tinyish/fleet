@@ -56,7 +56,7 @@ only when its stream is a terminal**.
 | Partly done (stdout, then stderr) | `◆ the supervisor was already running; /code/app is on`<br>`■ the fleet in /code/wing stayed off: …`<br>`> fix each fleet.toml named above, then run fleet start` | the same lines, `fleet:` before the `■` line and `hint:` before the last |
 | Paths | the last two directories (`code/app` for `/Users/you/code/app`); one with two levels or fewer as it is; a path a hint asks you to type, whole | whole |
 | Colour | the symbol, and every path, name and command in the sentence | none |
-| Prompt | asked, with `>` and `Yes / No` | never asked: without `--non-interactive` the command ends *supervisor not running* (exit 3) |
+| Prompt | asked, with `>` and `Yes / No` | never asked: without `--non-interactive` the command ends without doing it, exit 3 (*supervisor not running* for start's question, *uninstall asks first* for uninstall's) |
 | Spinner | drawn on stderr while waiting | not drawn |
 | Doctor's report (stdout, every line) | a bar `┃` in the verdict's colour, the check in bold, then `healthy` in bold and what was found in gray, or, for anything else, what was found in the verdict's colour: `┃ git  healthy git version 2.50.1`, `┃ supervisor  not running` in yellow; then, after a blank line, a `> …` hint for each thing to do, each once | the verdict spelled in a column (`fine`, `warning`, `missing`, `could not tell`), then the check and what was found; the hints after them, `hint:` before each |
 

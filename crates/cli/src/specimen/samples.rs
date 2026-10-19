@@ -127,7 +127,15 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
             .collect(),
         ResponseKind::SupervisorStopped => vec![Response::SupervisorStopped],
         ResponseKind::SupervisorWasNotRunning => vec![Response::SupervisorWasNotRunning],
-        ResponseKind::RemoveCancelled => vec![Response::RemoveCancelled],
+        ResponseKind::Cancelled => vec![Response::Cancelled],
+        ResponseKind::Uninstalled => [false, true]
+            .into_iter()
+            .map(|kept_state_dir| Response::Uninstalled {
+                binary: path("/Users/you/.local/bin/fleet"),
+                state_dir: path(STATE),
+                kept_state_dir,
+            })
+            .collect(),
         ResponseKind::Removed => removes()
             .into_iter()
             .flat_map(|response| {
@@ -312,6 +320,7 @@ fn statuses(kind: StatusKind) -> Vec<(String, Status)> {
             })
             .collect(),
         StatusKind::NotRunning => vec![("Status::NotRunning".into(), Status::NotRunning)],
+        StatusKind::NeedsAnswer => vec![("Status::NeedsAnswer".into(), Status::NeedsAnswer)],
         StatusKind::PartlyOn => all_ons(true)
             .into_iter()
             .flat_map(|response| {
@@ -447,6 +456,10 @@ fn problems(kind: ProblemKind) -> Vec<Problem> {
             error: denied(),
         }],
         ProblemKind::NoBinary => vec![Problem::NoBinary(denied())],
+        ProblemKind::Uninstall => vec![Problem::Uninstall {
+            path: path("/Users/you/.local/bin/fleet"),
+            error: denied(),
+        }],
         ProblemKind::ServiceManager => {
             let mut out: Vec<Problem> = tool_errors()
                 .into_iter()

@@ -155,6 +155,15 @@ deleted or rewritten inside the same state write, so a file that cannot be
 changed leaves the registry as it was. Taking every project removes the
 fleet; a directory with no fleet is nothing to remove, and says so.
 
+**uninstall**: the CLI asks first (`--non-interactive` answers yes; with no
+terminal and no `--non-interactive` it does nothing and exits 3), then stops
+the supervisor and removes its unit exactly as stop does. Only once the
+supervisor is down does it delete the files tinyfleet keeps in its state
+directory, that directory if it is then empty (a `.DS_Store` left alone by
+Finder goes too), and the running `fleet` binary. A stop that fails or cannot tell leaves everything; a delete that
+fails names what is left, and running uninstall again finishes. The
+`fleet.toml` files in projects stay.
+
 **doctor**: the CLI checks, and reports each as fine, missing or could not
 tell: the service manager (it answers), git (on the `PATH`, its version), the supervisor (whether it
 answers; whether its version matches this binary's; not running is a
@@ -174,8 +183,10 @@ contract's (see Boundaries).
 
 ## Invariants
 
-1. Only the supervisor writes state or any file in a fleet directory. The CLI's
-   one write is the supervisor's service unit.
+1. Only the supervisor writes state or any file in a fleet directory. The CLI
+   writes only the supervisor's service unit, and, for uninstall once the
+   supervisor is stopped and its unit removed, deletes tinyfleet's own files:
+   the state directory's and the binary.
 2. No onboarding step commits to a repository.
 3. A directory holds at most one fleet, no fleet directory is inside
    another's, and a repository belongs to at most one fleet.

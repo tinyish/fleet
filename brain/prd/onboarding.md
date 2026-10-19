@@ -63,6 +63,17 @@ anything to their projects.
   nothing.
 - **Passes through:** remove, start.
 
+### Taking tinyfleet off the machine
+
+- **Trying to:** stop using tinyfleet altogether, and leave the machine as it
+  was before the install.
+- **Success:** nothing of tinyfleet runs, or comes back after a reboot, and
+  nothing it keeps in its own places is left: what it remembered, its log,
+  and the program itself. The config files in the person's projects stay
+  theirs. Nothing is removed by accident, and a script that says so can
+  uninstall with nobody there.
+- **Passes through:** uninstall.
+
 ### Checking the machine after a change
 
 - **Trying to:** know whether what tinyfleet runs on is still in order after

@@ -48,7 +48,7 @@ pub(crate) fn run(
     if matches!(response, response::Remove::Ask { .. }) {
         let answer = ui::confirm(words::remove::DELETE_PROMPT, false);
         let Some(config) = answered(answer) else {
-            return Ok(Response::RemoveCancelled);
+            return Ok(Response::Cancelled);
         };
         response = client::remove(&socket, request(config))?;
         if matches!(response, response::Remove::Ask { .. }) {
