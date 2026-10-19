@@ -16,6 +16,9 @@ supervisor.workspace = true
 service.workspace = true
 git.workspace = true
 
+[dev-dependencies]
+trycmd = "1"
+
 [features]
 # `fleet specimen`: every line the CLI can print. Never in a release build.
 specimen = ["cli/specimen"]

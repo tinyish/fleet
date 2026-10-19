@@ -39,5 +39,3 @@ and it binds you. The rules you are most likely to break:
 - **Never guess past a PRD, the architecture doc or a plan.** If one is silent,
   ambiguous or contradicts itself, say so on the item and stop that part of
   the work.
-- **Planners and builders never open fleet-dtu**, the scenario repository,
-  by any means. What you hear back from a scenario run is all you get.

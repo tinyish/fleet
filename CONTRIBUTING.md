@@ -40,7 +40,7 @@ the level it changes, so a rewrite can throw the code away and keep them:
 | PRD | the problem, who has it, journeys, what success looks like | rarely | `brain/prd/` |
 | Architecture | the backbone: components, who talks to whom, boundaries, invariants | sometimes | `brain/architecture/`, once one is needed, pointing at contracts in code |
 | Program design | how one change reshapes the code | every change | the item's bead |
-| Evals | what any implementation must do: journeys, invariants and edge cases | grows with real use | `tests/cmd/` (visible), fleet-dtu (hidden) |
+| Evals | what any implementation must do: journeys, invariants and edge cases | grows with real use | `tests/cmd/` |
 | Code | one implementation | freely | the repository, laid out as the architecture doc says |
 
 Provenance, the why behind each layer, is deferred: beads is building it
@@ -51,7 +51,7 @@ trailer and decisions stay in bead comments.
 architecture doc and the journeys, and steer program design before code exists.
 People never write code; they read it to learn. Planner agents write program
 design from the PRD, the architecture doc and the contracts. Builder agents
-build from the program design. Neither ever sees a fleet-dtu scenario.
+build from the program design.
 
 **Alberto reviews and tests every piece.** Nothing moves on to the next piece
 until Alberto has reviewed the one before it and tested it on his machine.
@@ -79,7 +79,6 @@ supervisor are refused inside it.
 | `brain/architecture/` | the architecture doc, once a capability needs one: the backbone, what makes it hard, boundaries, invariants, terms | agents draw, Alberto approves |
 | the contracts in code | each boundary's authoritative form, listed in the architecture doc's Boundaries table | builders, from program design |
 | `tests/cmd/` | visible evals at the CLI boundary | builders, from the journeys, the invariants and real use |
-| fleet-dtu (sibling repository) | hidden evals: the journeys as scenarios | agents draft, Alberto approves; planners and builders never see it |
 | `docs/` | the user manual, written again as capabilities are built; never a planner's or builder's input | not decided yet |
 | `brain/specs/` | the old clause-id specs, read only at a capability's harvest step and deleted after it | nobody |
 | beads | the work queue, and each item's program design | agents and people; a planner writes the program design |
@@ -177,11 +176,13 @@ code can be thrown away, the evals are kept.
 - **A capability's evals are written once it is built**, from three sources:
   its journeys, the invariants found while building it, and the old spec
   clauses Alberto keeps at the harvest step.
-- **What one command can show is a visible eval**: a transcript case under
-  `tests/cmd/<verb>/` at the CLI boundary, run on every change. A script with no terminal never waiting, or a second setup never
-  nesting a fleet, is one command's result.
-- **A journey that needs several steps or faults is a fleet-dtu scenario**,
-  hidden from planners and builders (§ Scenarios and fleet-dtu).
+- **An eval is a transcript case** under `tests/cmd/<verb>/`, at the CLI
+  boundary, run on every change: one command or a short run of them in one
+  temp directory, with the outside tools faked so nothing reaches the
+  person's real ones. A script with no terminal never waiting, or a second
+  setup never nesting a fleet, is one case.
+- **What a case cannot reach is checked by hand**, such as a question asked
+  at a terminal, and said so on the item.
 - **After that, edge cases enter from real use**, never from reading a
   document. A bug is fixed by first adding the eval case that fails on it.
 - **Unit tests are part of the code.** They test one implementation and may be
@@ -206,51 +207,6 @@ or eval case it touches:
 A fix that names no promise has found a gap in a PRD or the architecture doc: it
 is a `behaviour` item. An item mislabelled `internal` is caught when an eval
 fails.
-
-## Scenarios and fleet-dtu
-
-*(Directional: fleet-dtu is not built yet. It is built when the first
-capability's multi-step journeys need it.)*
-
-fleet-dtu is a sibling repository holding the scenarios
-(`scenarios/<capability>/S-<capability>-<nnn>.md`), the fakes of the tools
-tinyfleet runs on, and the runner. **It is never mounted into a planner's or
-builder's seat.** Its own agents see fleet's `brain/prd/`,
-`brain/architecture/` and the built binary, never fleet's source, so
-scenarios test the journeys and not the implementation. Agents draft
-scenarios from the journeys; Alberto approves each one.
-
-**The fakes** stand in for the outside tools tinyfleet runs on (the
-architecture doc names them), so a scenario runs the whole stack a user runs.
-A fake is faithful when it answers as the real tool does at its pinned
-release. Nothing a scenario does reaches the person's real tools, sessions or
-home directory.
-
-**A scenario** is one Markdown file: a journey with checks. `$` lines are
-tinyfleet commands, `!` lines are faults, and every check under `Then` is
-deterministic: exit codes, files, commits, recorded events. An LLM judges
-only output that is prose. A `covers:` line names the journeys the scenario
-proves, as `<capability>/<journey>`.
-
-**Running.** Each scenario runs in its own sandbox, so scenarios run in
-parallel. Each runs three times and passes only if all three pass, to catch
-races. A `behaviour` or `fix` item runs the scenarios covering the journeys it
-names. The full suite runs at least daily and at every release.
-
-**What a builder hears back:** the verdict, the scenario's title, the journeys
-it covers, and fleet's own output from the run. Never the scenario's text. A
-planner who finds a PRD or the architecture doc contradicting itself, or a
-builder who finds the program design contradicting them, says so instead of
-guessing, and that becomes a `spec` item.
-
-**The read-deny.** fleet's Claude Code project settings deny every session in
-fleet's checkout, and its subagents, any read of fleet-dtu. fleet-dtu's own
-settings deny its sessions fleet's source the same way.
-
-**The holdout reserve.** About one scenario in five never reports to
-builders: it runs only in the daily run and at release, whose results go to
-Alberto. A failure there means the builders are being fitted to the visible
-scenarios, and the journey or the suite needs work.
 
 ## Learning
 
@@ -338,9 +294,8 @@ Every commit on a release or hotfix branch is **one item, squashed**:
 ## Releasing
 
 1. **The health pass.** When the branch's work is done, run the scheduled
-   health passes (see Code health) and the full scenario suite with the
-   holdout reserve. Each finding is an `internal` item, landed on the branch
-   or filed for the next release.
+   health passes (see Code health) and every eval. Each finding is an
+   `internal` item, landed on the branch or filed for the next release.
 2. **The docs pass.** Then bring `docs/` up to date with the items landed
    on the branch. It lands as the branch's last item, subject
    `<item id>: docs release pass for <x.y.z>`.

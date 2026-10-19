@@ -222,7 +222,7 @@ None exists yet.
 
 | Boundary | Between | Authoritative form |
 | --- | --- | --- |
-| CLI | person or script ↔ `fleet` | *directional:* the transcript evals in `tests/cmd/` |
+| CLI | person or script ↔ `fleet` | the transcript evals in `tests/cmd/` |
 | protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | *directional:* `crates/core/src/protocol.rs` |
 | state schema | supervisor ↔ state | *directional:* `crates/state/` migrations |
 | config file | person ↔ supervisor (and doctor, which reads it) | *directional:* `crates/core/src/config.rs`, read through `fleets::read_projects` |
