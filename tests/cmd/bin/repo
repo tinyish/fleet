@@ -1,0 +1,13 @@
+#!/bin/sh
+# `repo DIR...`: make each DIR a git repository with one commit, as a person's
+# project would be. Fixtures cannot hold .git, so cases make their own. git
+# runs without your config, hooks or GIT_* environment.
+set -eu
+git=$(dirname "$0")/git
+for dir in "$@"; do
+    mkdir -p "$dir"
+    "$git" -C "$dir" init -q
+    printf '# %s\n' "$(basename "$dir")" >"$dir/README.md"
+    "$git" -C "$dir" add README.md
+    "$git" -C "$dir" -c user.name=eval -c user.email=eval@localhost -c commit.gpgsign=false commit -qm "first commit"
+done

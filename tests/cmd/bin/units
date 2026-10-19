@@ -1,0 +1,13 @@
+#!/bin/sh
+# `units`: what the fake service manager holds for the case: the unit files
+# installed, and the services loaded or enabled. Empty when nothing would come
+# back after a reboot.
+set -eu
+home="${FLEET_EVAL_ROOT:-$PWD}/.fleet/home"
+for dir in "$home/Library/LaunchAgents" "$home/.config/systemd/user"; do
+    [ -d "$dir" ] && ls "$dir" | sed 's/^/unit /'
+done
+for marker in "$home"/.fake-launchd/*.loaded "$home"/.fake-systemd/*.enabled; do
+    [ -e "$marker" ] && basename "$marker" | sed 's/^/service /'
+done
+exit 0

@@ -1,0 +1,6 @@
+#!/bin/sh
+# `write FILE TEXT`: write TEXT (with printf escapes such as \n) to FILE, so
+# a case can hand-edit a file without a shell.
+set -eu
+mkdir -p "$(dirname "$1")"
+printf '%b' "$2" >"$1"

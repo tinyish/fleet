@@ -1,0 +1,48 @@
+#!/bin/sh
+# The fleet every eval runs: the built binary, made hermetic.
+#
+# - It runs a copy of the binary kept in the case's temp root, so uninstall
+#   deletes the copy, never target/debug/fleet.
+# - It runs it with an empty environment but for what it sets: HOME and the
+#   state directory inside the root, LC_ALL=C, and a PATH whose service
+#   manager is the fake in this directory. Nothing from your shell reaches it.
+# - On macOS it runs it under sandbox-exec, denying /bin/launchctl and any
+#   write under your real home, so even a driver that named the real tool by
+#   its path could not reach it.
+# - It refuses to run (exit 99) unless the root is a temp directory outside
+#   this repository and the PATH resolves the fake.
+set -eu
+
+root=${FLEET_EVAL_ROOT:-$PWD}
+bin=$(cd "$(dirname "$0")" && pwd)
+here=$root/.fleet
+
+guard() {
+    printf 'eval guard: %s\n' "$1" >&2
+    exit 99
+}
+
+[ -n "${FLEET_EVAL_BIN:-}" ] || guard "FLEET_EVAL_BIN is not set; run the evals with cargo test"
+[ -n "${FLEET_EVAL_REPO:-}" ] || guard "FLEET_EVAL_REPO is not set; run the evals with cargo test"
+case "$root/" in
+    "$FLEET_EVAL_REPO"/*) guard "the case runs inside the repository ($root); give it a <case>.out/" ;;
+esac
+mkdir -p "$here/bin" "$here/home"
+[ -x "$here/bin/fleet" ] || cp "$FLEET_EVAL_BIN" "$here/bin/fleet"
+
+path="$bin:/usr/bin:/bin:/usr/sbin:/sbin"
+case "$(uname -s)" in
+    Darwin) tool=launchctl ;;
+    *) tool=systemctl ;;
+esac
+[ "$(PATH=$path command -v "$tool")" = "$bin/$tool" ] || guard "$tool on PATH is not the fake"
+socket="$here/st/supervisor.sock"
+[ "${#socket}" -le 100 ] || guard "the socket path is too long: $socket"
+
+real_home=${HOME:-/nonexistent}
+set -- env -i HOME="$here/home" FLEET_STATE_DIR="$here/st" PATH="$path" LC_ALL=C \
+    FLEET_EVAL_PIDS="${FLEET_EVAL_PIDS:-}" "$here/bin/fleet" "$@"
+if [ "$tool" = launchctl ] && [ -x /usr/bin/sandbox-exec ]; then
+    exec /usr/bin/sandbox-exec -p "(version 1)(allow default)(deny process-exec (literal \"/bin/launchctl\"))(deny file-write* (subpath \"$real_home\"))" "$@"
+fi
+exec "$@"

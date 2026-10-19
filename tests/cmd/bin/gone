@@ -1,0 +1,13 @@
+#!/bin/sh
+# `gone PATH...`: delete each PATH, which must be relative and inside the case
+# (no leading / and no ..), so a case can never delete outside its directory.
+set -eu
+for path in "$@"; do
+    case "$path" in
+        /* | .. | ../* | */.. | */../*)
+            printf 'gone: %s is not inside the case\n' "$path" >&2
+            exit 64
+            ;;
+    esac
+    rm -rf -- "$path"
+done
