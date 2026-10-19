@@ -103,10 +103,13 @@ pub enum Status {
         /// What the system said.
         error: String,
     },
-    /// A `fleet.toml` is already there and no fleet owns it; it was left alone.
-    StrayConfig {
+    /// A `fleet.toml` no fleet owns is already there, listing other
+    /// projects than the ones asked for; it was left alone.
+    ConfigDiffers {
         /// The file.
         path: PathBuf,
+        /// The projects it lists.
+        listed: Vec<PathBuf>,
     },
     /// A file could not be written; nothing was registered.
     CannotWrite {

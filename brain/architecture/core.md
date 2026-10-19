@@ -115,11 +115,14 @@ repository's root and is the fleet's one project: a default fleet. With
 `--project` it is a wingman fleet, outside the repositories it serves. The
 supervisor refuses a project that is not a repository's root, a wingman fleet
 inside one of its own projects, a fleet in a directory above or below another
-fleet's, a project another fleet already serves, and a config file already in
-the directory that no fleet owns. The same fleet asked for again is done,
-saying what it found. Otherwise, in one transaction, it registers the fleet,
-writes the config file without overwriting anything, records the step and
-answers; the new fleet's projects come up on. Nothing is committed.
+fleet's, and a project another fleet already serves. The same fleet asked for
+again is done, saying what it found. A config file already in the directory
+that no fleet owns is adopted: the fleet is the one that file describes, read
+as start reads it, and the file is left as it is. With `--project`, the
+projects must be the ones the file lists, or create refuses and changes
+nothing. Otherwise, in one transaction, it registers the fleet, writes the
+config file (unless it adopted one) without overwriting anything, records the
+step and answers; the new fleet's projects come up on. Nothing is committed.
 
 **start / stop**, the default: start enables and loads the supervisor's unit
 through the service manager, waits for the supervisor to answer on the

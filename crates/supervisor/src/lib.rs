@@ -4,6 +4,8 @@
 mod create;
 mod projects;
 mod remove;
+#[cfg(test)]
+mod testing;
 mod words;
 
 use fleet_core::protocol;

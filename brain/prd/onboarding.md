@@ -46,7 +46,9 @@ anything to their projects.
 - **Trying to:** run setup again, by habit, by a script that always runs it,
   or after an upgrade.
 - **Success:** it never makes a second fleet or one nested inside another,
-  never overwrites what is there, and says what it found.
+  never overwrites what is there, and says what it found. A config file
+  already there that no fleet owns, left by a removed fleet or written by
+  hand, is taken up as it is.
 - **Passes through:** create, start.
 
 ### Taking a fleet off a project

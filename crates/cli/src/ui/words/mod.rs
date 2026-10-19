@@ -11,8 +11,10 @@ use fleet_core::tools::{BadUnitPath, FileStep, ToolError, UnitPath};
 use crate::protocol::{Doing, Doubt, During, Problem, Response, Startup, Status};
 use crate::ui::output::Ink;
 
+mod create;
 mod doctor;
 pub(crate) mod remove;
+use create::created;
 pub(crate) use doctor::{HEALTHY, checked, found, found_next, verdict};
 
 /// What `fleet --help` says tinyfleet is.
@@ -258,6 +260,7 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
         Status::Refused(protocol::Status::InsideProject { project, .. }) => {
             format!("name its root, {}", ink.whole_path(project))
         }
+        Status::Refused(protocol::Status::ConfigDiffers { .. }) => create::take_it_up(ink),
         Status::Refused(protocol::Status::NotFleetDirectory { fleet, .. }) => format!(
             "run {} in {}",
             ink.accent("fleet remove"),
@@ -290,32 +293,6 @@ fn shell_quoted(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))
     }
-}
-
-/// What the supervisor said create did.
-fn created(response: &protocol::response::Create, ink: Ink) -> String {
-    let protocol::response::Create {
-        directory,
-        projects,
-        created,
-    } = response;
-    if !created {
-        return format!(
-            "a fleet is already here, serving {}; nothing changed",
-            ink.paths(projects)
-        );
-    }
-    if projects.len() == 1 && projects[0] == *directory {
-        return format!(
-            "created a fleet in {} -- welcome aboard",
-            ink.path(directory),
-        );
-    }
-    format!(
-        "created a wingman fleet in {} serving {}",
-        ink.path(directory),
-        ink.paths(projects)
-    )
 }
 
 /// Why the supervisor said no.
@@ -375,10 +352,9 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
         ),
         protocol::Status::Missing { path } => format!("{} does not exist", ink.path(path)),
         protocol::Status::Unreadable { path, error } => format!("{}: {error}", ink.path(path)),
-        protocol::Status::StrayConfig { path } => format!(
-            "{} is already here and no fleet owns it; it was left alone",
-            ink.path(path)
-        ),
+        protocol::Status::ConfigDiffers { path, listed } => {
+            create::config_differs(path, listed, ink)
+        }
         protocol::Status::CannotWrite { path, error } => {
             format!(
                 "writing {}: {error}; nothing was registered",

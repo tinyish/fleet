@@ -28,6 +28,8 @@ pub enum Step {
         directory: String,
         /// The projects it serves.
         projects: Vec<String>,
+        /// Whether it was made from a `fleet.toml` already there.
+        adopted: bool,
     },
     /// One project was turned on.
     ProjectOn {
@@ -116,6 +118,7 @@ mod tests {
             Step::FleetCreated {
                 directory: "/f/work".into(),
                 projects: vec!["/c/app".into()],
+                adopted: false,
             },
             Step::ProjectOn {
                 project: "/c/app".into(),

@@ -156,6 +156,10 @@ pub mod response {
         /// Whether create made the fleet; `false` when the same fleet was
         /// already there and nothing changed.
         pub created: bool,
+        /// Whether the fleet was made from a `fleet.toml` already there,
+        /// left as it was; absent from a supervisor older than this field.
+        #[serde(default)]
+        pub adopted: bool,
     }
 
     /// What `fleet start` did.
@@ -482,6 +486,7 @@ mod tests {
                 directory: PathBuf::from("/f/work"),
                 projects: vec![PathBuf::from("/c/app")],
                 created: true,
+                adopted: true,
             })),
             Reply::Status(Status::AlreadyServed {
                 project: PathBuf::from("/c/app"),

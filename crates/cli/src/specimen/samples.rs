@@ -265,16 +265,31 @@ fn creates() -> Vec<response::Create> {
             directory: path(APP),
             projects: vec![path(APP)],
             created: true,
+            adopted: false,
         },
         response::Create {
             directory: path(WING),
             projects: vec![path(APP), path(API)],
             created: true,
+            adopted: false,
+        },
+        response::Create {
+            directory: path(APP),
+            projects: vec![path(APP)],
+            created: true,
+            adopted: true,
+        },
+        response::Create {
+            directory: path(WING),
+            projects: vec![path(APP), path(API)],
+            created: true,
+            adopted: true,
         },
         response::Create {
             directory: path(APP),
             projects: vec![path(APP)],
             created: false,
+            adopted: false,
         },
     ]
 }
@@ -370,8 +385,9 @@ fn refusal(kind: fleet_core::status::StatusKind) -> protocol::Status {
             path: path(API),
             error: denied().to_string(),
         },
-        K::StrayConfig => S::StrayConfig {
-            path: path("/code/app/fleet.toml"),
+        K::ConfigDiffers => S::ConfigDiffers {
+            path: path("/code/wing/fleet.toml"),
+            listed: vec![path(API), path(WEB)],
         },
         K::CannotWrite => S::CannotWrite {
             path: path("/code/app/fleet.toml"),
