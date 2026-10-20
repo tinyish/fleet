@@ -85,18 +85,24 @@ mod tests {
     #[test]
     fn an_adopted_fleet_is_restored_and_a_new_one_still_welcomed() {
         assert_eq!(
-            plain(&created(&create("/code/app", &["/code/app"], true), OUT)),
+            plain(&created(
+                &create("/code/app", &["/code/app"], true),
+                OUT.piped()
+            )),
             "restored existing fleet in /code/app"
         );
         assert_eq!(
             plain(&created(
                 &create("/code/wing", &["/code/api", "/code/web"], true),
-                OUT
+                OUT.piped()
             )),
             "restored existing wingman fleet in /code/wing serving /code/api, /code/web"
         );
         assert_eq!(
-            plain(&created(&create("/code/app", &["/code/app"], false), OUT)),
+            plain(&created(
+                &create("/code/app", &["/code/app"], false),
+                OUT.piped()
+            )),
             "created a fleet in /code/app -- welcome aboard"
         );
     }
@@ -108,12 +114,12 @@ mod tests {
             plain(&config_differs(
                 Path::new("/code/wing/fleet.toml"),
                 &listed,
-                ERR
+                ERR.piped()
             )),
             "/code/wing/fleet.toml is already here, serving /code/api, /code/web"
         );
         assert_eq!(
-            plain(&take_it_up(ERR)),
+            plain(&take_it_up(ERR.piped())),
             "run fleet create without --project to take it up as it is"
         );
     }

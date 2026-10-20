@@ -15,18 +15,26 @@ use crate::protocol::{Response, Status};
 use crate::ui::theme::{ERROR, NEXT, SUCCESS, Tone, WARN, paint_on};
 use crate::ui::words;
 
-/// The ink for one stream: colour is decided by whether that stream is a
-/// terminal.
+/// The ink for one stream: colour and the length of paths are decided by
+/// whether that stream is a terminal, asked of the stream itself unless the
+/// ink says.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Ink {
     stderr: bool,
+    terminal: Option<bool>,
 }
 
 /// Ink for done lines, on stdout.
-pub(crate) const OUT: Ink = Ink { stderr: false };
+pub(crate) const OUT: Ink = Ink {
+    stderr: false,
+    terminal: None,
+};
 
 /// Ink for refusals and what could not be told, on stderr.
-pub(crate) const ERR: Ink = Ink { stderr: true };
+pub(crate) const ERR: Ink = Ink {
+    stderr: true,
+    terminal: None,
+};
 
 impl Ink {
     fn tone(self, tone: Tone, text: impl Display) -> String {
@@ -53,7 +61,20 @@ impl Ink {
         self.accent(path.display())
     }
 
+    /// This ink as a script sees it, whatever the stream: for tests, so the
+    /// words read the same whether or not `cargo test` runs at a terminal.
+    #[cfg(test)]
+    pub(crate) const fn piped(self) -> Ink {
+        Ink {
+            terminal: Some(false),
+            ..self
+        }
+    }
+
     fn terminal(self) -> bool {
+        if let Some(terminal) = self.terminal {
+            return terminal;
+        }
         if self.stderr {
             io::stderr().is_terminal()
         } else {
