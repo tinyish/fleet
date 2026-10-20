@@ -35,12 +35,12 @@ impl Drop for Reaper {
     }
 }
 
-fn md_cases(cases: &Path) -> Vec<PathBuf> {
+fn cases_with(cases: &Path, extension: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for verb in fs::read_dir(cases).into_iter().flatten().flatten() {
         for case in fs::read_dir(verb.path()).into_iter().flatten().flatten() {
             let path = case.path();
-            if path.extension().is_some_and(|e| e == "md") {
+            if path.extension().is_some_and(|e| e == extension) {
                 found.push(path);
             }
         }
@@ -48,10 +48,23 @@ fn md_cases(cases: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Every case runs in a temp directory of its own (it has a `.out/`), and
-/// runs only commands the harness knows.
+/// Every case runs in a temp directory of its own (a `.md` has a `.out/`, a
+/// `.toml` sets `fs.sandbox`), and runs only commands the harness knows.
 fn check_cases(cases: &Path) {
-    for case in md_cases(cases) {
+    for case in cases_with(cases, "toml") {
+        let text = fs::read_to_string(&case).unwrap_or_default();
+        assert!(
+            text.contains("fs.sandbox = true"),
+            "{} does not set fs.sandbox = true: it would run inside the repository",
+            case.display()
+        );
+        assert!(
+            text.contains("bin.name = \"fleet\""),
+            "{}: a .toml case runs fleet",
+            case.display()
+        );
+    }
+    for case in cases_with(cases, "md") {
         assert!(
             case.with_extension("out").is_dir(),
             "{} has no {}: it would run inside the repository",
@@ -123,5 +136,6 @@ fn evals() {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .timeout(Duration::from_secs(30))
-        .case(cases.join("*/*.md"));
+        .case(cases.join("*/*.md"))
+        .case(cases.join("*/*.toml"));
 }

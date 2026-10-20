@@ -1,0 +1,5 @@
+# Doctor's whole report, hints included, goes to stdout, so a script that
+# pipes `fleet doctor` gets all of it (old spec onboarding.doctor.R40).
+bin.name = "fleet"
+args = ["doctor"]
+fs.sandbox = true

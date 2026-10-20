@@ -103,7 +103,7 @@ the same loop:
 
 | Order | Capability | Status |
 | --- | --- | --- |
-| 1 | Onboarding | building: install tinyfleet and create a new project first |
+| 1 | Onboarding | built: evals written and the old specs harvested |
 | 2 | Delivery | not started |
 | 3 | Autonomy | not started |
 | 4 | Visibility | not started |
