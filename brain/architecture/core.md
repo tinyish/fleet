@@ -1,11 +1,11 @@
 # tinyfleet core architecture
 
 The backbone every capability stands on: what runs, where state lives, how
-tinyfleet reaches the tools it runs on, and the rules the code keeps. Drawn
-for onboarding; later capabilities appear only as directional slots.
+tinyfleet reaches the tools it runs on, and the rules the code keeps.
+Onboarding is built; Delivery's primitives are drawn ahead of their code.
 
-> **Directional.** Nothing below is built yet. Every part is directional
-> until onboarding lands; the commit that makes a part real drops its mark.
+> **Directional marks.** A part not built yet carries a *directional* mark;
+> the commit that makes it real drops the mark.
 
 ## Components and lifetimes
 
@@ -24,16 +24,18 @@ for onboarding; later capabilities appear only as directional slots.
  runs the supervisor          tinyfleet's socket
                               └─ agents' sessions
 
-                              agent adapter · store adapter   (directional: defined later)
+                              adapter programs: agent · task · forge   (directional)
 ```
 
 | Part | Does | Lives |
 | --- | --- | --- |
 | **fleet CLI** | Turns a command into a request to the supervisor and reports the answer. Writes nothing, except starting the supervisor through the service manager. | one command |
-| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions *(directional: arrives with the agent adapter)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
+| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps persistent agents alive, holds each message until its agent is idle *(directional: arrives with Delivery)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
 | **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, its agents, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
 | **tmux server** *(directional: arrives with the agent adapter)* | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
+| **adapter programs** *(directional: arrive with Delivery)* | One program per kind of agent, task tracker or forge. An agent's adapter says how to launch it and reads what state it is in; a tracker's or a forge's reaches that tool. | one request: the supervisor runs it through a driver, and it exits with its answer |
+| **workspaces** *(directional: arrive with Delivery)* | Git worktrees, each on its own branch, for work kept apart from a project's checkout. | under the state directory, until whoever made one removes it |
 
 **When the supervisor is down,** a command that needs it (create, and later
 commands) asks at a terminal whether to start it. With `--non-interactive`,
@@ -65,13 +67,106 @@ real tool. The core never runs a tool itself.
 | service manager | launchd (macOS), systemd user units (Linux) | CLI, to start and stop the supervisor; doctor |
 | multiplexer | tmux, on tinyfleet's own socket *(directional: arrives with the agent adapter)* | supervisor; doctor |
 | git | git | doctor; the supervisor *(directional: when work lands)* |
-| agent | *directional: reached through an adapter, defined later* | supervisor |
-| store | *directional: reached through an adapter, defined later* | supervisor |
+| agent | *directional:* an adapter program per kind of agent | supervisor |
+| task | *directional:* an adapter program per kind of task tracker | supervisor |
+| forge | *directional:* plain git by default; an adapter program for GitHub, GitLab | supervisor |
 
-**Adapters** *(directional: the adapter contract is defined later)*. Agents
-and stores are reached through adapters, and users can write their own: for
-agents such as Codex, Pi or Claude Code, for stores such as beads, Linear,
-Jira or SQLite.
+**Adapters** *(directional: the protocol is defined later)*. Agents, task
+trackers and forges are reached through adapters: external programs that the
+supervisor runs through a driver, once per request. Each run is handed one
+request and gives one answer, then exits, so an adapter is never a process
+to keep alive, revive or adopt. tinyfleet ships adapters for agents such as Claude Code, Codex and
+Pi, for task trackers such as beads, and plain git as the default forge.
+Users can write their own, in any language: for other agents, for trackers
+such as Linear or Jira, for forges such as GitHub or GitLab. An adapter says
+what to run and what its tool's signals mean; tinyfleet runs it, launching
+every session through the multiplexer itself.
+
+## Primitives
+
+> **Directional.** Drawn for Delivery; nothing in this section is built yet.
+
+tinyfleet gives a person the building blocks of their own metaharness, and
+nothing that carries an opinion. Roles, workflows, reactions (such as "CI
+failed: send it back to the agent"), notifications and triggers are built on
+top of these by users, through the supervisor's socket.
+
+| Primitive | What it is |
+| --- | --- |
+| agent definition | an entry in a fleet's config: an optional name, persistent or not, which agent adapter, which model, and the prompt the agent is woken with (its role); tinyfleet ships no roles |
+| session | one agent running in tmux, on tinyfleet's socket |
+| message | text for one session, typed in once its agent is idle |
+| observe | a session's state and its last reply: asked for, waited on, or subscribed to |
+| workspace | a git worktree on its own branch, kept under the state directory |
+| task | an item in the project's own tracker, reached through a task adapter |
+| land | putting a workspace's branch on a project's trunk, through a forge adapter |
+| record | every step, kept in state; the events a subscriber follows are these steps |
+
+**Agents and sessions.** A persistent agent is one individual, like a
+coworker: the supervisor keeps exactly one session of it running, revives it
+when it is gone, and adopts it on start. Every revival starts fresh, with its
+wake-up prompt; what an agent remembers between lives is its user's to
+arrange. It runs in the directory its definition names, by default the fleet
+directory. Nobody spawns a persistent agent.
+
+A non-persistent definition is a template. Spawn makes a new session from it,
+in the directory the caller gives (a project's root or a workspace), and
+answers with the session's id. tinyfleet never ends a spawned session on its
+own: it ends when it is told to stop, and one that dies is reported gone,
+never revived.
+
+**Messages.** A message goes to a persistent agent by its name or to a spawned
+session by its id, and is one-way: sending answers once the message is
+queued. The supervisor types it in when the adapter reports the agent idle,
+and records it queued, then delivered, with who sent it: a person, a script
+or another agent's session. A message to a persistent agent being revived
+waits for its new session, and one to an agent that needs you waits until
+someone answers it: nothing is ever typed at a prompt. Reading the answer is
+observe's.
+
+**States.** Observe reports one of six states for every session, whatever its
+agent: *starting* (launched, not ready yet), *working* (in a turn), *idle*
+(waiting for a message), *needs you* (blocked on what only a person can
+answer), *gone* (its pane has ended) and *unknown* (tinyfleet could not
+tell). Needs you carries its reason when the adapter knows it: a permission,
+a question, logged out, or a usage limit. tinyfleet leaves a session it
+cannot read alone.
+
+The supervisor learns a state by polling. tmux says whether each session's
+pane is alive; the agent's adapter reads the agent's own record of itself,
+such as Claude Code's list of its sessions, never the screen and never
+through hooks. The supervisor puts the two together, and when they disagree
+the state is unknown. An adapter whose agent keeps no record of itself may
+read the screen instead.
+
+A caller asks for a state now, waits for one with a timeout, or subscribes
+to a fleet's events: states changing, messages queued and delivered,
+sessions spawned and gone, and what changed in a tracker or forge when the
+supervisor last polled its adapter.
+
+**Workspaces.** A workspace is made on a new branch from a base, the trunk
+unless the caller names another. It lives under the state directory, never in
+a project, so no project gains a path to ignore. It lasts until whoever made
+it removes it, and removing one with uncommitted changes is refused unless
+forced. Setting a workspace up, such as installing dependencies, is the
+workflow's.
+
+**Tasks.** A task adapter declares a schema of its tracker's fields, and
+workflows read them by name. tinyfleet itself knows a task only by its id,
+and claims one through the adapter, atomically, so two agents never take the
+same task. The tracker stays the source of truth; tinyfleet records the
+claim.
+
+**Landing.** Land puts a workspace's branch on a project's trunk through a
+forge adapter. The default, plain git, merges onto the local trunk, one land
+per project at a time, and refuses a conflict, changing nothing. A GitHub or
+GitLab adapter opens or merges a pull request instead, and reports CI and
+review results, which become events.
+
+**Open.** Not decided yet: how one agent definition serves several projects
+of a wingman fleet, whether a project can override it, which project's on or
+off governs a persistent agent, and how people share definitions. With
+Customization.
 
 ## Crates and dependency rules
 
@@ -88,7 +183,7 @@ file.
              rules + protocol + tool interfaces
                                 ▲
                 ┌───────────┬───┴───────┬────────────┐
-             service       tmux        git     (agent, store: directional)
+             service       git      (tmux, adapters: directional)
 ```
 
 | Crate | Holds |
@@ -98,7 +193,8 @@ file.
 | `supervisor` | the socket server, and tending each project that is on |
 | `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle), the protocol the CLI and the supervisor speak (`core::protocol`: the requests and replies, and how they go on a stream), and the tool interfaces; no I/O except through them, and the protocol reads and writes only the stream it is handed |
 | `state` | the SQLite schema and its queries |
-| `service`, `tmux`, `git` | the drivers |
+| `service`, `git` | the drivers |
+| `tmux` *(directional: arrives with Delivery)* | the multiplexer's driver |
 
 Fitness tests fail the build when:
 
@@ -159,7 +255,8 @@ fleet; a directory with no fleet is nothing to remove, and says so.
 terminal and no `--non-interactive` it does nothing and exits 3), then stops
 the supervisor and removes its unit exactly as stop does. Only once the
 supervisor is down does it delete the files tinyfleet keeps in its state
-directory, that directory if it is then empty (a `.DS_Store` left alone by
+directory (its workspaces too, landed or not: *directional, with
+Delivery*), that directory if it is then empty (a `.DS_Store` left alone by
 Finder goes too), and the running `fleet` binary. A stop that fails or cannot tell leaves everything; a delete that
 fails names what is left, and running uninstall again finishes. The
 `fleet.toml` files in projects stay.
@@ -204,6 +301,11 @@ contract's (see Boundaries).
 10. Every change to state commits in one transaction with the steps that
     record it: the supervisor writes only inside `State::write`, so a change
     and its record never part, and a failure part way changes nothing.
+11. tinyfleet never removes a workspace on its own: only whoever made it
+    does, or uninstall, which takes every workspace with it, landed or not
+    *(directional: arrives with Delivery)*.
+12. A message is typed into a session only while its agent is idle
+    *(directional: arrives with Delivery)*.
 
 ## Where things are on disk
 
@@ -214,21 +316,22 @@ contract's (see Boundaries).
 | the installed binary | `~/.local/bin/fleet`, or `FLEET_INSTALL_DIR` |
 | the supervisor's service unit | `~/Library/LaunchAgents/` on macOS; `~/.config/systemd/user/` on Linux |
 | tmux socket | tmux's socket named `fleet` (`tmux -L fleet`) |
+| workspaces *(directional)* | under the state directory |
 
 ## Boundaries
 
 Each boundary's authoritative form lives in code; this table points at it.
-None exists yet.
 
 | Boundary | Between | Authoritative form |
 | --- | --- | --- |
 | CLI | person or script ↔ `fleet` | the transcript evals in `tests/cmd/` |
-| protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | *directional:* `crates/core/src/protocol.rs` |
-| state schema | supervisor ↔ state | *directional:* `crates/state/` migrations |
-| config file | person ↔ supervisor (and doctor, which reads it) | *directional:* `crates/core/src/config.rs`, read through `fleets::read_projects` |
-| tool interfaces | core ↔ drivers | *directional:* `crates/core/src/tools/` |
-| install | person ↔ the GitHub release | *directional:* `install.sh` at the repository root |
-| release | a release squash on `main` ↔ the GitHub release | *directional:* `.github/workflows/release.yml` |
+| protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | `crates/core/src/protocol.rs` |
+| state schema | supervisor ↔ state | the migration in `crates/state/src/lib.rs` |
+| config file | person ↔ supervisor (and doctor, which reads it) | `crates/core/src/config.rs`, read through `fleets::read_projects` |
+| tool interfaces | core ↔ drivers | `crates/core/src/tools.rs` |
+| adapter protocol | supervisor, through a driver ↔ adapter programs | *directional:* not defined yet |
+| install | person ↔ the GitHub release | `install.sh` at the repository root |
+| release | a release squash on `main` ↔ the GitHub release | `.github/workflows/release.yml` *(directional: written, not yet run)* |
 
 **Until tinyfleet's first release, the state schema stays at version 1.** No
 state file exists outside development, so a schema change edits the one
@@ -292,8 +395,14 @@ release whose binary accepts `fleet specimen`.
 | wingman fleet | a fleet whose directory is outside the repositories it serves, so it leaves no trace in them |
 | supervisor | the one long-running tinyfleet process per user |
 | state | everything tinyfleet writes about its fleets, in one SQLite file |
-| store | where task items live, reached through an adapter (defined later) |
-| adapter | what tinyfleet talks to an agent or a store through; users can write their own (contract defined later) |
-| session | a tmux session on tinyfleet's socket, running one agent |
+| task | an item of work, kept in the tracker the project already uses and reached through a task adapter |
+| adapter | an external program tinyfleet reaches an agent, a task tracker or a forge through, run once per request; users can write their own (protocol defined later) |
+| forge | where a branch lands: plain git onto the local trunk, or a host such as GitHub or GitLab |
+| primitive | a building block tinyfleet gives users for their own metaharness; it carries no opinion |
+| agent definition | an entry in a fleet's config saying how to run an agent: its name, whether it is persistent, its adapter, its model and its wake-up prompt |
+| persistent agent | an agent the supervisor keeps one session of running, revived fresh when it is gone |
+| session | a tmux session on tinyfleet's socket, running one agent; a spawned session ends only when told to stop |
+| workspace | a git worktree on its own branch, under the state directory |
+| event | a recorded step, as a subscriber sees it |
 | tool interface / driver | the trait in `core` for one kind of outside tool / the code behind it that runs the real tool |
 | outcome | how a command ended: done, refused, supervisor not running, could not tell |
