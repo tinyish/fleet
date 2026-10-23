@@ -4,6 +4,7 @@
 mod create;
 mod projects;
 mod remove;
+mod sessions;
 #[cfg(test)]
 mod testing;
 mod words;
@@ -22,6 +23,7 @@ use std::time::Duration;
 
 use fleet_core::paths::{Os, state_dir};
 use fleet_core::protocol::{ProtocolError, Reply, Request, Response, Status, request, response};
+use fleet_core::tools::{AgentAdapters, Multiplexer};
 use state::{State, Step};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -44,6 +46,14 @@ impl From<state::StateError> for Error {
     }
 }
 
+/// The outside tools the supervisor drives, chosen by the binary.
+pub struct Tools {
+    /// tmux, on tinyfleet's own server.
+    pub mux: Box<dyn Multiplexer + Send + Sync>,
+    /// The agent adapters, run by the host that runs adapter programs.
+    pub agents: Box<dyn AgentAdapters + Send + Sync>,
+}
+
 /// What the supervisor was doing when the system said no.
 #[derive(Debug, Clone, Copy)]
 enum Doing {
@@ -58,8 +68,12 @@ enum Doing {
 /// Runs the supervisor for this machine's state directory until it is
 /// stopped: what `fleet supervise` does. `args` are the arguments after
 /// `supervise`; it takes none, and refuses any as a usage error (exit 2).
+/// `tools` gives the outside tools for the state directory.
 #[must_use]
-pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
+pub fn main(
+    args: impl IntoIterator<Item = OsString>,
+    tools: impl FnOnce(&Path) -> Tools,
+) -> ExitCode {
     if let Some(arg) = args.into_iter().next() {
         log(&words::takes_no_arguments(&arg));
         return ExitCode::from(2);
@@ -69,7 +83,10 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         return ExitCode::FAILURE;
     };
     match state_dir(os, |name| std::env::var_os(name)) {
-        Ok(dir) => run(&dir),
+        Ok(dir) => {
+            let tools = tools(&dir);
+            run(&dir, tools)
+        }
         Err(e) => {
             log(&words::no_state_dir(&e));
             ExitCode::FAILURE
@@ -77,10 +94,11 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     }
 }
 
-/// Runs the supervisor for `state_dir` until it is stopped.
+/// Runs the supervisor for `state_dir`, driving `tools`, until it is
+/// stopped.
 #[must_use]
-pub fn run(state_dir: &Path) -> ExitCode {
-    match serve(state_dir) {
+pub fn run(state_dir: &Path, tools: Tools) -> ExitCode {
+    match serve(state_dir, tools) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log(&words::stopped(&e));
@@ -95,7 +113,7 @@ fn log(line: &str) {
     let _ = writeln!(io::stderr(), "{}{line}", words::PREFIX);
 }
 
-fn serve(state_dir: &Path) -> Result<(), Error> {
+fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
     fs::create_dir_all(state_dir).map_err(|e| Error::Io(Doing::CreatingStateDir, e))?;
     fs::set_permissions(state_dir, Permissions::from_mode(0o700))
         .map_err(|e| Error::Io(Doing::SecuringStateDir, e))?;
@@ -118,13 +136,15 @@ fn serve(state_dir: &Path) -> Result<(), Error> {
     };
     state.write(|w| w.record(&started))?;
     let state = Arc::new(Mutex::new(state));
+    let tools = Arc::new(tools);
 
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
                 let state = Arc::clone(&state);
+                let tools = Arc::clone(&tools);
                 thread::spawn(move || {
-                    if let Err(e) = answer(&state, &stream) {
+                    if let Err(e) = answer(&state, &tools, &stream) {
                         log(&words::request_failed(&e));
                     }
                 });
@@ -136,7 +156,7 @@ fn serve(state_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn answer(state: &Mutex<State>, stream: &UnixStream) -> Result<(), Error> {
+fn answer(state: &Mutex<State>, tools: &Tools, stream: &UnixStream) -> Result<(), Error> {
     stream
         .set_read_timeout(Some(TIMEOUT))
         .map_err(|e| Error::Io(Doing::SettingTimeout, e))?;
@@ -165,6 +185,25 @@ fn answer(state: &Mutex<State>, stream: &UnixStream) -> Result<(), Error> {
             projects,
             config,
         })) => remove::remove(state, &directory, &projects, config)?,
+        Ok(Request::Session(request::Session::Launch {
+            adapter,
+            directory,
+            model,
+            prompt,
+        })) => sessions::launch(
+            state,
+            tools,
+            &sessions::Ask {
+                adapter,
+                directory,
+                model,
+                prompt,
+            },
+        )?,
+        Ok(Request::Session(request::Session::List)) => sessions::list(state, tools)?,
+        Ok(Request::Session(request::Session::Stop { session })) => {
+            sessions::stop(state, tools, &session)?
+        }
         // The parser's own detail; any other failure means no reply could
         // reach the other side, so it is only logged.
         Err(ProtocolError::Malformed(error)) => Reply::Status(Status::Malformed { error }),

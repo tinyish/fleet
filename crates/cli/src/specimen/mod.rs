@@ -4,6 +4,7 @@
 //! command. Its labels are code identifiers, never sentences.
 
 mod doctor;
+mod refusals;
 mod samples;
 
 use std::io::{self, Write};

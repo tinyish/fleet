@@ -91,5 +91,6 @@ fn state_words(error: &StateError) -> String {
         StateError::Step(e) => format!("state: a step in the record: {e}"),
         StateError::NotUtf8(p) => format!("{} is not valid UTF-8", p.display()),
         StateError::Config(e) => format!("writing fleet.toml: {e}"),
+        StateError::Tool(e) => format!("an outside tool failed: {e:?}"),
     }
 }

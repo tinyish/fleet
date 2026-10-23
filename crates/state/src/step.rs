@@ -84,6 +84,26 @@ pub enum Step {
         /// The fleet's directory.
         directory: String,
     },
+    /// A session was launched: its agent started in tmux.
+    SessionLaunched {
+        /// tinyfleet's id for it.
+        session: String,
+        /// The adapter program that said what to run.
+        adapter: String,
+        /// Where its agent works.
+        directory: String,
+        /// The model it was asked to run.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// What the agent was first told.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+    /// A session was stopped: its tmux session ended and it is forgotten.
+    SessionStopped {
+        /// tinyfleet's id for it.
+        session: String,
+    },
 }
 
 impl Step {
@@ -152,6 +172,16 @@ mod tests {
             Step::FleetForgotten {
                 directory: "/f".into(),
             },
+            Step::SessionLaunched {
+                session: "s1".into(),
+                adapter: "/a/claude".into(),
+                directory: "/c/app".into(),
+                model: Some("sonnet".into()),
+                prompt: None,
+            },
+            Step::SessionStopped {
+                session: "s1".into(),
+            },
         ]
     }
 
@@ -176,7 +206,9 @@ mod tests {
                 "FLEET_CONFIG_BROKEN",
                 "FLEET_REMOVED",
                 "PROJECTS_TAKEN",
-                "FLEET_FORGOTTEN"
+                "FLEET_FORGOTTEN",
+                "SESSION_LAUNCHED",
+                "SESSION_STOPPED"
             ]
         );
     }

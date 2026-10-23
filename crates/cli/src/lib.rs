@@ -3,6 +3,8 @@
 
 mod client;
 mod cmd;
+#[cfg(feature = "debug")]
+mod debug;
 mod protocol;
 #[cfg(feature = "specimen")]
 mod specimen;
@@ -52,6 +54,10 @@ where
     #[cfg(feature = "specimen")]
     if args.get(1).is_some_and(|a| a == "specimen") {
         return specimen::run();
+    }
+    #[cfg(feature = "debug")]
+    if args.get(1).is_some_and(|a| a == "debug") {
+        return debug::run(&args[1..]);
     }
     let args = match Args::try_parse_from(args) {
         Ok(args) => args,
@@ -132,6 +138,21 @@ mod tests {
     #[test]
     fn specimen_is_not_a_command_in_a_release_build() {
         let err = Args::try_parse_from(["fleet", "specimen"]).err();
+        assert!(
+            matches!(&err, Some(e) if e.kind() == clap::error::ErrorKind::InvalidSubcommand),
+            "{err:?}"
+        );
+    }
+}
+
+// Only without the feature: with it, `debug` is caught before clap.
+#[cfg(all(test, not(feature = "debug")))]
+mod release_tests {
+    use super::*;
+
+    #[test]
+    fn debug_is_not_a_command_in_a_release_build() {
+        let err = Args::try_parse_from(["fleet", "debug", "list"]).err();
         assert!(
             matches!(&err, Some(e) if e.kind() == clap::error::ErrorKind::InvalidSubcommand),
             "{err:?}"

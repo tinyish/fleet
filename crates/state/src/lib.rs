@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fleet_core::fleets::{Change, Fleet};
+use fleet_core::tools::ToolError;
 use rusqlite::{Connection, params};
 
 mod step;
@@ -34,6 +35,21 @@ pub enum StateError {
     NotUtf8(PathBuf),
     /// Writing the fleet's config file failed; nothing was registered.
     Config(io::Error),
+    /// An outside tool failed part way; nothing was written.
+    Tool(ToolError),
+}
+
+/// One session tinyfleet launched and has not stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    /// tinyfleet's id for it, also its tmux session's name.
+    pub id: String,
+    /// The adapter program that launched it, and reads it.
+    pub adapter: PathBuf,
+    /// Where its agent works.
+    pub directory: PathBuf,
+    /// When it was launched, by the supervisor's clock.
+    pub launch_time_millis: i64,
 }
 
 impl From<rusqlite::Error> for StateError {
@@ -73,6 +89,12 @@ impl State {
                      fleet     TEXT    NOT NULL REFERENCES fleets (directory) ON DELETE CASCADE,
                      active    INTEGER NOT NULL
                  );
+                 CREATE TABLE sessions (
+                     id                 TEXT    PRIMARY KEY,
+                     adapter            TEXT    NOT NULL,
+                     directory          TEXT    NOT NULL,
+                     launch_time_millis INTEGER NOT NULL
+                 );
                  PRAGMA user_version = 1;
                  COMMIT;",
             )?;
@@ -108,6 +130,27 @@ impl State {
             }
         }
         Ok(fleets)
+    }
+
+    /// Every session launched and not stopped, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails.
+    pub fn sessions(&self) -> Result<Vec<SessionRow>, StateError> {
+        let mut query = self.conn.prepare(
+            "SELECT id, adapter, directory, launch_time_millis FROM sessions
+             ORDER BY launch_time_millis, id",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                adapter: PathBuf::from(row.get::<_, String>(1)?),
+                directory: PathBuf::from(row.get::<_, String>(2)?),
+                launch_time_millis: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 }
 
@@ -163,6 +206,51 @@ impl Write<'_> {
             )?;
         }
         write_config().map_err(StateError::Config)
+    }
+
+    /// Records `row`, then runs `launch`: if it fails, the transaction
+    /// fails with it, so nothing is recorded.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails, a path is not UTF-8, or `launch` fails.
+    pub fn launch_session(
+        &mut self,
+        row: &SessionRow,
+        launch: impl FnOnce() -> Result<(), ToolError>,
+    ) -> Result<(), StateError> {
+        self.tx.execute(
+            "INSERT INTO sessions (id, adapter, directory, launch_time_millis)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                row.id,
+                utf8(&row.adapter)?,
+                utf8(&row.directory)?,
+                row.launch_time_millis
+            ],
+        )?;
+        launch().map_err(StateError::Tool)
+    }
+
+    /// Forgets session `id`, then runs `stop`: if it fails, the session
+    /// stays. False, running nothing, when there is no such session.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails or `stop` fails.
+    pub fn stop_session(
+        &mut self,
+        id: &str,
+        stop: impl FnOnce() -> Result<(), ToolError>,
+    ) -> Result<bool, StateError> {
+        let forgot = self
+            .tx
+            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        if forgot == 0 {
+            return Ok(false);
+        }
+        stop().map_err(StateError::Tool)?;
+        Ok(true)
     }
 
     /// Appends one step to the record.
@@ -280,7 +368,10 @@ fn utf8(path: &Path) -> Result<&str, StateError> {
         .ok_or_else(|| StateError::NotUtf8(path.to_path_buf()))
 }
 
-fn now_millis() -> i64 {
+/// Now, in milliseconds since the Unix epoch: the clock every time in
+/// state is stamped with.
+#[must_use]
+pub fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
@@ -289,6 +380,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_core::tools::ToolError;
 
     /// A state file in a fresh directory of its own.
     fn fresh(name: &str) -> (State, PathBuf) {
@@ -403,6 +495,105 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(state.fleets().ok(), Some(vec![fleet("/f/a", &["/c/api"])]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn row(id: &str) -> SessionRow {
+        SessionRow {
+            id: id.into(),
+            adapter: "/a/claude".into(),
+            directory: "/c/app".into(),
+            launch_time_millis: 5,
+        }
+    }
+
+    fn launched(id: &str) -> Step {
+        Step::SessionLaunched {
+            session: id.into(),
+            adapter: "/a/claude".into(),
+            directory: "/c/app".into(),
+            model: None,
+            prompt: None,
+        }
+    }
+
+    fn steps(state: &State) -> Vec<String> {
+        let Ok(mut query) = state.conn.prepare("SELECT step FROM records ORDER BY id") else {
+            return Vec::new();
+        };
+        query
+            .query_map([], |row| row.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    fn tmux_said_no() -> ToolError {
+        ToolError::Failed {
+            command: "tmux new-session".into(),
+            said: "no".into(),
+        }
+    }
+
+    #[test]
+    fn a_launched_session_is_listed_and_recorded() {
+        let (mut state, dir) = fresh("session");
+        let done = state.write(|w| {
+            w.launch_session(&row("s1"), || Ok(()))?;
+            w.record(&launched("s1"))
+        });
+        assert!(done.is_ok(), "{done:?}");
+        assert_eq!(state.sessions().ok(), Some(vec![row("s1")]));
+        assert_eq!(steps(&state), ["SESSION_LAUNCHED"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_launch_that_fails_leaves_nothing() {
+        let (mut state, dir) = fresh("session-fails");
+        let failed = state.write(|w| {
+            w.launch_session(&row("s1"), || Err(tmux_said_no()))?;
+            w.record(&launched("s1"))
+        });
+        assert!(matches!(failed, Err(StateError::Tool(_))), "{failed:?}");
+        assert_eq!(state.sessions().ok(), Some(vec![]));
+        assert_eq!(steps(&state), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stopping_forgets_the_session_and_stopping_again_says_there_was_none() {
+        let (mut state, dir) = fresh("session-stop");
+        assert!(
+            state
+                .write(|w| w.launch_session(&row("s1"), || Ok(())))
+                .is_ok()
+        );
+        let ran = std::cell::Cell::new(0);
+        let stop = || {
+            ran.set(ran.get() + 1);
+            Ok(())
+        };
+        assert_eq!(state.write(|w| w.stop_session("s1", stop)).ok(), Some(true));
+        assert_eq!(state.sessions().ok(), Some(vec![]));
+        assert_eq!(
+            state.write(|w| w.stop_session("s1", stop)).ok(),
+            Some(false)
+        );
+        assert_eq!(ran.get(), 1, "stop runs only for a session that was there");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stop_that_fails_keeps_the_session() {
+        let (mut state, dir) = fresh("session-stop-fails");
+        assert!(
+            state
+                .write(|w| w.launch_session(&row("s1"), || Ok(())))
+                .is_ok()
+        );
+        let failed = state.write(|w| w.stop_session("s1", || Err(tmux_said_no())));
+        assert!(matches!(failed, Err(StateError::Tool(_))), "{failed:?}");
+        assert_eq!(state.sessions().ok(), Some(vec![row("s1")]));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

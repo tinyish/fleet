@@ -4,6 +4,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::agent;
+
 /// What the service manager needs to run the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisorUnit {
@@ -75,6 +77,8 @@ pub enum FileStep {
     Write,
     /// Removing a file.
     Remove,
+    /// Looking at a file or directory.
+    Read,
 }
 
 /// A path the supervisor's unit file holds.
@@ -162,4 +166,76 @@ pub trait Git {
     /// When git is not on the `PATH` (`CouldNotRun` with a not-found error)
     /// or does not run.
     fn version(&self) -> Result<String, ToolError>;
+}
+
+/// One pane on tinyfleet's tmux server: its session, the agent's process
+/// id, and whether the agent has exited (the pane stays, so its end can be
+/// read).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pane {
+    /// The session's name: tinyfleet's id for it.
+    pub session: String,
+    /// The agent's process id.
+    pub pid: u32,
+    /// Whether the agent has exited.
+    pub dead: bool,
+}
+
+/// The multiplexer that holds agents' sessions: tmux, on tinyfleet's own
+/// server.
+pub trait Multiplexer {
+    /// Starts `program` in a new session named `session`, in `directory`.
+    ///
+    /// # Errors
+    ///
+    /// When `directory` is not a directory, or the multiplexer fails.
+    fn launch(
+        &self,
+        session: &str,
+        directory: &Path,
+        program: &agent::Launched,
+    ) -> Result<(), ToolError>;
+
+    /// Every pane on tinyfleet's server; none when the server is not
+    /// running.
+    ///
+    /// # Errors
+    ///
+    /// When the multiplexer fails.
+    fn panes(&self) -> Result<Vec<Pane>, ToolError>;
+
+    /// Ends `session`. A session that is not there is not an error.
+    ///
+    /// # Errors
+    ///
+    /// When the multiplexer fails.
+    fn stop(&self, session: &str) -> Result<(), ToolError>;
+}
+
+/// The agent tool interface: the programs that adapt an agent, such as
+/// Claude Code, to tinyfleet, each run once per request (see [`agent`]).
+/// Task trackers and forges get interfaces of their own, one per kind of
+/// adapter, as core.md's tool interfaces table draws them.
+pub trait AgentAdapters {
+    /// Asks the adapter at `adapter` what to run to start an agent.
+    ///
+    /// # Errors
+    ///
+    /// When the adapter fails.
+    fn launch(
+        &self,
+        adapter: &Path,
+        request: &agent::Launch,
+    ) -> Result<agent::Launched, agent::AdapterFault>;
+
+    /// Asks the adapter at `adapter` what state each session's agent is in.
+    ///
+    /// # Errors
+    ///
+    /// When the adapter fails.
+    fn read(
+        &self,
+        adapter: &Path,
+        request: &agent::Read,
+    ) -> Result<agent::Readings, agent::AdapterFault>;
 }

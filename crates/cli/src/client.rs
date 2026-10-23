@@ -22,11 +22,16 @@ pub(crate) fn socket(state_dir: &Path) -> Result<PathBuf, Status> {
     protocol::socket_path(state_dir).map_err(|e| Status::Cannot(Problem::SocketPathTooLong(e.0)))
 }
 
-/// Asks the supervisor one thing: its reply, or why the conversation failed.
-fn ask(socket: &Path, request: &Request) -> Result<Reply, ProtocolError> {
+/// Asks the supervisor one thing, waiting at most `within` for each of the
+/// question and the answer: its reply, or why the conversation failed.
+pub(crate) fn ask(
+    socket: &Path,
+    request: &Request,
+    within: Duration,
+) -> Result<Reply, ProtocolError> {
     let stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(ONE))?;
-    stream.set_write_timeout(Some(ONE))?;
+    stream.set_read_timeout(Some(within))?;
+    stream.set_write_timeout(Some(within))?;
     let mut writer = &stream;
     protocol::write_request(&mut writer, request)?;
     protocol::read_reply(&mut BufReader::new(&stream))
@@ -34,7 +39,7 @@ fn ask(socket: &Path, request: &Request) -> Result<Reply, ProtocolError> {
 
 pub(crate) fn answers(socket: &Path) -> bool {
     matches!(
-        ask(socket, &Request::Hello),
+        ask(socket, &Request::Hello, ONE),
         Ok(Reply::Response(Response::Hello(_)))
     )
 }
@@ -57,7 +62,7 @@ pub(crate) enum Hello {
 /// Asks the supervisor for hello, and says how that went.
 pub(crate) fn hello(socket: &Path) -> Hello {
     use std::io::ErrorKind;
-    match ask(socket, &Request::Hello) {
+    match ask(socket, &Request::Hello, ONE) {
         Ok(Reply::Response(Response::Hello(hello))) => Hello::Answered(hello),
         Ok(_) => Hello::Odd,
         Err(ProtocolError::Io(e))
@@ -98,7 +103,7 @@ fn ask_for<T>(
     to: &'static str,
     pick: impl FnOnce(Response) -> Option<T>,
 ) -> Result<T, Status> {
-    match ask(socket, request) {
+    match ask(socket, request, ONE) {
         Ok(Reply::Response(response)) => {
             pick(response).ok_or(Status::CouldNotTell(Doubt::OddReply { to }))
         }

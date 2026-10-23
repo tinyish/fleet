@@ -5,7 +5,10 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|a| a == "supervise") {
-        return supervisor::main(std::env::args_os().skip(2));
+        return supervisor::main(std::env::args_os().skip(2), |state_dir| supervisor::Tools {
+            mux: Box::new(tmux::Tmux::new(state_dir.join(tmux::SOCKET))),
+            agents: Box::new(adapter_host::Host::default()),
+        });
     }
     let service = service::for_this_os();
     cli::run(

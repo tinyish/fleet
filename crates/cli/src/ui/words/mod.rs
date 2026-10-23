@@ -14,6 +14,7 @@ use crate::ui::output::Ink;
 mod create;
 mod doctor;
 pub(crate) mod remove;
+mod session;
 pub(crate) mod uninstall;
 use create::created;
 pub(crate) use doctor::{HEALTHY, checked, found, found_next, verdict};
@@ -393,24 +394,29 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
             ink.path(project),
             ink.accent("fleet.toml")
         ),
-        protocol::Status::CannotTurnOn {
-            project,
-            fleet,
-            why,
-        } => cannot_turn_on(project, fleet, why, ink),
+        protocol::Status::CannotTurnOn { .. } => cannot_turn_on(status, ink),
         protocol::Status::Malformed { error } => {
             format!("the supervisor could not understand the request: {error}")
+        }
+        protocol::Status::AdapterFailed { .. }
+        | protocol::Status::MultiplexerCouldNotRun { .. }
+        | protocol::Status::MultiplexerFailed { .. }
+        | protocol::Status::NoSuchSession { .. } => {
+            session::refused(status, ink).unwrap_or_default()
         }
     }
 }
 
 /// A project that could not be turned on because of its fleet's config.
-fn cannot_turn_on(
-    project: &std::path::Path,
-    fleet: &std::path::Path,
-    why: &protocol::Status,
-    ink: Ink,
-) -> String {
+fn cannot_turn_on(status: &protocol::Status, ink: Ink) -> String {
+    let protocol::Status::CannotTurnOn {
+        project,
+        fleet,
+        why,
+    } = status
+    else {
+        return String::new();
+    };
     format!(
         "{} cannot be turned on: the config of the fleet in {} cannot be used: {}",
         ink.path(project),
@@ -498,6 +504,7 @@ fn tool(error: &ToolError, ink: Ink) -> String {
                 FileStep::Secure => "securing",
                 FileStep::Write => "writing",
                 FileStep::Remove => "removing",
+                FileStep::Read => "looking at",
             },
             ink.path(path)
         ),

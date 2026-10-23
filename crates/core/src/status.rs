@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::{AdapterFault, Verb};
+
 /// Why the supervisor says no: a rule's verdict, or a problem with a path or
 /// a file. Facts only: the CLI words them (core.md invariant 9). The CLI and
 /// the protocol write it as `protocol::Status`.
@@ -179,6 +181,32 @@ pub enum Status {
     Malformed {
         /// What was wrong with it.
         error: String,
+    },
+    /// An agent adapter failed to answer.
+    AdapterFailed {
+        /// The adapter program.
+        adapter: PathBuf,
+        /// What it was asked.
+        verb: Verb,
+        /// How it failed.
+        fault: AdapterFault,
+    },
+    /// tmux could not be run: not installed, or not runnable.
+    MultiplexerCouldNotRun {
+        /// What the system said.
+        error: String,
+    },
+    /// tmux failed.
+    MultiplexerFailed {
+        /// The command that failed.
+        command: String,
+        /// What it said.
+        said: String,
+    },
+    /// No session has this id.
+    NoSuchSession {
+        /// The id asked for.
+        session: String,
     },
 }
 

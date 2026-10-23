@@ -28,6 +28,8 @@ pub enum Request {
     Stop(request::Stop),
     /// For `fleet remove`.
     Remove(request::Remove),
+    /// For agents' sessions: `fleet debug` now.
+    Session(request::Session),
 }
 
 /// The requests of each command. Always written with the module, as in
@@ -94,6 +96,32 @@ pub mod request {
         },
     }
 
+    /// What is asked of agents' sessions.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Session {
+        /// Launch an agent through the adapter at `adapter`, in `directory`.
+        Launch {
+            /// The adapter program, absolute.
+            adapter: PathBuf,
+            /// Where the agent works, absolute.
+            directory: PathBuf,
+            /// The model to run; the adapter's default when absent.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            model: Option<String>,
+            /// The first thing the agent is told.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            prompt: Option<String>,
+        },
+        /// Every session, with its state.
+        List,
+        /// Stop a session: end its tmux session and forget it.
+        Stop {
+            /// The session's id.
+            session: String,
+        },
+    }
+
     /// What to do with a removed fleet's config file.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
@@ -125,6 +153,8 @@ pub enum Response {
     Stop(response::Stop),
     /// What `fleet remove` did.
     Remove(response::Remove),
+    /// What was done to agents' sessions.
+    Session(response::Session),
 }
 
 /// The responses of each command. Always written with the module, as in
@@ -132,6 +162,8 @@ pub enum Response {
 pub mod response {
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
+
+    use crate::agent::{AdapterFault, SessionState};
 
     /// The supervisor is there.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +314,55 @@ pub mod response {
         Missing,
     }
 
+    /// What was done to agents' sessions.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Session {
+        /// A session was launched.
+        Launched {
+            /// Its id.
+            session: String,
+        },
+        /// Every session, with its state.
+        Listed {
+            /// The sessions, oldest first.
+            sessions: Vec<Listed>,
+            /// The adapters that failed to read their sessions, which are
+            /// unknown.
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            faults: Vec<Fault>,
+        },
+        /// A session was stopped.
+        Stopped {
+            /// Its id.
+            session: String,
+        },
+    }
+
+    /// One session and its state.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Listed {
+        /// Its id.
+        pub session: String,
+        /// The adapter program that launched it.
+        pub adapter: PathBuf,
+        /// Where its agent works.
+        pub directory: PathBuf,
+        /// Its state now.
+        pub state: SessionState,
+        /// When it was launched.
+        pub launch_time_millis: i64,
+    }
+
+    /// An adapter that failed to read its sessions.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Fault {
+        /// The adapter program.
+        pub adapter: PathBuf,
+        /// How it failed.
+        pub fault: AdapterFault,
+    }
+
     /// A fleet whose config did not read, and why.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct StayedOff {
@@ -406,6 +487,7 @@ pub fn read_reply(r: &mut impl BufRead) -> Result<Reply, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{AdapterFault, Reason, SessionState, Verb};
     use std::io::Cursor;
 
     #[test]
@@ -425,6 +507,16 @@ mod tests {
                 project: PathBuf::from("/c/app"),
             }),
             create,
+            Request::Session(request::Session::Launch {
+                adapter: PathBuf::from("/a/claude"),
+                directory: PathBuf::from("/c/app"),
+                model: Some("sonnet".into()),
+                prompt: Some("hi; there".into()),
+            }),
+            Request::Session(request::Session::List),
+            Request::Session(request::Session::Stop {
+                session: "s1".into(),
+            }),
         ];
         for req in requests {
             let mut buf = Vec::new();
@@ -521,6 +613,76 @@ mod tests {
         };
         write_reply(&mut buf, &Reply::Status(missing)).ok();
         assert_eq!(buf, b"{\"status\":{\"missing\":{\"path\":\"/x\"}}}\n");
+    }
+
+    #[test]
+    fn every_session_reply_round_trips() {
+        let replies = [
+            Reply::Response(Response::Session(response::Session::Launched {
+                session: "s1".into(),
+            })),
+            Reply::Response(Response::Session(response::Session::Listed {
+                sessions: vec![response::Listed {
+                    session: "s1".into(),
+                    adapter: PathBuf::from("/a/claude"),
+                    directory: PathBuf::from("/c/app"),
+                    state: SessionState::NeedsYou {
+                        reason: Some(Reason::Permission),
+                    },
+                    launch_time_millis: 5,
+                }],
+                faults: vec![response::Fault {
+                    adapter: PathBuf::from("/a/codex"),
+                    fault: AdapterFault::TimedOut {
+                        after_millis: 20_000,
+                    },
+                }],
+            })),
+            Reply::Response(Response::Session(response::Session::Stopped {
+                session: "s1".into(),
+            })),
+            Reply::Status(Status::AdapterFailed {
+                adapter: PathBuf::from("/a/claude"),
+                verb: Verb::Launch,
+                fault: AdapterFault::Exited {
+                    code: Some(1),
+                    said: "claude: not found".into(),
+                },
+            }),
+            Reply::Status(Status::MultiplexerCouldNotRun {
+                error: "No such file or directory (os error 2)".into(),
+            }),
+            Reply::Status(Status::MultiplexerFailed {
+                command: "tmux new-session".into(),
+                said: "no".into(),
+            }),
+            Reply::Status(Status::NoSuchSession {
+                session: "s9".into(),
+            }),
+        ];
+        for reply in replies {
+            let mut buf = Vec::new();
+            write_reply(&mut buf, &reply).ok();
+            assert_eq!(read_reply(&mut Cursor::new(buf)).ok(), Some(reply));
+        }
+    }
+
+    #[test]
+    fn the_session_wire_nests_by_command() {
+        assert_eq!(
+            read_request(&mut Cursor::new(b"{\"session\":\"list\"}\n".to_vec())).ok(),
+            Some(Request::Session(request::Session::List))
+        );
+        let mut buf = Vec::new();
+        let listed = response::Session::Listed {
+            sessions: vec![],
+            faults: vec![],
+        };
+        write_reply(&mut buf, &Reply::Response(Response::Session(listed))).ok();
+        assert_eq!(
+            buf,
+            b"{\"response\":{\"session\":{\"listed\":{\"sessions\":[]}}}}\n"
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use fleet_core::protocol::{ProtocolError, ProtocolErrorKind, response};
 use fleet_core::tools::{BadUnitPath, FileStep, ToolError, ToolErrorKind, UnitPath};
 use strum::IntoEnumIterator;
 
+use super::refusals;
 use crate::client;
 use crate::protocol::{
     Doing, Doubt, DoubtKind, During, DuringKind, Problem, ProblemKind, Response, ResponseKind,
@@ -53,10 +54,10 @@ pub(crate) fn endings() -> Vec<Sample> {
 }
 
 pub(super) const APP: &str = "/code/app";
-const SRC: &str = "/code/app/src";
+pub(super) const SRC: &str = "/code/app/src";
 pub(super) const WING: &str = "/code/wing";
-const API: &str = "/code/api";
-const WEB: &str = "/code/web";
+pub(super) const API: &str = "/code/api";
+pub(super) const WEB: &str = "/code/web";
 const OLD: &str = "/code/old";
 pub(super) const STATE: &str = "/Users/you/Library/Application Support/fleet";
 
@@ -67,7 +68,7 @@ pub(super) fn path(p: &str) -> PathBuf {
 /// The system's own errors, built from their numbers so that they print as
 /// a real one does (`Permission denied (os error 13)`). These numbers are the
 /// same on macOS and Linux.
-fn denied() -> io::Error {
+pub(super) fn denied() -> io::Error {
     io::Error::from_raw_os_error(13) // EACCES
 }
 
@@ -305,11 +306,10 @@ fn creates() -> Vec<response::Create> {
 fn statuses(kind: StatusKind) -> Vec<(String, Status)> {
     match kind {
         StatusKind::Refused => fleet_core::status::StatusKind::iter()
-            .map(|k| {
-                (
-                    format!("Status::Refused({k:?})"),
-                    Status::Refused(refusal(k)),
-                )
+            .flat_map(|k| {
+                refusals::refusals(k)
+                    .into_iter()
+                    .map(move |r| (format!("Status::Refused({k:?})"), Status::Refused(r)))
             })
             .collect(),
         StatusKind::Cannot => ProblemKind::iter()
@@ -345,91 +345,6 @@ fn statuses(kind: StatusKind) -> Vec<(String, Status)> {
                 })
             })
             .collect(),
-    }
-}
-
-fn refusal(kind: fleet_core::status::StatusKind) -> protocol::Status {
-    use fleet_core::protocol::Status as S;
-    use fleet_core::status::StatusKind as K;
-    match kind {
-        K::DirectoryNotInRepo => S::DirectoryNotInRepo { path: path(WING) },
-        K::DirectoryNotRepoRoot => S::DirectoryNotRepoRoot {
-            path: path(SRC),
-            root: path(APP),
-        },
-        K::ProjectNotInRepo => S::ProjectNotInRepo { path: path(WING) },
-        K::ProjectNotRepoRoot => S::ProjectNotRepoRoot {
-            path: path(SRC),
-            root: path(APP),
-        },
-        K::ProjectIsFleetDirectory => S::ProjectIsFleetDirectory { path: path(APP) },
-        K::WingmanInsideProject => S::WingmanInsideProject {
-            directory: path(SRC),
-            project: path(APP),
-        },
-        K::AlreadyHereServingOthers => S::AlreadyHereServingOthers {
-            directory: path(WING),
-            serving: vec![path(APP)],
-            asked: vec![path(API)],
-        },
-        K::InsideFleet => S::InsideFleet {
-            directory: path(SRC),
-            fleet: path(APP),
-        },
-        K::ContainsFleet => S::ContainsFleet {
-            directory: path("/code"),
-            fleet: path(APP),
-        },
-        K::InsideServedProject => S::InsideServedProject {
-            directory: path(SRC),
-            project: path(APP),
-            fleet: path(WING),
-        },
-        K::AlreadyServed => S::AlreadyServed {
-            project: path(APP),
-            fleet: path(WING),
-        },
-        K::Missing => S::Missing { path: path(API) },
-        K::Unreadable => S::Unreadable {
-            path: path(API),
-            error: denied().to_string(),
-        },
-        K::ConfigDiffers => S::ConfigDiffers {
-            path: path("/code/wing/fleet.toml"),
-            listed: vec![path(API), path(WEB)],
-        },
-        K::CannotWrite => S::CannotWrite {
-            path: path("/code/app/fleet.toml"),
-            error: denied().to_string(),
-        },
-        K::BadConfig => bad_config(),
-        K::AlsoClaimed => S::AlsoClaimed {
-            project: path(API),
-            fleet: path(WING),
-        },
-        K::NotServed => S::NotServed {
-            path: path("/code/blog"),
-        },
-        K::InsideProject => S::InsideProject {
-            path: path(SRC),
-            project: path(APP),
-        },
-        K::NotFleetDirectory => S::NotFleetDirectory {
-            directory: path(SRC),
-            fleet: path(APP),
-        },
-        K::NoLongerServed => S::NoLongerServed {
-            project: path(API),
-            fleet: path(WING),
-        },
-        K::CannotTurnOn => S::CannotTurnOn {
-            project: path(API),
-            fleet: path(WING),
-            why: Box::new(bad_config()),
-        },
-        K::Malformed => S::Malformed {
-            error: "expected value at line 1 column 1".into(),
-        },
     }
 }
 

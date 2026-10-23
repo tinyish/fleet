@@ -3,6 +3,7 @@
 //! I/O happens here except through those interfaces; the protocol reads and
 //! writes only the stream it is handed.
 
+pub mod agent;
 pub mod config;
 pub mod fleets;
 pub mod paths;

@@ -33,8 +33,8 @@ Onboarding is built; Delivery's primitives are drawn ahead of their code.
 | **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps persistent agents alive, holds each message until its agent is idle *(directional: arrives with Delivery)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
 | **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, its agents, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
-| **tmux server** *(directional: arrives with the agent adapter)* | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
-| **adapter programs** *(directional: arrive with Delivery)* | One program per kind of agent, task tracker or forge. An agent's adapter says how to launch it and reads what state it is in; a tracker's or a forge's reaches that tool. | one request: the supervisor runs it through a driver, and it exits with its answer |
+| **tmux server** | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
+| **adapter programs** *(directional for task trackers and forges)* | One program per kind of agent, task tracker or forge. An agent's adapter says how to launch it and reads what state it is in; a tracker's or a forge's reaches that tool. | one request: the supervisor runs it through a driver, and it exits with its answer |
 | **workspaces** *(directional: arrive with Delivery)* | Git worktrees, each on its own branch, for work kept apart from a project's checkout. | under the state directory, until whoever made one removes it |
 
 **When the supervisor is down,** a command that needs it (create, and later
@@ -65,26 +65,37 @@ real tool. The core never runs a tool itself.
 | Tool interface | Driver now | Used by |
 | --- | --- | --- |
 | service manager | launchd (macOS), systemd user units (Linux) | CLI, to start and stop the supervisor; doctor |
-| multiplexer | tmux, on tinyfleet's own socket *(directional: arrives with the agent adapter)* | supervisor; doctor |
+| multiplexer | tmux, on tinyfleet's own socket | supervisor; doctor *(directional)* |
 | git | git | doctor; the supervisor *(directional: when work lands)* |
-| agent | *directional:* an adapter program per kind of agent | supervisor |
+| agent | an adapter program per kind of agent, named by its path *(by name, fetched: directional)* | supervisor |
 | task | *directional:* an adapter program per kind of task tracker | supervisor |
 | forge | *directional:* plain git by default; an adapter program for GitHub, GitLab | supervisor |
+| network | *directional:* downloads an adapter from its release | supervisor, the first time a config names that adapter |
 
-**Adapters** *(directional: the protocol is defined later)*. Agents, task
-trackers and forges are reached through adapters: external programs that the
-supervisor runs through a driver, once per request. Each run is handed one
-request and gives one answer, then exits, so an adapter is never a process
-to keep alive, revive or adopt. tinyfleet ships adapters for agents such as Claude Code, Codex and
-Pi, for task trackers such as beads, and plain git as the default forge.
-Users can write their own, in any language: for other agents, for trackers
-such as Linear or Jira, for forges such as GitHub or GitLab. An adapter says
-what to run and what its tool's signals mean; tinyfleet runs it, launching
-every session through the multiplexer itself.
+**Adapters** *(built for agents; directional for task trackers, forges and
+fetching)*. Agents, task trackers and forges are reached through
+adapters: external programs that the supervisor runs through a driver, once
+per request. Each run is handed one request and gives one answer, then exits,
+so an adapter is never a process to keep alive, revive or adopt. An adapter
+says what to run and what its tool's signals mean; tinyfleet runs it,
+launching every session through the multiplexer itself.
+
+tinyfleet's own adapters (for agents such as Claude Code, Codex and Pi, for
+task trackers such as beads, and plain git as the default forge) live together
+in a repository of their own, `tinyish/fleet-adapters`, one directory per
+kind (`agents/`, `trackers/`, `forges/`), each released like fleet as
+prebuilt binaries. They are not installed with fleet: the first time a
+config names one, the supervisor fetches the release for this machine, checks it against its SHA-256, and
+keeps it under the state directory. This is the one thing tinyfleet reaches
+the network for. Users can write their own adapters, in any language, for
+other agents, for trackers such as Linear or Jira, and for forges such as
+GitHub or GitLab, and name them by their path.
 
 ## Primitives
 
-> **Directional.** Drawn for Delivery; nothing in this section is built yet.
+> **Directional,** drawn for Delivery. Built so far, and reached only through
+> a debug build's `fleet debug`: a session launched through an agent adapter,
+> listed with its state, and stopped. Nothing else here is built yet.
 
 tinyfleet gives a person the building blocks of their own metaharness, and
 nothing that carries an opinion. Roles, workflows, reactions (such as "CI
@@ -183,7 +194,7 @@ file.
              rules + protocol + tool interfaces
                                 ▲
                 ┌───────────┬───┴───────┬────────────┐
-             service       git      (tmux, adapters: directional)
+             service       tmux        git    adapter-host
 ```
 
 | Crate | Holds |
@@ -194,7 +205,8 @@ file.
 | `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle), the protocol the CLI and the supervisor speak (`core::protocol`: the requests and replies, and how they go on a stream), and the tool interfaces; no I/O except through them, and the protocol reads and writes only the stream it is handed |
 | `state` | the SQLite schema and its queries |
 | `service`, `git` | the drivers |
-| `tmux` *(directional: arrives with Delivery)* | the multiplexer's driver |
+| `tmux` | the multiplexer's driver |
+| `adapter-host` | the driver that runs adapter programs: one request on stdin, one answer on stdout, with a time limit |
 
 Fitness tests fail the build when:
 
@@ -289,7 +301,7 @@ contract's (see Boundaries).
    another's, and a repository belongs to at most one fleet.
 4. Stopping a fleet or the supervisor never ends an agent's session *(directional: arrives with the agent adapter)*.
 5. Nothing waits for an answer when there is no terminal.
-6. tinyfleet uses only its own tmux socket *(directional: arrives with the agent adapter)*.
+6. tinyfleet uses only its own tmux socket.
 7. Only drivers start outside programs.
 8. Doctor changes nothing.
 9. Every word a command shows is the CLI's. The supervisor and the drivers
@@ -315,8 +327,9 @@ contract's (see Boundaries).
 | a fleet's config file | `fleet.toml` in the fleet directory |
 | the installed binary | `~/.local/bin/fleet`, or `FLEET_INSTALL_DIR` |
 | the supervisor's service unit | `~/Library/LaunchAgents/` on macOS; `~/.config/systemd/user/` on Linux |
-| tmux socket | tmux's socket named `fleet` (`tmux -L fleet`) |
+| tmux socket | `tmux.sock` in the state directory (`tmux -S <state directory>/tmux.sock`), so a sandbox or an eval has a tmux server of its own |
 | workspaces *(directional)* | under the state directory |
+| fetched adapters *(directional)* | under the state directory |
 
 ## Boundaries
 
@@ -329,7 +342,7 @@ Each boundary's authoritative form lives in code; this table points at it.
 | state schema | supervisor ↔ state | the migration in `crates/state/src/lib.rs` |
 | config file | person ↔ supervisor (and doctor, which reads it) | `crates/core/src/config.rs`, read through `fleets::read_projects` |
 | tool interfaces | core ↔ drivers | `crates/core/src/tools.rs` |
-| adapter protocol | supervisor, through a driver ↔ adapter programs | *directional:* not defined yet |
+| adapter protocol | supervisor, through a driver ↔ adapter programs | `crates/core/src/agent.rs` for agents; *directional:* tasks and forges |
 | install | person ↔ the GitHub release | `install.sh` at the repository root |
 | release | a release squash on `main` ↔ the GitHub release | `.github/workflows/release.yml` *(directional: written, not yet run)* |
 
@@ -366,8 +379,9 @@ squash to `main`. There are four: macOS on arm64 and on x86_64, and Linux on
 arm64 and on x86_64, statically linked against musl. Each is
 `fleet-<target>.tar.gz` with its `.sha256` beside it. The names carry no
 version, so the latest release's download links never change. They are built
-without features, so none has the CLI's specimen: the workflow refuses a
-release whose binary accepts `fleet specimen`.
+without features, so none has the CLI's specimen or its debug verb: the
+workflow refuses a release whose binary accepts `fleet specimen` or `fleet
+debug`.
 
 ## Toolchain
 
@@ -377,7 +391,8 @@ release whose binary accepts `fleet specimen`.
   branch's first commit sets it, and the release workflow reads it there.
 - **clippy** with a pinned lint set, warnings denied.
 - clippy and the tests also run with `--all-features`, so the CLI's
-  specimen ([cli-output.md](cli-output.md)) builds and stays complete.
+  specimen ([cli-output.md](cli-output.md)) builds and stays complete, and
+  `fleet debug` builds. `tools/try` builds with the `debug` feature.
 - Visible evals are trycmd transcript cases under `tests/cmd/<verb>/`, run by
   `cargo test`.
 - Fitness tests read the workspace's dependency graph (`cargo metadata`).
