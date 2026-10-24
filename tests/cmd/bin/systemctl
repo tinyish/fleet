@@ -1,0 +1,90 @@
+#!/bin/sh
+# A fake `systemctl --user` for the evals. It answers exactly the calls the
+# systemd driver makes and runs the supervisor the unit file names as a plain
+# background process, started from / with only the unit's environment, as
+# systemd starts a user service. Its state lives under $HOME, which the fleet
+# shim points into the case's temp root. A file `.fake-down` in $HOME makes the
+# user manager look unreachable.
+set -eu
+
+[ "${1:-}" = --user ] || {
+    echo "fake systemctl: only --user is faked" >&2
+    exit 64
+}
+shift
+fake="$HOME/.fake-systemd"
+mkdir -p "$fake"
+units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+if [ -e "$HOME/.fake-down" ]; then
+    echo "Failed to connect to bus: No medium found" >&2
+    exit 1
+fi
+
+runs() {
+    state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+    [ -n "$state" ] && case "$state" in Z*) false ;; *) true ;; esac
+}
+
+alive() {
+    [ -f "$fake/$1.pid" ] && runs "$(cat "$fake/$1.pid")"
+}
+
+stop() {
+    if [ -f "$fake/$1.pid" ]; then
+        pid=$(cat "$fake/$1.pid")
+        kill "$pid" 2>/dev/null || true
+        tries=0
+        while runs "$pid"; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 200 ]; then
+                kill -9 "$pid" 2>/dev/null || true
+                break
+            fi
+            sleep 0.05
+        done
+    fi
+    rm -f "$fake/$1.pid"
+}
+
+unit_file() {
+    [ -f "$units/$1" ] || {
+        printf 'Failed to %s %s: Unit %s not found.\n' "$2" "$1" "$1" >&2
+        exit 5
+    }
+}
+
+start() {
+    unit_file "$1" start
+    program=$(sed -n 's/^ExecStart=//p' "$units/$1" | sed 's/ supervise$//; s/^"\(.*\)"$/\1/')
+    state=$(sed -n 's/^Environment=//p' "$units/$1" | sed 's/^"\(.*\)"$/\1/; s/^FLEET_STATE_DIR=//; s/%%/%/g')
+    (cd / && exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin FLEET_STATE_DIR="$state" \
+        nohup "$program" supervise >>"$fake/$1.log" 2>&1 </dev/null) &
+    echo $! >"$fake/$1.pid"
+    if [ -n "${FLEET_EVAL_PIDS:-}" ]; then echo $! >>"$FLEET_EVAL_PIDS"; fi
+}
+
+case "${1:-}" in
+    show-environment | daemon-reload) ;;
+    enable)
+        unit_file "$2" enable
+        touch "$fake/$2.enabled"
+        ;;
+    restart)
+        stop "$2"
+        start "$2"
+        ;;
+    disable)
+        [ "${2:-}" = --now ] && shift
+        stop "$2"
+        rm -f "$fake/$2.enabled"
+        ;;
+    is-active)
+        [ "${2:-}" = --quiet ] && shift
+        alive "$2"
+        ;;
+    *)
+        printf 'fake systemctl: not faked: %s\n' "$*" >&2
+        exit 64
+        ;;
+esac

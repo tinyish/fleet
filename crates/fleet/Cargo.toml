@@ -1,0 +1,27 @@
+[package]
+name = "fleet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "fleet"
+path = "src/main.rs"
+
+[dependencies]
+cli.workspace = true
+supervisor.workspace = true
+service.workspace = true
+git.workspace = true
+
+[dev-dependencies]
+trycmd = "1"
+
+[features]
+# `fleet specimen`: every line the CLI can print. Never in a release build.
+specimen = ["cli/specimen"]
+
+[lints]
+workspace = true

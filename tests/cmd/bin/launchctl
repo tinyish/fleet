@@ -1,0 +1,102 @@
+#!/bin/sh
+# A fake launchctl for the evals. It answers exactly the calls the launchd
+# driver makes (print, bootstrap, bootout), the way the real one does, and
+# runs the supervisor the plist names as a plain background process, started
+# from / with only the plist's environment, as launchd starts an agent.
+# A service stays loaded from bootstrap until bootout, whether or not its
+# process still runs. Its state lives under $HOME, which the fleet shim points
+# into the case's temp root. A file `.fake-down` in $HOME makes launchd look
+# unreachable.
+set -eu
+
+fake="$HOME/.fake-launchd"
+mkdir -p "$fake"
+domain="gui/$(id -u)"
+
+# The value on the line after <key>$1</key> in the plist $2.
+value() {
+    sed -n "/<key>$1<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}" "$2" | head -n 1
+}
+
+# Whether pid $1 runs (a zombie, waiting to be reaped, does not).
+runs() {
+    state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+    [ -n "$state" ] && case "$state" in Z*) false ;; *) true ;; esac
+}
+
+# Stops pid $1: TERM, up to 10s, then KILL.
+finish() {
+    kill "$1" 2>/dev/null || return 0
+    tries=0
+    while runs "$1"; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 200 ]; then
+            kill -9 "$1" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.05
+    done
+}
+
+if [ -e "$HOME/.fake-down" ]; then
+    echo "Could not connect to launchd: (null)" >&2
+    exit 3
+fi
+
+case "${1:-}" in
+    print)
+        case "${2:-}" in
+            "$domain") ;;
+            "$domain"/*)
+                [ -e "$fake/$(basename "$2").loaded" ] || {
+                    printf 'Could not find service "%s" in domain for user gui: %s\n' "$(basename "$2")" "$(id -u)" >&2
+                    exit 113
+                }
+                ;;
+            *)
+                echo "Bad request." >&2
+                exit 64
+                ;;
+        esac
+        ;;
+    bootstrap)
+        [ "${2:-}" = "$domain" ] && [ -f "${3:-}" ] || {
+            echo "Bootstrap failed: 5: Input/output error" >&2
+            exit 5
+        }
+        plist=$3
+        label=$(value Label "$plist")
+        program=$(awk '/<key>ProgramArguments<\/key>/ { f = 1; next } f && /<string>/ { sub(/.*<string>/, ""); sub(/<\/string>.*/, ""); print; exit }' "$plist")
+        state=$(value FLEET_STATE_DIR "$plist")
+        log=$(value StandardErrorPath "$plist")
+        if [ -z "$label" ] || [ ! -x "$program" ] || [ -e "$fake/$label.loaded" ]; then
+            echo "Bootstrap failed: 5: Input/output error" >&2
+            exit 5
+        fi
+        (cd / && exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin FLEET_STATE_DIR="$state" \
+            nohup "$program" supervise >>"$log" 2>&1 </dev/null) &
+        echo $! >"$fake/$label.pid"
+        touch "$fake/$label.loaded"
+        if [ -n "${FLEET_EVAL_PIDS:-}" ]; then echo $! >>"$FLEET_EVAL_PIDS"; fi
+        ;;
+    bootout)
+        label=$(basename "${2:-}")
+        case "${2:-}" in
+            "$domain"/*) ;;
+            *)
+                echo "Bad request." >&2
+                exit 64
+                ;;
+        esac
+        [ -e "$fake/$label.loaded" ] || {
+            echo "Boot-out failed: 3: No such process" >&2
+            exit 3
+        }
+        if [ -f "$fake/$label.pid" ]; then finish "$(cat "$fake/$label.pid")"; fi
+        rm -f "$fake/$label.pid" "$fake/$label.loaded"
+        ;;
+    *)
+        printf 'fake launchctl: not faked: %s\n' "$*" >&2
+        exit 64
+        ;;
+esac

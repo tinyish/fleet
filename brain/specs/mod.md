@@ -22,7 +22,6 @@ through them.
 
 | Folder | What it covers | Crates |
 | --- | --- | --- |
-| `onboarding/` | `fleet create`, `start`, `stop`, `doctor` and `prime` | core, controller, cli |
 | `packs/` | installing, checking and layering packs, the defaults the binary carries, a pack's runtime and settings | core, cli |
 | `items/` | the item verbs from `dispatch` to `land`, the item's record, and `fleet item` | core, cli |
 | `runs/` | `fleet run` and `fleet cancel`, a run's pins and steps, and the controller's run pass | core, controller, cli |

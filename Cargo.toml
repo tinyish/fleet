@@ -1,67 +1,44 @@
-# The workspace root. Members are listed explicitly and never by glob: with
-# every member named here, no crate under this directory can be absorbed by a
-# manifest that did not name it, which is the guard no member's own manifest
-# needs to carry.
 [workspace]
-members = ["controller", "core", "cli"]
-resolver = "2"
+resolver = "3"
+members = ["crates/*"]
 
-# The pins live once. Members read the same names, and a pin in two places is a
-# pin that drifts; each member takes one with `.workspace = true` and the reason
-# it needs it stays in that member's own manifest.
-#
-# toml is exact-pinned and now holds BOTH halves: `parse` for the manifests,
-# orders and the shadow registry this workspace reads, and `display`
-# for `packs.lock`, the one document it writes. Those four are what 1.1.5 turns
-# on by default; naming them with default-features off is what keeps a feature a
-# later default adds from entering unread. `debug`, `fast_hash`,
-# `preserve_order` and `unbounded` stay off.
-#
-# clap and anyhow are fleet-cli's alone: the argument surface and the one exit
-# mapping live in the binary, and no library member takes either. console,
-# indicatif and dialoguer are fleet-cli's on the same rule and for the same
-# reason — a library crate never prints — and all three enter through the one ui
-# module (cli/src/ui.rs). Each is named with default features off and only
-# the features that module uses: dialoguer's `editor` and `password` are
-# defaults the prompts do not want, and each would pull a crate of its own.
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+repository = "https://github.com/tinyish/fleet"
+
 [workspace.dependencies]
-anyhow = "1"
-console = { version = "0.16", default-features = false }
-dialoguer = { version = "0.12", default-features = false }
-indicatif = { version = "0.18", default-features = false }
-clap = { version = "4", default-features = false, features = [
-    "std",
-    "derive",
-    "help",
-    "usage",
-    "error-context",
-] }
+fleet-core = { path = "crates/core" }
+state = { path = "crates/state" }
+service = { path = "crates/service" }
+git = { path = "crates/git" }
+clap = { version = "4", features = ["derive"] }
+cli = { path = "crates/cli" }
 serde = { version = "1", features = ["derive"] }
-# schemars is exact-pinned because its output is committed: the store contract's
-# document (core/src/store/store.schema.json) is what this release of it writes,
-# byte for byte, and a release that spells one schema otherwise reds the drift
-# test with no change to the contract. `derive` and `std` are its defaults,
-# named with default-features off like every pin here.
-schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }
-# regex-lite is the schema validator's, for a schema's `pattern`: one crate
-# with no dependencies of its own.
-regex-lite = "0.1"
-# sha2 is exact-pinned and default-features off: the digest it writes goes
-# onto packs.lock and a flight's record item and is read back weeks later,
-# and the published vectors in core/src/digest.rs are what hold this release
-# of it to the algorithm. `alloc` and `oid` are its defaults; neither is read.
-sha2 = { version = "=0.11.0", default-features = false }
-# float_roundtrip: the step writer parses a workflow's `--result` and stores the
-# value re-serialized, and the default parser can land a decimal literal on the
-# neighbouring double — so a replayed number would differ from the one the
-# first run saw by an ulp. Correctly rounded parsing is what keeps the two equal.
-serde_json = { version = "1", features = ["float_roundtrip"] }
-# serde_path_to_error: a seat's input file the types refuse is named by the
-# path to the key that failed, which serde's own error does not carry.
-serde_path_to_error = "0.1"
-toml = { version = "=1.1.5", default-features = false, features = [
-    "display",
-    "parse",
-    "serde",
-    "std",
-] }
+serde_json = "1"
+toml = "1"
+toml_edit = "0.25"
+console = { version = "0.16", default-features = false }
+cliclack = "0.5"
+strum = { version = "0.28", features = ["derive"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+supervisor = { path = "crates/supervisor" }
+
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -2 }
+unsafe_code = "forbid"
+unused = { level = "deny", priority = -1 }
+missing_docs = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+too_many_lines = "deny"

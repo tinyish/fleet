@@ -1,0 +1,21 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+clap.workspace = true
+console.workspace = true
+cliclack.workspace = true
+fleet-core.workspace = true
+strum = { workspace = true, optional = true }
+
+[features]
+# `fleet specimen`: every line the CLI can print. Never in a release build.
+specimen = ["dep:strum", "fleet-core/specimen"]
+
+[lints]
+workspace = true

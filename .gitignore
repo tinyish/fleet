@@ -7,6 +7,11 @@ target/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+# bd's concurrency gate: flock files beside .beads, never deleted
+*.gate.lock*
+# The board lives on the Dolt server on alberto-linux; these are local dumps of it
+.beads/issues.jsonl
+.beads/interactions.jsonl
 
 # Claude Code: builder worktrees and per-machine settings
 .claude/worktrees/

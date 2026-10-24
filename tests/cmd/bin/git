@@ -1,0 +1,4 @@
+#!/bin/sh
+# git for the evals: none of your config, hooks or GIT_* environment.
+exec env -i PATH=/usr/bin:/bin LC_ALL=C HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null git "$@"

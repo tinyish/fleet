@@ -1,0 +1,10 @@
+#!/bin/sh
+# `in DIR CMD...`: run CMD in DIR, a path under the case's temp root, so a
+# case can run fleet where a person would.
+set -eu
+FLEET_EVAL_ROOT=${FLEET_EVAL_ROOT:-$PWD}
+export FLEET_EVAL_ROOT
+mkdir -p "$1"
+cd "$1"
+shift
+exec "$@"

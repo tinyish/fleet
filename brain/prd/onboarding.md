@@ -1,7 +1,7 @@
 # Onboarding
 
-Put a fleet on a project: get from nothing to agents ready to work, on this
-machine and this project.
+Put a fleet on a project: get from nothing to a fleet running, on this
+machine and this project, ready for agents.
 
 ## The problem
 
@@ -15,7 +15,7 @@ anything to their projects.
 
 ### First time, at a terminal
 
-- **Trying to:** go from tinyfleet not installed to agents ready to work on a
+- **Trying to:** go from tinyfleet not installed to a fleet running on a
   project.
 - **Success:** the whole path, install included, takes a couple of minutes at
   most. Before anything starts, the person knows what is missing on the
@@ -46,8 +46,33 @@ anything to their projects.
 - **Trying to:** run setup again, by habit, by a script that always runs it,
   or after an upgrade.
 - **Success:** it never makes a second fleet or one nested inside another,
-  never overwrites what is there, and says what it found.
+  never overwrites what is there, and says what it found. A config file
+  already there that no fleet owns, left by a removed fleet or written by
+  hand, is taken up as it is.
 - **Passes through:** create, start.
+
+### Taking a fleet off a project
+
+- **Trying to:** stop using tinyfleet on a project, or undo a fleet made by
+  mistake or in the wrong place, including one whose directory has since been
+  moved or deleted.
+- **Success:** the fleet is gone from tinyfleet, and starting the fleets that
+  remain no longer mentions it. Its config file is deleted only when the
+  person says so; with nobody there to ask, it stays. Nothing else in the
+  project changes. Removing a fleet that is not there says so and changes
+  nothing.
+- **Passes through:** remove, start.
+
+### Taking tinyfleet off the machine
+
+- **Trying to:** stop using tinyfleet altogether, and leave the machine as it
+  was before the install.
+- **Success:** nothing of tinyfleet runs, or comes back after a reboot, and
+  nothing it keeps in its own places is left: what it remembered, its log,
+  and the program itself. The config files in the person's projects stay
+  theirs. Nothing is removed by accident, and a script that says so can
+  uninstall with nobody there.
+- **Passes through:** uninstall.
 
 ### Checking the machine after a change
 
@@ -59,15 +84,14 @@ anything to their projects.
 
 ### Restarting after a change
 
-- **Trying to:** change which agents work on the project and have the fleet
-  pick it up, or turn the fleet off for a while.
-- **Success:** agents' sessions keep running while the fleet is down, and each
-  step confirms what happened or says it could not tell.
+- **Trying to:** change the fleet's config and have the fleet pick it up, or
+  turn the fleet off for a while.
+- **Success:** each step confirms what happened or says it could not tell.
 - **Passes through:** stop, start.
 
 ## What success looks like
 
-- From install to a first agent working takes a couple of minutes at most.
+- From install to a running fleet takes a couple of minutes at most.
 - Anything a person does at a terminal, a script can do with nobody there.
 - No onboarding step leaves the person unsure whether it worked.
 
