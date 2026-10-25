@@ -3,8 +3,9 @@
 //! `fleet-adapter-sdk`'s (core.md § Boundaries); it is re-exported here so
 //! the rest of tinyfleet reaches it through core.
 
+pub use fleet_adapter_sdk::Speaks;
 pub use fleet_adapter_sdk::agent::{
-    Activity, Launch, Launched, Read, Reading, Readings, Reason, SessionRef, Verb,
+    Activity, Launch, Launched, PROTOCOL, Read, Reading, Readings, Reason, SessionRef, Verb,
 };
 
 use serde::{Deserialize, Serialize};

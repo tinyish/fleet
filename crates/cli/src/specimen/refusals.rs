@@ -2,56 +2,14 @@
 //! specimen. Each builder matches its kind with no `_` arm, so a new refusal
 //! does not compile until it has a sample here.
 
-use fleet_core::agent::{AdapterFault, AdapterFaultKind, Verb};
 use fleet_core::protocol;
-use strum::IntoEnumIterator;
 
-use super::samples::{API, APP, SRC, WEB, WING, bad_config, denied, not_found, path};
+use super::samples::{API, APP, SRC, WEB, WING, bad_config, denied, path};
 
-const CLAUDE: &str = "/code/fleet-adapters/target/debug/fleet-claude-code";
-
-/// One refusal of `kind`, or, for an adapter's failure, one for every
-/// fault under every verb.
+/// One refusal of `kind`; Delivery's, which may have several, come from
+/// `delivery.rs`.
 pub(super) fn refusals(kind: fleet_core::status::StatusKind) -> Vec<protocol::Status> {
-    if kind != fleet_core::status::StatusKind::AdapterFailed {
-        return vec![refusal(kind)];
-    }
-    Verb::ALL
-        .into_iter()
-        .flat_map(|verb| {
-            AdapterFaultKind::iter()
-                .flat_map(adapter_faults)
-                .map(move |fault| protocol::Status::AdapterFailed {
-                    adapter: path(CLAUDE),
-                    verb,
-                    fault,
-                })
-        })
-        .collect()
-}
-
-fn adapter_faults(kind: AdapterFaultKind) -> Vec<AdapterFault> {
-    match kind {
-        AdapterFaultKind::CouldNotRun => vec![AdapterFault::CouldNotRun {
-            error: not_found().to_string(),
-        }],
-        AdapterFaultKind::Exited => vec![
-            AdapterFault::Exited {
-                code: Some(1),
-                said: "claude: not found".into(),
-            },
-            AdapterFault::Exited {
-                code: None,
-                said: String::new(),
-            },
-        ],
-        AdapterFaultKind::TimedOut => vec![AdapterFault::TimedOut {
-            after_millis: 20_000,
-        }],
-        AdapterFaultKind::BadAnswer => vec![AdapterFault::BadAnswer {
-            error: "expected value at line 1 column 1".into(),
-        }],
-    }
+    super::delivery::refusals(kind).unwrap_or_else(|| vec![refusal(kind)])
 }
 
 fn refusal(kind: fleet_core::status::StatusKind) -> protocol::Status {
@@ -136,23 +94,46 @@ fn refusal(kind: fleet_core::status::StatusKind) -> protocol::Status {
         K::Malformed => S::Malformed {
             error: "expected value at line 1 column 1".into(),
         },
-        K::AdapterFailed => S::AdapterFailed {
-            adapter: path(CLAUDE),
-            verb: Verb::Launch,
-            fault: AdapterFault::Exited {
-                code: Some(1),
-                said: "claude: not found".into(),
-            },
+        // Sampled in delivery.rs, which refusals() asks first.
+        K::AdapterFailed
+        | K::MultiplexerCouldNotRun
+        | K::MultiplexerFailed
+        | K::NoSuchSession
+        | K::AdapterUnpinned
+        | K::NotAnAdapter
+        | K::NoSuchRelease
+        | K::BadManifest
+        | K::NoBuildFor
+        | K::ChecksumMismatch
+        | K::ProtocolMismatch
+        | K::DownloadFailed
+        | K::NoDownloader
+        | K::AdapterNotKept
+        | K::ReleaseMismatch => S::Malformed {
+            error: format!("{kind:?} is sampled in delivery.rs"),
         },
-        K::MultiplexerCouldNotRun => S::MultiplexerCouldNotRun {
-            error: not_found().to_string(),
-        },
-        K::MultiplexerFailed => S::MultiplexerFailed {
-            command: "tmux new-session".into(),
-            said: "can't use /dev/null".into(),
-        },
-        K::NoSuchSession => S::NoSuchSession {
-            session: "s3f9a01c2d4".into(),
-        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn every_refusal_has_a_real_sample() {
+        // A Delivery refusal routed to delivery.rs but given no sample
+        // there would print the placeholder instead.
+        for kind in fleet_core::status::StatusKind::iter() {
+            let samples = refusals(kind);
+            assert!(!samples.is_empty(), "{kind:?}");
+            assert!(
+                samples.iter().all(|s| !matches!(
+                    s,
+                    protocol::Status::Malformed { error } if error.ends_with("is sampled in delivery.rs")
+                )),
+                "{kind:?} has no sample in delivery.rs"
+            );
+        }
     }
 }

@@ -10,6 +10,7 @@ $ fleet doctor
 ? 1
 missing         service manager  [..] does not answer: [..]
 fine            git              git version [..]
+fine            curl             curl [..]
 warning         supervisor       not running
 
 hint: run fleet start to start it

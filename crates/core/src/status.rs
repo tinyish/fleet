@@ -208,6 +208,110 @@ pub enum Status {
         /// The id asked for.
         session: String,
     },
+    /// An adapter was named without its version.
+    AdapterUnpinned {
+        /// The name.
+        name: String,
+        /// Its latest release's version, when it could be looked up.
+        latest: Option<String>,
+    },
+    /// Not an adapter: a path names one by a `/`, a release as
+    /// `<name>@<version>`.
+    NotAnAdapter {
+        /// What was given.
+        reference: String,
+    },
+    /// fleet-adapters has no such release.
+    NoSuchRelease {
+        /// The adapter's name.
+        name: String,
+        /// The version asked for.
+        version: String,
+    },
+    /// A release's manifest does not read, or is another release's.
+    BadManifest {
+        /// Where it was downloaded from.
+        url: String,
+        /// What was wrong with it.
+        error: String,
+    },
+    /// A release has no build for this machine.
+    NoBuildFor {
+        /// The adapter's name.
+        name: String,
+        /// Its version.
+        version: String,
+        /// This machine's target.
+        target: String,
+    },
+    /// A downloaded adapter's SHA-256 is not its manifest's.
+    ChecksumMismatch {
+        /// The adapter's name.
+        name: String,
+        /// Its version.
+        version: String,
+        /// The manifest's.
+        expected: String,
+        /// The download's.
+        got: String,
+    },
+    /// An adapter speaks a protocol this fleet does not.
+    ProtocolMismatch {
+        /// The adapter, as it was named.
+        adapter: String,
+        /// The protocol it speaks.
+        speaks: u32,
+        /// The protocols this fleet speaks.
+        fleet_speaks: Vec<u32>,
+    },
+    /// A download failed.
+    DownloadFailed {
+        /// What was being downloaded.
+        url: String,
+        /// What the downloader said.
+        said: String,
+    },
+    /// The downloader, curl, could not be run.
+    NoDownloader {
+        /// What the system said.
+        error: String,
+    },
+    /// A release does not hold together.
+    ReleaseMismatch {
+        /// The file of the release it is about.
+        url: String,
+        /// How it does not.
+        what: Mismatch,
+    },
+    /// A fetched adapter could not be kept in the state directory.
+    AdapterNotKept {
+        /// The file or directory that could not be written.
+        path: PathBuf,
+        /// What the system said.
+        error: String,
+    },
+}
+
+/// How a release does not hold together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mismatch {
+    /// Its manifest is another release's.
+    OtherRelease {
+        /// The adapter it names.
+        name: String,
+        /// The version it names.
+        version: String,
+    },
+    /// Its build speaks another protocol than its manifest says.
+    BuildSpeaks {
+        /// What the manifest says.
+        manifest: u32,
+        /// What the build answers.
+        build: u32,
+    },
+    /// Its manifest lists a build the release does not have.
+    BuildMissing,
 }
 
 impl Status {

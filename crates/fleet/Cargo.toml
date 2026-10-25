@@ -17,6 +17,8 @@ service.workspace = true
 git.workspace = true
 tmux.workspace = true
 adapter-host.workspace = true
+curl.workspace = true
+fleet-core.workspace = true
 
 [dev-dependencies]
 trycmd = "1"

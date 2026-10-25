@@ -212,6 +212,34 @@ pub trait Multiplexer {
     fn stop(&self, session: &str) -> Result<(), ToolError>;
 }
 
+/// What a download found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fetched {
+    /// The file was downloaded.
+    Saved,
+    /// Nothing is there: an HTTP 404, or a `file://` path that is missing.
+    NotFound,
+}
+
+/// The network: downloads files. Only adapters are ever fetched
+/// (core.md § Outside tools).
+pub trait Network {
+    /// Downloads `url` into the file `to`, replacing it.
+    ///
+    /// # Errors
+    ///
+    /// When the downloader cannot be run (`CouldNotRun`) or the download
+    /// fails (`Failed`).
+    fn download(&self, url: &str, to: &Path) -> Result<Fetched, ToolError>;
+
+    /// The downloader's version, as it says it.
+    ///
+    /// # Errors
+    ///
+    /// When the downloader is not on the `PATH` or does not run.
+    fn version(&self) -> Result<String, ToolError>;
+}
+
 /// The agent tool interface: the programs that adapt an agent, such as
 /// Claude Code, to tinyfleet, each run once per request (see [`agent`]).
 /// Task trackers and forges get interfaces of their own, one per kind of
@@ -238,4 +266,11 @@ pub trait AgentAdapters {
         adapter: &Path,
         request: &agent::Read,
     ) -> Result<agent::Readings, agent::AdapterFault>;
+
+    /// Asks the adapter at `adapter` which protocol it speaks.
+    ///
+    /// # Errors
+    ///
+    /// When the adapter fails.
+    fn protocol(&self, adapter: &Path) -> Result<agent::Speaks, agent::AdapterFault>;
 }

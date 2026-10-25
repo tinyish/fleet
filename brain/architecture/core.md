@@ -67,13 +67,13 @@ real tool. The core never runs a tool itself.
 | service manager | launchd (macOS), systemd user units (Linux) | CLI, to start and stop the supervisor; doctor |
 | multiplexer | tmux, on tinyfleet's own socket | supervisor; doctor *(directional)* |
 | git | git | doctor; the supervisor *(directional: when work lands)* |
-| agent | an adapter program per kind of agent, named by its path *(by name, fetched: directional)* | supervisor |
+| agent | an adapter program per kind of agent, named by its path or as a release of fleet-adapters, fetched | supervisor |
 | task | *directional:* an adapter program per kind of task tracker | supervisor |
 | forge | *directional:* plain git by default; an adapter program for GitHub, GitLab | supervisor |
-| network | *directional:* downloads an adapter from its release | supervisor, the first time a config names that adapter |
+| network | curl, run by its driver | supervisor, the first time it runs a named adapter; doctor |
 
-**Adapters** *(built for agents; directional for task trackers, forges and
-fetching)*. Agents, task trackers and forges are reached through
+**Adapters** *(built for agents, fetching included; directional for task
+trackers and forges)*. Agents, task trackers and forges are reached through
 adapters: external programs that the supervisor runs through a driver, once
 per request. Each run is handed one request and gives one answer, then exits,
 so an adapter is never a process to keep alive, revive or adopt. An adapter
@@ -84,12 +84,25 @@ tinyfleet's own adapters (for agents such as Claude Code, Codex and Pi, for
 task trackers such as beads, and plain git as the default forge) live together
 in a repository of their own, `tinyish/fleet-adapters`, one directory per
 kind (`agents/`, `trackers/`, `forges/`), each released like fleet as
-prebuilt binaries. They are not installed with fleet: the first time a
-config names one, the supervisor fetches the release for this machine, checks it against its SHA-256, and
-keeps it under the state directory. This is the one thing tinyfleet reaches
+prebuilt binaries. They are not installed with fleet: the first time one
+is run, the supervisor fetches the release for this machine, checks it
+against its SHA-256, and keeps it under the state directory. (Named today
+only by `fleet debug`; a fleet's config names its agents' adapters
+*(directional: with piece 1b)*.) This is the one thing tinyfleet reaches
 the network for. Users can write their own adapters, in any language, for
 other agents, for trackers such as Linear or Jira, and for forges such as
 GitHub or GitLab, and name them by their path.
+
+**Naming and fetching an adapter**. An adapter is named by its
+path, or as `<name>@<version>`, its version its agent's: `claude-code@2.1.285`
+is the adapter measured against Claude Code 2.1.285, and `2.1.285-2` a fix
+of the adapter's own. A bare name is refused, naming the latest release.
+Before keeping a fetched adapter, the supervisor checks the release's
+manifest (the protocol it speaks, a build for this machine, that build's
+SHA-256) and asks the binary itself which protocol it speaks; an adapter
+named by its path is asked before each launch. An adapter speaking a
+protocol this fleet does not is refused, saying whether fleet or the adapter
+needs updating.
 
 **The adapter SDK.** Their protocol, and a kit for writing an adapter in
 Rust, is the crate `fleet-adapter-sdk` in this repository. It has a version
@@ -198,8 +211,8 @@ file.
                 └────────────► core ◄──────────┘
              rules + protocol + tool interfaces
                     │           ▲
-                    │   ┌───────┴───┬───────────┬────────────┐
-                    │ service      tmux        git    adapter-host
+                    │   ┌───────┴───┬───────────┬────────────┬─────────┐
+                    │ service      tmux        git    adapter-host   curl
                     ▼
                adapter-sdk ◄───── adapter programs, with its kit
           the adapter protocols
@@ -216,6 +229,7 @@ file.
 | `service`, `git` | the drivers |
 | `tmux` | the multiplexer's driver |
 | `adapter-host` | the driver that runs adapter programs: one request on stdin, one answer on stdout, with a time limit |
+| `curl` | the network's driver: downloads with `curl` |
 
 Fitness tests fail the build when:
 
@@ -279,14 +293,14 @@ fleet; a directory with no fleet is nothing to remove, and says so.
 terminal and no `--non-interactive` it does nothing and exits 3), then stops
 the supervisor and removes its unit exactly as stop does. Only once the
 supervisor is down does it delete the files tinyfleet keeps in its state
-directory (its workspaces too, landed or not: *directional, with
+directory (the adapters it fetched; its workspaces too, landed or not: *directional, with
 Delivery*), that directory if it is then empty (a `.DS_Store` left alone by
 Finder goes too), and the running `fleet` binary. A stop that fails or cannot tell leaves everything; a delete that
 fails names what is left, and running uninstall again finishes. The
 `fleet.toml` files in projects stay.
 
 **doctor**: the CLI checks, and reports each as fine, missing or could not
-tell: the service manager (it answers), git (on the `PATH`, its version), the supervisor (whether it
+tell: the service manager (it answers), git (on the `PATH`, its version), curl (likewise), the supervisor (whether it
 answers; whether its version matches this binary's; not running is a
 warning, not a failure), the state (only the supervisor opens it, so it is
 reported only through a running supervisor's hello) and the project the
@@ -341,7 +355,7 @@ contract's (see Boundaries).
 | the supervisor's service unit | `~/Library/LaunchAgents/` on macOS; `~/.config/systemd/user/` on Linux |
 | tmux socket | `tmux.sock` in the state directory (`tmux -S <state directory>/tmux.sock`), so a sandbox or an eval has a tmux server of its own |
 | workspaces *(directional)* | under the state directory |
-| fetched adapters *(directional)* | under the state directory |
+| fetched adapters | `adapters/<name>/<version>/fleet-<name>` in the state directory |
 
 ## Boundaries
 
@@ -354,7 +368,8 @@ Each boundary's authoritative form lives in code; this table points at it.
 | state schema | supervisor ↔ state | the migration in `crates/state/src/lib.rs` |
 | config file | person ↔ supervisor (and doctor, which reads it) | `crates/core/src/config.rs`, read through `fleets::read_projects` |
 | tool interfaces | core ↔ drivers | `crates/core/src/tools.rs` |
-| adapter protocol | supervisor, through a driver ↔ adapter programs | `crates/adapter-sdk/src/agent.rs` for agents; *directional:* tasks and forges |
+| adapter protocol | supervisor, through a driver ↔ adapter programs | `crates/adapter-sdk/src/agent.rs` for agents, and `crates/adapter-sdk/src/lib.rs` for what every adapter answers to `protocol`; *directional:* tasks and forges |
+| adapter releases | fleet-adapters' releases ↔ the supervisor | `crates/core/src/adapters.rs` |
 | install | person ↔ the GitHub release | `install.sh` at the repository root |
 | release | a release squash on `main` ↔ the GitHub release | `.github/workflows/release.yml` *(directional: written, not yet run)* |
 

@@ -137,6 +137,10 @@ impl AgentAdapters for Host {
     fn read(&self, adapter: &Path, request: &agent::Read) -> Result<agent::Readings, AdapterFault> {
         self.run(adapter, Verb::Read, request)
     }
+
+    fn protocol(&self, adapter: &Path) -> Result<agent::Speaks, AdapterFault> {
+        self.run(adapter, Verb::Protocol, &serde_json::Map::new())
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +208,26 @@ mod tests {
             .ok()
             .and_then(|r| serde_json::from_str(&r).ok());
         assert_eq!(sent, Some(launch()));
+    }
+
+    #[test]
+    fn protocol_asks_the_verb_with_an_empty_object() {
+        let (dir, path) = adapter(
+            "protocol",
+            r#"echo "$1" > verb; cat > request; echo '{"protocol":1}'"#,
+        );
+        assert_eq!(
+            Host::default().protocol(&path),
+            Ok(fleet_core::agent::Speaks { protocol: 1 })
+        );
+        assert_eq!(
+            fs::read_to_string(dir.0.join("verb")).ok().as_deref(),
+            Some("protocol\n")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.0.join("request")).ok().as_deref(),
+            Some("{}\n")
+        );
     }
 
     #[test]

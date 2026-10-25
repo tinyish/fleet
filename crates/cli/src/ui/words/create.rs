@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use fleet_core::protocol::response;
+use fleet_core::protocol::{self, response};
 
 use crate::ui::output::Ink;
 
@@ -62,6 +62,40 @@ pub(super) fn take_it_up(ink: Ink) -> String {
         ink.accent("fleet create"),
         ink.accent("--project")
     )
+}
+
+/// Why a fleet or a project cannot go where it was asked: inside, around or
+/// on top of another fleet. None for any other refusal.
+pub(super) fn placement(status: &protocol::Status, ink: Ink) -> Option<String> {
+    Some(match status {
+        protocol::Status::InsideFleet { directory, fleet }
+        | protocol::Status::NotFleetDirectory { directory, fleet } => format!(
+            "{} is inside the fleet in {}",
+            ink.path(directory),
+            ink.path(fleet)
+        ),
+        protocol::Status::ContainsFleet { directory, fleet } => format!(
+            "{} contains the fleet in {}",
+            ink.path(directory),
+            ink.path(fleet)
+        ),
+        protocol::Status::InsideServedProject {
+            directory,
+            project,
+            fleet,
+        } => format!(
+            "{} is inside {}, which the fleet in {} serves",
+            ink.path(directory),
+            ink.path(project),
+            ink.path(fleet)
+        ),
+        protocol::Status::AlreadyServed { project, fleet } => format!(
+            "{} is already served by the fleet in {}",
+            ink.path(project),
+            ink.path(fleet)
+        ),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use std::time::Duration;
 use fleet_core::fleets;
 use fleet_core::paths::{CONFIG_FILE, Os, PathError, state_dir};
 use fleet_core::protocol::{self, ProtocolError, SocketPathTooLong};
-use fleet_core::tools::{Git, NoServiceManager, ServiceManager, ToolError};
+use fleet_core::tools::{Git, Network, NoServiceManager, ServiceManager, ToolError};
 
 use crate::client::{self, Hello};
 use crate::protocol::{Problem, Status};
@@ -28,6 +28,8 @@ pub(crate) enum Checked {
     ServiceManager,
     /// git.
     Git,
+    /// curl, which fetches adapters.
+    Curl,
     /// The supervisor.
     Supervisor,
     /// The state file.
@@ -75,6 +77,10 @@ pub(crate) enum Found {
     GitVersion(String),
     /// git does not run.
     GitBroken(ToolError),
+    /// curl runs, and says its version.
+    CurlVersion(String),
+    /// curl does not run.
+    CurlBroken(ToolError),
     /// The supervisor answers, at this binary's version.
     Running {
         /// Its version.
@@ -153,6 +159,7 @@ impl Found {
                 Checked::ServiceManager
             }
             Found::GitVersion(_) | Found::GitBroken(_) => Checked::Git,
+            Found::CurlVersion(_) | Found::CurlBroken(_) => Checked::Curl,
             Found::Running { .. }
             | Found::OtherVersion { .. }
             | Found::NotRunning { .. }
@@ -178,6 +185,7 @@ impl Found {
         match self {
             Found::ManagerAnswers { .. }
             | Found::GitVersion(_)
+            | Found::CurlVersion(_)
             | Found::Running { .. }
             | Found::StateOpen { .. }
             | Found::FleetPresent { .. } => Verdict::Fine,
@@ -185,6 +193,7 @@ impl Found {
             Found::ManagerSilent { .. }
             | Found::NoManager
             | Found::GitBroken(_)
+            | Found::CurlBroken(_)
             | Found::OtherVersion { .. }
             | Found::InstalledButSilent { .. }
             | Found::SocketTooLong(_)
@@ -218,12 +227,13 @@ pub(crate) fn exit_code(report: &[Found]) -> u8 {
 pub(crate) fn run(
     service: Result<&dyn ServiceManager, NoServiceManager>,
     git: &dyn Git,
+    net: &dyn Network,
 ) -> ExitCode {
     let (Some(os), Ok(_) | Err(NoServiceManager::NoHome)) = (Os::this(), service) else {
         return output::report(&Err(Status::Cannot(Problem::UnsupportedOs)));
     };
     let dir = state_dir(os, |name| std::env::var_os(name));
-    let report = check(service.ok(), git, &dir);
+    let report = check(service.ok(), git, net, &dir);
     output::doctor(&report);
     ExitCode::from(exit_code(&report))
 }
@@ -235,6 +245,7 @@ pub(crate) fn run(
 fn check(
     service: Option<&dyn ServiceManager>,
     git: &dyn Git,
+    net: &dyn Network,
     dir: &Result<PathBuf, PathError>,
 ) -> Vec<Found> {
     let installed = service.and_then(ServiceManager::installed_state_dir);
@@ -250,7 +261,12 @@ fn check(
             }
         },
     };
-    let mut report = vec![manager_found(service), git_found(git), supervisor];
+    let mut report = vec![
+        manager_found(service),
+        git_found(git),
+        curl_found(net),
+        supervisor,
+    ];
     report.extend(state);
     report.extend(project_found());
     report
@@ -271,6 +287,13 @@ fn git_found(git: &dyn Git) -> Found {
     match git.version() {
         Ok(version) => Found::GitVersion(version),
         Err(error) => Found::GitBroken(error),
+    }
+}
+
+fn curl_found(net: &dyn Network) -> Found {
+    match net.version() {
+        Ok(version) => Found::CurlVersion(version),
+        Err(error) => Found::CurlBroken(error),
     }
 }
 
@@ -376,7 +399,7 @@ mod tests {
     fn before_a_first_start_one_thing_is_off_and_one_hint_says_how() {
         let dir = std::env::temp_dir().join(format!("fleet-first-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let report = check(Some(&Manager), &Git2, &Ok(dir.clone()));
+        let report = check(Some(&Manager), &Git2, &Net2, &Ok(dir.clone()));
         let off: Vec<&Found> = report
             .iter()
             .filter(|f| f.verdict() != Verdict::Fine)
@@ -430,12 +453,47 @@ mod tests {
             Ok("git version 2".into())
         }
     }
+    struct Net2;
+    impl Network for Net2 {
+        fn download(&self, _: &str, _: &Path) -> Result<fleet_core::tools::Fetched, ToolError> {
+            Ok(fleet_core::tools::Fetched::NotFound)
+        }
+        fn version(&self) -> Result<String, ToolError> {
+            Ok("curl 8.7.1 (x86_64-apple-darwin23.0)".into())
+        }
+    }
+
+    #[test]
+    fn curl_is_reported_after_git_and_a_missing_one_is_missing() {
+        let dir = std::env::temp_dir().join(format!("fleet-doctor-curl-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let report = check(Some(&Manager), &Git2, &Net2, &Ok(dir.clone()));
+        let checks: Vec<Checked> = report.iter().map(Found::checked).collect();
+        assert_eq!(checks.get(1..3), Some(&[Checked::Git, Checked::Curl][..]));
+        assert!(
+            report
+                .iter()
+                .any(|f| matches!(f, Found::CurlVersion(v) if v.starts_with("curl 8.7.1"))),
+            "{report:?}"
+        );
+        let missing = Found::CurlBroken(ToolError::CouldNotRun {
+            program: "curl".into(),
+            error: io::Error::from(io::ErrorKind::NotFound),
+        });
+        assert_eq!(missing.verdict(), Verdict::Missing);
+        assert_eq!(
+            crate::ui::words::found_next(&missing, crate::ui::output::OUT.piped())
+                .map(|w| console::strip_ansi_codes(&w).into_owned()),
+            Some("install curl and put it on your PATH".into())
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn no_state_line_while_the_supervisor_is_not_running() {
         let dir = std::env::temp_dir().join(format!("fleet-doctor-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let report = check(Some(&Manager), &Git2, &Ok(dir.clone()));
+        let report = check(Some(&Manager), &Git2, &Net2, &Ok(dir.clone()));
         let checks: Vec<Checked> = report.iter().map(Found::checked).collect();
         assert!(checks.contains(&Checked::Supervisor), "{report:?}");
         assert!(!checks.contains(&Checked::State), "{report:?}");

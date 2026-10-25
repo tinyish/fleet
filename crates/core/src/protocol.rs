@@ -100,10 +100,13 @@ pub mod request {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Session {
-        /// Launch an agent through the adapter at `adapter`, in `directory`.
+        /// Launch an agent through the adapter `adapter` names, in
+        /// `directory`.
         Launch {
-            /// The adapter program, absolute.
-            adapter: PathBuf,
+            /// The adapter: a program by its absolute path, or
+            /// `<name>@<version>`, a release of fleet-adapters
+            /// (`core::adapters`).
+            adapter: String,
             /// Where the agent works, absolute.
             directory: PathBuf,
             /// The model to run; the adapter's default when absent.
@@ -508,7 +511,7 @@ mod tests {
             }),
             create,
             Request::Session(request::Session::Launch {
-                adapter: PathBuf::from("/a/claude"),
+                adapter: "claude-code@2.1.285".into(),
                 directory: PathBuf::from("/c/app"),
                 model: Some("sonnet".into()),
                 prompt: Some("hi; there".into()),

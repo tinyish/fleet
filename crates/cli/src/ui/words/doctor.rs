@@ -15,6 +15,7 @@ pub(crate) fn checked(checked: Checked) -> &'static str {
     match checked {
         Checked::ServiceManager => "service manager",
         Checked::Git => "git",
+        Checked::Curl => "curl",
         Checked::Supervisor => "supervisor",
         Checked::State => "state",
         Checked::Project => "project",
@@ -42,13 +43,18 @@ pub(crate) fn found(found: &Found, ink: Ink) -> String {
             format!("{name} does not answer: {}", tool(error, ink))
         }
         Found::NoManager => format!("cannot be found: {} is not set", ink.accent("HOME")),
-        Found::GitVersion(version) => version.clone(),
+        Found::GitVersion(version) | Found::CurlVersion(version) => version.clone(),
         Found::GitBroken(ToolError::CouldNotRun { error, .. })
             if error.kind() == ErrorKind::NotFound =>
         {
             format!("{} is not on the PATH", ink.accent("git"))
         }
-        Found::GitBroken(error) => tool(error, ink),
+        Found::CurlBroken(ToolError::CouldNotRun { error, .. })
+            if error.kind() == ErrorKind::NotFound =>
+        {
+            format!("{} is not on the PATH", ink.accent("curl"))
+        }
+        Found::GitBroken(error) | Found::CurlBroken(error) => tool(error, ink),
         Found::Running { version } => format!("running, version {version}"),
         Found::OtherVersion { running, ours } => {
             format!("running version {running}, but this fleet binary is {ours}")
@@ -103,6 +109,11 @@ pub(crate) fn found_next(found: &Found, ink: Ink) -> Option<String> {
             if error.kind() == ErrorKind::NotFound =>
         {
             format!("install {} and put it on your PATH", ink.accent("git"))
+        }
+        Found::CurlBroken(ToolError::CouldNotRun { error, .. })
+            if error.kind() == ErrorKind::NotFound =>
+        {
+            format!("install {} and put it on your PATH", ink.accent("curl"))
         }
         Found::OtherVersion { .. } => {
             format!("run {}, then {start}", ink.accent("fleet stop"))

@@ -30,6 +30,8 @@ fn findings(kind: FoundKind) -> Vec<Found> {
         FoundKind::NoManager => vec![Found::NoManager],
         FoundKind::GitVersion => vec![Found::GitVersion("git version 2.50.1".into())],
         FoundKind::GitBroken => git_broken(),
+        FoundKind::CurlVersion => vec![Found::CurlVersion("curl 8.7.1".into())],
+        FoundKind::CurlBroken => curl_broken(),
         FoundKind::Running => vec![Found::Running {
             version: "0.1.0".into(),
         }],
@@ -111,4 +113,16 @@ fn git_broken() -> Vec<Found> {
         said: "xcrun: error: invalid active developer path".into(),
     };
     vec![Found::GitBroken(missing), Found::GitBroken(failed)]
+}
+
+fn curl_broken() -> Vec<Found> {
+    let missing = ToolError::CouldNotRun {
+        program: "curl".into(),
+        error: not_found(),
+    };
+    let failed = ToolError::Failed {
+        command: "curl --version".into(),
+        said: "dyld: Library not loaded: libcurl.4.dylib".into(),
+    };
+    vec![Found::CurlBroken(missing), Found::CurlBroken(failed)]
 }

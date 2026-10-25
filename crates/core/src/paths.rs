@@ -17,6 +17,10 @@ pub const OWN_FILES: [&str; 6] = [
     "supervisor.lock",
 ];
 
+/// Every directory tinyfleet keeps in its state directory, deleted whole by
+/// uninstall: the adapters it fetched.
+pub const OWN_DIRS: [&str; 1] = [crate::adapters::DIR];
+
 /// A fleet's config file's name, in the fleet directory.
 pub const CONFIG_FILE: &str = "fleet.toml";
 

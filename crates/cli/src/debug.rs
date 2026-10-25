@@ -16,9 +16,10 @@ use fleet_core::protocol::{self, Reply, Request, request};
 
 use crate::client;
 
-/// How long `fleet debug` waits for an answer: longer than an adapter is
-/// given, so a slow adapter's fault reaches it.
-const WAIT: Duration = Duration::from_secs(30);
+/// How long `fleet debug` waits for an answer: longer than a first fetch
+/// of an adapter (curl's 60 s, then the adapter's own time), so a slow
+/// fetch's or adapter's fault reaches it.
+const WAIT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Parser)]
 #[command(name = "fleet debug")]
@@ -31,9 +32,9 @@ struct Args {
 enum What {
     /// Launch an agent through an adapter program.
     Launch {
-        /// The adapter program.
+        /// The adapter: a program by its path, or `<name>@<version>`.
         #[arg(long)]
-        adapter: PathBuf,
+        adapter: String,
         /// Where the agent works; the current directory by default.
         #[arg(long)]
         directory: Option<PathBuf>,
@@ -99,7 +100,11 @@ fn request_for(what: What, cwd: &Path) -> Request {
             model,
             prompt,
         } => request::Session::Launch {
-            adapter: cwd.join(adapter),
+            adapter: if adapter.contains('/') {
+                cwd.join(adapter).display().to_string()
+            } else {
+                adapter
+            },
             directory: directory.map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d)),
             model,
             prompt,
@@ -138,7 +143,7 @@ mod tests {
                 "sonnet"
             ]),
             Some(Request::Session(request::Session::Launch {
-                adapter: PathBuf::from("/c/app/packs/claude"),
+                adapter: "/c/app/packs/claude".into(),
                 directory: PathBuf::from("/c/app"),
                 model: Some("sonnet".into()),
                 prompt: None,
@@ -156,10 +161,23 @@ mod tests {
                 "hi"
             ]),
             Some(Request::Session(request::Session::Launch {
-                adapter: PathBuf::from("/a"),
+                adapter: "/a".into(),
                 directory: PathBuf::from("/c/app/sub"),
                 model: None,
                 prompt: Some("hi".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_named_adapter_is_sent_as_written() {
+        assert_eq!(
+            parsed(&["debug", "launch", "--adapter", "claude-code@2.1.285"]),
+            Some(Request::Session(request::Session::Launch {
+                adapter: "claude-code@2.1.285".into(),
+                directory: PathBuf::from("/c/app"),
+                model: None,
+                prompt: None,
             }))
         );
     }

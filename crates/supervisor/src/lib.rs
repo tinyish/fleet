@@ -1,6 +1,7 @@
 //! The supervisor: one per user, the only writer of anything tinyfleet
 //! writes. It answers the CLI on a Unix socket in the state directory.
 
+mod adapters;
 mod create;
 mod projects;
 mod remove;
@@ -23,7 +24,7 @@ use std::time::Duration;
 
 use fleet_core::paths::{Os, state_dir};
 use fleet_core::protocol::{ProtocolError, Reply, Request, Response, Status, request, response};
-use fleet_core::tools::{AgentAdapters, Multiplexer};
+use fleet_core::tools::{AgentAdapters, Multiplexer, Network};
 use state::{State, Step};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -52,6 +53,8 @@ pub struct Tools {
     pub mux: Box<dyn Multiplexer + Send + Sync>,
     /// The agent adapters, run by the host that runs adapter programs.
     pub agents: Box<dyn AgentAdapters + Send + Sync>,
+    /// The network, which fetches adapters named by a release.
+    pub net: Box<dyn Network + Send + Sync>,
 }
 
 /// What the supervisor was doing when the system said no.
@@ -137,14 +140,19 @@ fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
     state.write(|w| w.record(&started))?;
     let state = Arc::new(Mutex::new(state));
     let tools = Arc::new(tools);
+    let store = Arc::new(adapters::Store::new(
+        state_dir,
+        std::env::var(fleet_core::adapters::BASE_VAR).ok(),
+    ));
 
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
                 let state = Arc::clone(&state);
                 let tools = Arc::clone(&tools);
+                let store = Arc::clone(&store);
                 thread::spawn(move || {
-                    if let Err(e) = answer(&state, &tools, &stream) {
+                    if let Err(e) = answer(&state, &tools, &store, &stream) {
                         log(&words::request_failed(&e));
                     }
                 });
@@ -156,7 +164,12 @@ fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
     Ok(())
 }
 
-fn answer(state: &Mutex<State>, tools: &Tools, stream: &UnixStream) -> Result<(), Error> {
+fn answer(
+    state: &Mutex<State>,
+    tools: &Tools,
+    store: &adapters::Store,
+    stream: &UnixStream,
+) -> Result<(), Error> {
     stream
         .set_read_timeout(Some(TIMEOUT))
         .map_err(|e| Error::Io(Doing::SettingTimeout, e))?;
@@ -193,6 +206,7 @@ fn answer(state: &Mutex<State>, tools: &Tools, stream: &UnixStream) -> Result<()
         })) => sessions::launch(
             state,
             tools,
+            store,
             &sessions::Ask {
                 adapter,
                 directory,

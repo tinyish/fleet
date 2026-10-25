@@ -17,7 +17,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use fleet_core::paths::{Os, PathError, state_dir};
-use fleet_core::tools::{Git, NoServiceManager, ServiceManager};
+use fleet_core::tools::{Git, Network, NoServiceManager, ServiceManager};
 
 use crate::protocol::{Problem, Request, Status};
 use cmd::{create, doctor, projects, remove, start, stop, uninstall};
@@ -45,6 +45,7 @@ pub fn run<I, T>(
     args: I,
     service: Result<&dyn ServiceManager, NoServiceManager>,
     git: &dyn Git,
+    net: &dyn Network,
 ) -> ExitCode
 where
     I: IntoIterator<Item = T>,
@@ -76,7 +77,7 @@ where
         Ask::Never
     };
     let ending = match &args.request {
-        Request::Doctor => return doctor::run(service, git),
+        Request::Doctor => return doctor::run(service, git, net),
         Request::Create { projects } => {
             setup(service).and_then(|(service, dir)| create::run(&dir, service, ask, projects))
         }

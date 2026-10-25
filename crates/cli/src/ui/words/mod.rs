@@ -11,6 +11,7 @@ use fleet_core::tools::{BadUnitPath, FileStep, ToolError, UnitPath};
 use crate::protocol::{Doing, Doubt, During, Problem, Response, Startup, Status};
 use crate::ui::output::Ink;
 
+mod adapters;
 mod create;
 mod doctor;
 pub(crate) mod remove;
@@ -334,32 +335,13 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
             ink.paths(serving),
             ink.paths(asked)
         ),
-        protocol::Status::InsideFleet { directory, fleet }
-        | protocol::Status::NotFleetDirectory { directory, fleet } => format!(
-            "{} is inside the fleet in {}",
-            ink.path(directory),
-            ink.path(fleet)
-        ),
-        protocol::Status::ContainsFleet { directory, fleet } => format!(
-            "{} contains the fleet in {}",
-            ink.path(directory),
-            ink.path(fleet)
-        ),
-        protocol::Status::InsideServedProject {
-            directory,
-            project,
-            fleet,
-        } => format!(
-            "{} is inside {}, which the fleet in {} serves",
-            ink.path(directory),
-            ink.path(project),
-            ink.path(fleet)
-        ),
-        protocol::Status::AlreadyServed { project, fleet } => format!(
-            "{} is already served by the fleet in {}",
-            ink.path(project),
-            ink.path(fleet)
-        ),
+        protocol::Status::InsideFleet { .. }
+        | protocol::Status::NotFleetDirectory { .. }
+        | protocol::Status::ContainsFleet { .. }
+        | protocol::Status::InsideServedProject { .. }
+        | protocol::Status::AlreadyServed { .. } => {
+            create::placement(status, ink).unwrap_or_default()
+        }
         protocol::Status::Missing { path } => format!("{} does not exist", ink.path(path)),
         protocol::Status::Unreadable { path, error } => format!("{}: {error}", ink.path(path)),
         protocol::Status::ConfigDiffers { path, listed } => {
@@ -403,6 +385,19 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
         | protocol::Status::MultiplexerFailed { .. }
         | protocol::Status::NoSuchSession { .. } => {
             session::refused(status, ink).unwrap_or_default()
+        }
+        protocol::Status::AdapterUnpinned { .. }
+        | protocol::Status::NotAnAdapter { .. }
+        | protocol::Status::NoSuchRelease { .. }
+        | protocol::Status::BadManifest { .. }
+        | protocol::Status::NoBuildFor { .. }
+        | protocol::Status::ChecksumMismatch { .. }
+        | protocol::Status::ProtocolMismatch { .. }
+        | protocol::Status::DownloadFailed { .. }
+        | protocol::Status::NoDownloader { .. }
+        | protocol::Status::AdapterNotKept { .. }
+        | protocol::Status::ReleaseMismatch { .. } => {
+            adapters::refused(status, ink).unwrap_or_default()
         }
     }
 }

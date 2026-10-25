@@ -68,6 +68,9 @@ fn supervisor_down(stopped: &Result<Response, Status>) -> bool {
 /// a `FLEET_STATE_DIR` pointed at a shared directory loses nothing else.
 /// Returns whether `dir` was kept because it holds other files.
 fn remove_own_files(dir: &Path) -> Result<bool, Status> {
+    for name in fleet_core::paths::OWN_DIRS {
+        remove_tree(&dir.join(name))?;
+    }
     for name in fleet_core::paths::OWN_FILES {
         remove(&dir.join(name))?;
     }
@@ -108,6 +111,15 @@ fn only_finder_left(dir: &Path) -> bool {
             .collect();
         names == [FINDER_FILE]
     })
+}
+
+/// Deletes one directory and all it holds; one already gone is fine.
+fn remove_tree(path: &Path) -> Result<(), Status> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(could_not(path, error)),
+    }
 }
 
 /// Deletes one file; one already gone is fine.
@@ -225,6 +237,27 @@ mod tests {
         );
         assert!(!state.exists() && !binary.exists());
         assert!(service.stopped.get());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_adapters_it_fetched_go_too() {
+        let (root, state, binary) = machine("adapters");
+        let kept = state.join("adapters/claude-code/2.1.285");
+        let _ = fs::create_dir_all(&kept);
+        let _ = fs::write(kept.join("fleet-claude-code"), "adapter");
+        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        assert!(
+            matches!(
+                ending,
+                Ok(Response::Uninstalled {
+                    kept_state_dir: false,
+                    ..
+                })
+            ),
+            "{ending:?}"
+        );
+        assert!(!state.exists());
         let _ = fs::remove_dir_all(root);
     }
 

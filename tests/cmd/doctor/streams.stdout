@@ -1,5 +1,6 @@
 fine            service manager  [..] is up and running
 fine            git              git version [..]
+fine            curl             curl [..]
 warning         supervisor       not running
 
 hint: run fleet start to start it

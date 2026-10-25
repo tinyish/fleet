@@ -12,6 +12,7 @@ name = "fleet_core"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 fleet-adapter-sdk.workspace = true
 toml.workspace = true
 toml_edit.workspace = true

@@ -13,12 +13,12 @@ use fleet_core::protocol::{Reply, Response, Status, response};
 use fleet_core::tools::{Pane, ToolError};
 use state::{SessionRow, State, StateError, Step, now_millis};
 
-use crate::{Error, Tools, lock};
+use crate::{Error, Tools, adapters, lock};
 
 /// What a launch asks for.
 pub(crate) struct Ask {
-    /// The adapter program.
-    pub(crate) adapter: PathBuf,
+    /// The adapter, as the request names it: a path, or `<name>@<version>`.
+    pub(crate) adapter: String,
     /// Where the agent works.
     pub(crate) directory: PathBuf,
     /// The model to run.
@@ -29,22 +29,31 @@ pub(crate) struct Ask {
 
 /// Launches an agent: the adapter says what to run, tmux runs it, and the
 /// session and its step are recorded together, or not at all.
-pub(crate) fn launch(state: &Mutex<State>, tools: &Tools, ask: &Ask) -> Result<Reply, Error> {
+pub(crate) fn launch(
+    state: &Mutex<State>,
+    tools: &Tools,
+    store: &adapters::Store,
+    ask: &Ask,
+) -> Result<Reply, Error> {
     if !ask.directory.is_dir() {
         return Ok(Reply::Status(Status::Missing {
             path: ask.directory.clone(),
         }));
     }
+    let program = match adapters::resolve(store, tools, &ask.adapter) {
+        Ok(program) => program,
+        Err(status) => return Ok(Reply::Status(status)),
+    };
     let request = agent::Launch {
         directory: ask.directory.clone(),
         model: ask.model.clone(),
         prompt: ask.prompt.clone(),
     };
-    let launched = match tools.agents.launch(&ask.adapter, &request) {
+    let launched = match tools.agents.launch(&program, &request) {
         Ok(launched) => launched,
         Err(fault) => {
             return Ok(Reply::Status(Status::AdapterFailed {
-                adapter: ask.adapter.clone(),
+                adapter: program.clone(),
                 verb: Verb::Launch,
                 fault,
             }));
@@ -52,13 +61,13 @@ pub(crate) fn launch(state: &Mutex<State>, tools: &Tools, ask: &Ask) -> Result<R
     };
     let row = SessionRow {
         id: new_id(),
-        adapter: ask.adapter.clone(),
+        adapter: program,
         directory: ask.directory.clone(),
         launch_time_millis: now_millis(),
     };
     let step = Step::SessionLaunched {
         session: row.id.clone(),
-        adapter: ask.adapter.display().to_string(),
+        adapter: ask.adapter.clone(),
         directory: ask.directory.display().to_string(),
         model: ask.model.clone(),
         prompt: ask.prompt.clone(),
@@ -205,7 +214,7 @@ mod tests {
     use std::sync::{Mutex, PoisonError};
 
     use fleet_core::agent::{
-        self, Activity, AdapterFault, Launched, Reading, Readings, SessionState, Verb,
+        self, Activity, AdapterFault, Launched, Reading, Readings, SessionState, Speaks, Verb,
     };
     use fleet_core::protocol::{Reply, Response, Status, response};
     use fleet_core::tools::{AgentAdapters, Multiplexer, Pane, ToolError};
@@ -312,6 +321,10 @@ mod tests {
                     .collect(),
             })
         }
+
+        fn protocol(&self, _: &Path) -> Result<Speaks, AdapterFault> {
+            Ok(Speaks { protocol: 1 })
+        }
     }
 
     /// Agent adapters a test keeps a handle on, to see what was asked of them.
@@ -323,12 +336,16 @@ mod tests {
         fn read(&self, a: &Path, r: &agent::Read) -> Result<Readings, AdapterFault> {
             self.0.read(a, r)
         }
+        fn protocol(&self, a: &Path) -> Result<Speaks, AdapterFault> {
+            self.0.protocol(a)
+        }
     }
 
     fn tools(mux: FakeMux, adapters: FakeAgents) -> Tools {
         Tools {
             mux: Box::new(mux),
             agents: Box::new(adapters),
+            net: Box::new(crate::testing::FakeNet::default()),
         }
     }
 
@@ -353,9 +370,14 @@ mod tests {
         }
     }
 
+    /// The tree's adapter store, fetching from a base no test serves.
+    fn store(root: &Path) -> crate::adapters::Store {
+        crate::adapters::Store::new(&root.join("st"), Some("https://r".into()))
+    }
+
     fn ask(adapter: &str, directory: &Path) -> Ask {
         Ask {
-            adapter: PathBuf::from(adapter),
+            adapter: adapter.to_owned(),
             directory: directory.to_path_buf(),
             model: Some("sonnet".into()),
             prompt: None,
@@ -367,7 +389,7 @@ mod tests {
         let (root, state) = tree("sess-list", &["app"]);
         let tools = tools(FakeMux::default(), FakeAgents::default());
         let app = root.join("code/app");
-        let reply = launch(&state, &tools, &ask("/a/claude", &app));
+        let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app));
         let id = launched(&reply.unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })));
         assert!(id.starts_with('s') && id.len() == 11, "{id}");
         let (sessions, faults) = listed(
@@ -388,7 +410,7 @@ mod tests {
         let adapters = FakeAgents::default();
         let tools = tools(mux, adapters);
         let app = root.join("code/app");
-        assert!(launch(&state, &tools, &ask("/a/claude", &app)).is_ok());
+        assert!(launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).is_ok());
         // The pane's agent exited.
         let panes = tools.mux.panes().unwrap_or_default();
         let dead: Vec<Pane> = panes
@@ -405,6 +427,7 @@ mod tests {
                 read_fault: Some(AdapterFault::TimedOut { after_millis: 1 }),
                 ..FakeAgents::default()
             }),
+            net: Box::new(crate::testing::FakeNet::default()),
         };
         let (sessions, faults) = listed(
             &list(&state, &tools).unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })),
@@ -427,7 +450,7 @@ mod tests {
                 ..FakeAgents::default()
             },
         );
-        assert!(launch(&state, &tools, &ask("/a/claude", &app)).is_ok());
+        assert!(launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).is_ok());
         let (sessions, faults) = listed(
             &list(&state, &tools).unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })),
         );
@@ -452,7 +475,7 @@ mod tests {
             },
             FakeAgents::default(),
         );
-        let reply = launch(&state, &tools, &ask("/a/claude", &app)).ok();
+        let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).ok();
         assert!(
             matches!(reply, Some(Reply::Status(Status::MultiplexerFailed { .. }))),
             "{reply:?}"
@@ -475,7 +498,7 @@ mod tests {
             error: std::io::Error::from(std::io::ErrorKind::NotFound).to_string(),
         }));
         assert_eq!(
-            launch(&state, &tools, &ask("/a/claude", &app)).ok(),
+            launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).ok(),
             refused
         );
         assert_eq!(crate::lock(&state).sessions().ok(), Some(vec![]));
@@ -487,7 +510,7 @@ mod tests {
         let adapters = FakeAgents::default();
         let tools = tools(FakeMux::default(), adapters);
         let nope = root.join("nope");
-        let reply = launch(&state, &tools, &ask("/a/claude", &nope)).ok();
+        let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &nope)).ok();
         assert_eq!(reply, Some(Reply::Status(Status::Missing { path: nope })));
     }
 
@@ -506,7 +529,7 @@ mod tests {
                 ..FakeAgents::default()
             },
         );
-        let reply = launch(&state, &tools, &ask("/a/claude", &app)).ok();
+        let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).ok();
         assert_eq!(
             reply,
             Some(Reply::Status(Status::AdapterFailed {
@@ -522,7 +545,7 @@ mod tests {
         let (root, state) = tree("sess-stop", &["app"]);
         let app = root.join("code/app");
         let tools = tools(FakeMux::default(), FakeAgents::default());
-        let reply = launch(&state, &tools, &ask("/a/claude", &app));
+        let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app));
         let id = launched(&reply.unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })));
         assert_eq!(
             stop(&state, &tools, &id).ok(),
@@ -540,6 +563,76 @@ mod tests {
     }
 
     #[test]
+    fn a_named_adapter_is_fetched_then_launched() {
+        let (root, state) = tree("sess-named", &["app"]);
+        let app = root.join("code/app");
+        let adapters = std::sync::Arc::new(FakeAgents::default());
+        let tools = Tools {
+            mux: Box::new(FakeMux::default()),
+            agents: Box::new(Shared(adapters.clone())),
+            net: Box::new(crate::testing::FakeNet {
+                files: crate::testing::good_release("https://r"),
+                ..crate::testing::FakeNet::default()
+            }),
+        };
+        let reply = launch(
+            &state,
+            &tools,
+            &store(&root),
+            &ask("claude-code@2.1.285", &app),
+        );
+        assert!(
+            reply.as_ref().is_ok_and(|r| !launched(r).is_empty()),
+            "{reply:?}"
+        );
+        let kept = root.join("st/adapters/claude-code/2.1.285/fleet-claude-code");
+        let launches = adapters
+            .launches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        assert_eq!(launches, vec![kept.clone()]);
+        let (sessions, _) = listed(
+            &list(&state, &tools)
+                .unwrap_or_else(|_| Reply::Status(Status::NotServed { path: "/".into() })),
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|s| s.adapter.clone())
+                .collect::<Vec<_>>(),
+            vec![kept]
+        );
+    }
+
+    #[test]
+    fn a_bare_name_launches_nothing() {
+        let (root, state) = tree("sess-bare", &["app"]);
+        let app = root.join("code/app");
+        let adapters = std::sync::Arc::new(FakeAgents::default());
+        let tools = Tools {
+            mux: Box::new(FakeMux::default()),
+            agents: Box::new(Shared(adapters.clone())),
+            net: Box::new(crate::testing::FakeNet::default()),
+        };
+        let reply = launch(&state, &tools, &store(&root), &ask("claude-code", &app)).ok();
+        assert_eq!(
+            reply,
+            Some(Reply::Status(Status::AdapterUnpinned {
+                name: "claude-code".into(),
+                latest: None
+            }))
+        );
+        assert!(
+            adapters
+                .launches
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn sessions_of_two_adapters_are_read_one_call_each() {
         let (root, state) = tree("sess-two", &["app"]);
         let app = root.join("code/app");
@@ -547,9 +640,10 @@ mod tests {
         let tools = Tools {
             mux: Box::new(FakeMux::default()),
             agents: Box::new(Shared(adapters.clone())),
+            net: Box::new(crate::testing::FakeNet::default()),
         };
         for adapter in ["/a/one", "/a/two", "/a/one"] {
-            assert!(launch(&state, &tools, &ask(adapter, &app)).is_ok());
+            assert!(launch(&state, &tools, &store(&root), &ask(adapter, &app)).is_ok());
         }
         assert!(list(&state, &tools).is_ok());
         let mut reads = adapters

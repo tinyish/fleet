@@ -3,6 +3,7 @@
 //! Compiled only with the `specimen` feature, so a release build has no such
 //! command. Its labels are code identifiers, never sentences.
 
+mod delivery;
 mod doctor;
 mod refusals;
 mod samples;

@@ -7,6 +7,7 @@ in a fleet with it running.
 $ fleet doctor
 fine            service manager  [..] is up and running
 fine            git              git version [..]
+fine            curl             curl [..]
 warning         supervisor       not running
 
 hint: run fleet start to start it
@@ -23,6 +24,7 @@ started the supervisor; created a fleet in [CWD]/code/app -- welcome aboard
 $ in code/app fleet doctor
 fine            service manager  [..] is up and running
 fine            git              git version [..]
+fine            curl             curl [..]
 fine            supervisor       running, version [..]
 fine            state            [CWD]/.fleet/st: open at schema 1
 fine            project          [CWD]/code/app: 1 project, all present
