@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::agent::{Launch, Launched, Read, Readings, SessionRef, Verb};
+use crate::Speaks;
+use crate::agent::{Launch, Launched, PROTOCOL, Read, Readings, SessionRef, Verb};
 use crate::kit::{ANSWERED, FAILED, MAX_JSON, UNKNOWN_VERB};
 
 /// How long each run may take, unless [`Adapter::time_limit`] says.
@@ -35,6 +36,8 @@ pub const UNKNOWN: &str = "an unknown verb exits 2";
 /// A request that is not JSON exits 1, says why, and answers nothing.
 pub const NOT_JSON: &str =
     "a request that is not JSON exits 1, says why on stderr and writes nothing on stdout";
+/// `protocol` answers the kind's protocol number.
+pub const PROTOCOL_ANSWERS: &str = "protocol answers the kind's protocol number";
 /// Launch answers with exit 0 and a `Launched`.
 pub const LAUNCH_ANSWERS: &str = "launch answers with exit 0 and a Launched";
 /// Launch's program is an absolute path.
@@ -200,6 +203,11 @@ impl Check<'_> {
     }
 
     fn agent_rules(&mut self, directory: &Path) -> Result<(), Stop> {
+        if let Some(ran) = self.run(&["protocol"], Some("{}"))?
+            && ran.answer::<Speaks>() != Some(Speaks { protocol: PROTOCOL })
+        {
+            self.breach(PROTOCOL_ANSWERS, ran);
+        }
         let launch = Launch {
             directory: directory.to_owned(),
             model: Some("conformance-model".into()),
@@ -340,7 +348,7 @@ mod tests {
     /// reads no session (leaving one out is allowed: it is unknown).
     const GOOD: &str = r#"
 case "$1" in
-  launch|read) ;;
+  launch|read|protocol) ;;
   *) echo "unknown verb $1" >&2; exit 2 ;;
 esac
 req=$(cat)
@@ -351,16 +359,24 @@ esac
 case "$1" in
   launch) echo '{"argv":["/bin/echo","hi"]}' ;;
   read) echo '{"sessions":[]}' ;;
+  protocol) echo '{"protocol":1}' ;;
 esac"#;
 
+    /// The rules `script` breaks, each run given the usual time limit: a
+    /// script's first start can take over a second while the system checks
+    /// a new executable, so only a test about hanging shortens it.
     fn check(script: &str) -> io::Result<Vec<&'static str>> {
+        check_within(script, TIME_LIMIT)
+    }
+
+    fn check_within(script: &str, limit: Duration) -> io::Result<Vec<&'static str>> {
         let bin = FakePath::new()?;
         let program = bin.program("adapter", script)?;
         let work = TempDir::new("conformance-work")?;
         // The environment is cleared: the scripts' sh needs a PATH for cat.
         let adapter = Adapter::new(program)
             .env("PATH", "/usr/bin:/bin")
-            .time_limit(Duration::from_millis(1500));
+            .time_limit(limit);
         Ok(agent(&adapter, work.path())
             .iter()
             .map(|b| b.rule)
@@ -396,7 +412,10 @@ esac"#;
             r#"*) echo "unknown verb $1" >&2; exit 2 ;;"#,
             "*) cat >/dev/null; exit 2 ;;",
         );
-        assert_eq!(check(&script)?, vec![IN_TIME, IN_TIME]);
+        // Its first two runs hang by design; the rest start an executable
+        // already checked, so a short limit holds for them.
+        let limit = Duration::from_millis(1500);
+        assert_eq!(check_within(&script, limit)?, vec![IN_TIME, IN_TIME]);
         Ok(())
     }
 
@@ -410,7 +429,7 @@ esac"#;
     #[test]
     fn garbage_accepted_as_a_request_breaches_not_json() -> io::Result<()> {
         let script = GOOD.replace("exit 1", "echo '{}'; exit 0");
-        assert_eq!(check(&script)?, vec![NOT_JSON, NOT_JSON]);
+        assert_eq!(check(&script)?, vec![NOT_JSON, NOT_JSON, NOT_JSON]);
         Ok(())
     }
 
@@ -421,6 +440,20 @@ esac"#;
             "launch) echo 'no agent here' >&2; exit 1 ;;",
         );
         assert_eq!(check(&script)?, vec![LAUNCH_ANSWERS]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_wrong_protocol_number_breaches() -> io::Result<()> {
+        let script = GOOD.replace(r#"{"protocol":1}"#, r#"{"protocol":7}"#);
+        assert_eq!(check(&script)?, vec![PROTOCOL_ANSWERS]);
+        Ok(())
+    }
+
+    #[test]
+    fn no_protocol_verb_breaches() -> io::Result<()> {
+        let script = GOOD.replace("launch|read|protocol)", "launch|read)");
+        assert_eq!(check(&script)?, vec![NOT_JSON, PROTOCOL_ANSWERS]);
         Ok(())
     }
 

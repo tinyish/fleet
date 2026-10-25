@@ -11,7 +11,8 @@ use serde::de::DeserializeOwned;
 use super::{Error, JsonFile};
 use crate::agent::{Activity, Launch, Launched, Read, Reading, Readings, Reason, SessionRef, Verb};
 
-/// An agent's adapter: the two verbs of the agent protocol.
+/// An agent's adapter: the two verbs it answers itself; the kit answers
+/// `protocol` for it.
 pub trait AgentAdapter {
     /// What to run to start the agent. It runs nothing itself: tinyfleet
     /// starts the session.
@@ -50,6 +51,11 @@ pub fn answer(adapter: &impl AgentAdapter, verb: &str, request: &str) -> Result<
     match Verb::parse(verb) {
         Some(Verb::Launch) => super::handle(request, |r: Launch| adapter.launch(&r)),
         Some(Verb::Read) => super::handle(request, |r: Read| adapter.read(&r)),
+        Some(Verb::Protocol) => super::handle(request, |_: serde::de::IgnoredAny| {
+            Ok(crate::Speaks {
+                protocol: crate::agent::PROTOCOL,
+            })
+        }),
         None => Err(Error::new(format!("unknown verb \"{verb}\""))),
     }
 }
@@ -223,6 +229,20 @@ mod tests {
             )
         );
         assert_eq!(ask("stop", "{}").0, UNKNOWN_VERB);
+    }
+
+    #[test]
+    fn the_kit_answers_protocol_for_any_agent_adapter() {
+        assert_eq!(
+            ask("protocol", "{}"),
+            (ANSWERED, "{\"protocol\":1}\n".into())
+        );
+    }
+
+    #[test]
+    fn protocol_needs_a_json_request_like_any_verb() {
+        assert_eq!(ask("protocol", "").0, crate::kit::FAILED);
+        assert_eq!(ask("protocol", "not json").0, crate::kit::FAILED);
     }
 
     #[test]

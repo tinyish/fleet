@@ -19,6 +19,7 @@ pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
             match verb {
                 Verb::Launch => "launch the agent",
                 Verb::Read => "read its sessions",
+                Verb::Protocol => "say which protocol it speaks",
             },
             fault_words(fault)
         ),

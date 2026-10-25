@@ -2,7 +2,7 @@
 name = "fleet-adapter-sdk"
 # Its own version, apart from fleet's: adapters pin it by the tag
 # adapter-sdk-v<version>, and a change to a protocol bumps it.
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true

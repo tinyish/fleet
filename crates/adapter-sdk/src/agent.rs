@@ -10,6 +10,7 @@
 //! | --- | --- | --- |
 //! | `launch` | [`Launch`] | [`Launched`]: what to run; the adapter runs nothing |
 //! | `read` | [`Read`] | [`Readings`]: each session's [`Activity`] |
+//! | `protocol` | any JSON, `{}` | [`Speaks`](crate::Speaks): [`PROTOCOL`], the protocol it speaks |
 //!
 //! An adapter never touches tmux, and never says a session is gone: tmux
 //! says that.
@@ -19,6 +20,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// The agent protocol's number: what an agent adapter answers to
+/// `protocol`. A change a running adapter could notice bumps it.
+pub const PROTOCOL: u32 = 1;
+
 /// The verbs an agent adapter answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,11 +32,13 @@ pub enum Verb {
     Launch,
     /// Say what state each session's agent is in.
     Read,
+    /// Say which protocol it speaks.
+    Protocol,
 }
 
 impl Verb {
     /// Every verb, in the order of the table above.
-    pub const ALL: [Verb; 2] = [Verb::Launch, Verb::Read];
+    pub const ALL: [Verb; 3] = [Verb::Launch, Verb::Read, Verb::Protocol];
 
     /// The verb `word` names, as an adapter receives it.
     #[must_use]
@@ -45,6 +52,7 @@ impl Verb {
         match self {
             Verb::Launch => "launch",
             Verb::Read => "read",
+            Verb::Protocol => "protocol",
         }
     }
 }
@@ -185,13 +193,24 @@ mod tests {
     fn all_holds_every_verb_and_parse_reads_each_back() {
         // A new verb stops this match compiling: add it to ALL too.
         let counted = |verb: Verb| match verb {
-            Verb::Launch | Verb::Read => 1,
+            Verb::Launch | Verb::Read | Verb::Protocol => 1,
         };
-        assert_eq!(Verb::ALL.into_iter().map(counted).sum::<usize>(), 2);
+        assert_eq!(Verb::ALL.into_iter().map(counted).sum::<usize>(), 3);
         for verb in Verb::ALL {
             assert_eq!(Verb::parse(verb.as_str()), Some(verb));
         }
         assert_eq!(Verb::parse("Launch"), None);
         assert_eq!(Verb::parse(""), None);
+    }
+
+    #[test]
+    fn speaks_is_one_number_on_the_wire() {
+        assert_eq!(
+            serde_json::to_string(&crate::Speaks { protocol: PROTOCOL })
+                .ok()
+                .as_deref(),
+            Some(r#"{"protocol":1}"#)
+        );
+        assert_eq!(Verb::Protocol.as_str(), "protocol");
     }
 }
