@@ -10,6 +10,7 @@ repository = "https://github.com/tinyish/fleet"
 
 [workspace.dependencies]
 fleet-core = { path = "crates/core" }
+fleet-adapter-sdk = { path = "crates/adapter-sdk" }
 state = { path = "crates/state" }
 service = { path = "crates/service" }
 git = { path = "crates/git" }

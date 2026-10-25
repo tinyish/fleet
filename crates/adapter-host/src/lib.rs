@@ -1,8 +1,8 @@
 //! The adapter host: runs an adapter program once per request, as
 //! `<adapter> <verb>`, hands it the request as one JSON object on stdin and
-//! reads its answer from stdout (`fleet_core::agent` holds the protocol). A
-//! driver, so it may start programs; it depends on nothing in the
-//! workspace but `fleet-core`.
+//! reads its answer from stdout (the protocol is `fleet-adapter-sdk`'s,
+//! re-exported as `fleet_core::agent`). A driver, so it may start programs;
+//! it depends on nothing in the workspace but `fleet-core`.
 
 use std::io::{self, Read as _, Write as _};
 use std::path::Path;

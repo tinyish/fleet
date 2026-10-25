@@ -309,9 +309,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-adapter-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fleet-core"
 version = "0.0.0"
 dependencies = [
+ "fleet-adapter-sdk",
  "serde",
  "serde_json",
  "strum",

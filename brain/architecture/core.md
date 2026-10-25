@@ -91,6 +91,11 @@ the network for. Users can write their own adapters, in any language, for
 other agents, for trackers such as Linear or Jira, and for forges such as
 GitHub or GitLab, and name them by their path.
 
+**The adapter SDK.** Their protocol, and a kit for writing an adapter in
+Rust, is the crate `fleet-adapter-sdk` in this repository. It has a version
+of its own, and adapters, tinyfleet's own included, take it by the tag
+`adapter-sdk-v<version>`.
+
 ## Primitives
 
 > **Directional,** drawn for Delivery. Built so far, and reached only through
@@ -192,9 +197,12 @@ file.
                 │                              │
                 └────────────► core ◄──────────┘
              rules + protocol + tool interfaces
-                                ▲
-                ┌───────────┬───┴───────┬────────────┐
-             service       tmux        git    adapter-host
+                    │           ▲
+                    │   ┌───────┴───┬───────────┬────────────┐
+                    │ service      tmux        git    adapter-host
+                    ▼
+               adapter-sdk ◄───── adapter programs, with its kit
+          the adapter protocols
 ```
 
 | Crate | Holds |
@@ -203,6 +211,7 @@ file.
 | `cli` | parsing, prompting, rendering outcomes, the socket client |
 | `supervisor` | the socket server, and tending each project that is on |
 | `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle), the protocol the CLI and the supervisor speak (`core::protocol`: the requests and replies, and how they go on a stream), and the tool interfaces; no I/O except through them, and the protocol reads and writes only the stream it is handed |
+| `adapter-sdk` (package `fleet-adapter-sdk`) | the adapter protocols (agents now; task trackers and forges with theirs), which `core` re-exports to the rest of tinyfleet; and, behind its `kit` feature, which tinyfleet never turns on, what anyone writing an adapter in Rust needs: the run loop, helpers, a test kit and the conformance checks |
 | `state` | the SQLite schema and its queries |
 | `service`, `git` | the drivers |
 | `tmux` | the multiplexer's driver |
@@ -211,9 +220,12 @@ file.
 Fitness tests fail the build when:
 
 - any crate but `supervisor` depends on `state` (so the CLI cannot write state);
-- `core` depends on another crate of the workspace;
+- `core` depends on a crate of the workspace other than `fleet-adapter-sdk`,
+  or `fleet-adapter-sdk` on any;
 - a driver depends on anything in the workspace but `core`;
-- any crate but a driver starts an outside program.
+- any crate but a driver starts an outside program (the SDK's `kit` is not
+  part of tinyfleet: its conformance checks run an adapter in that adapter's
+  own tests).
 
 ## How a command flows
 
@@ -342,7 +354,7 @@ Each boundary's authoritative form lives in code; this table points at it.
 | state schema | supervisor ↔ state | the migration in `crates/state/src/lib.rs` |
 | config file | person ↔ supervisor (and doctor, which reads it) | `crates/core/src/config.rs`, read through `fleets::read_projects` |
 | tool interfaces | core ↔ drivers | `crates/core/src/tools.rs` |
-| adapter protocol | supervisor, through a driver ↔ adapter programs | `crates/core/src/agent.rs` for agents; *directional:* tasks and forges |
+| adapter protocol | supervisor, through a driver ↔ adapter programs | `crates/adapter-sdk/src/agent.rs` for agents; *directional:* tasks and forges |
 | install | person ↔ the GitHub release | `install.sh` at the repository root |
 | release | a release squash on `main` ↔ the GitHub release | `.github/workflows/release.yml` *(directional: written, not yet run)* |
 
@@ -411,7 +423,7 @@ debug`.
 | supervisor | the one long-running tinyfleet process per user |
 | state | everything tinyfleet writes about its fleets, in one SQLite file |
 | task | an item of work, kept in the tracker the project already uses and reached through a task adapter |
-| adapter | an external program tinyfleet reaches an agent, a task tracker or a forge through, run once per request; users can write their own (protocol defined later) |
+| adapter | an external program tinyfleet reaches an agent, a task tracker or a forge through, run once per request; users can write their own; its protocol is `fleet-adapter-sdk`'s |
 | forge | where a branch lands: plain git onto the local trunk, or a host such as GitHub or GitLab |
 | primitive | a building block tinyfleet gives users for their own metaharness; it carries no opinion |
 | agent definition | an entry in a fleet's config saying how to run an agent: its name, whether it is persistent, its adapter, its model and its wake-up prompt |

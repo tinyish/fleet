@@ -16,7 +16,8 @@ pub(super) fn refusals(kind: fleet_core::status::StatusKind) -> Vec<protocol::St
     if kind != fleet_core::status::StatusKind::AdapterFailed {
         return vec![refusal(kind)];
     }
-    Verb::iter()
+    Verb::ALL
+        .into_iter()
         .flat_map(|verb| {
             AdapterFaultKind::iter()
                 .flat_map(adapter_faults)
