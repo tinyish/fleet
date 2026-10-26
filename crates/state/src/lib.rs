@@ -50,6 +50,8 @@ pub struct SessionRow {
     pub directory: PathBuf,
     /// When it was launched, by the supervisor's clock.
     pub launch_time_millis: i64,
+    /// The pane its agent runs in, as tmux names it (`%12`).
+    pub pane: String,
 }
 
 impl From<rusqlite::Error> for StateError {
@@ -93,7 +95,8 @@ impl State {
                      id                 TEXT    PRIMARY KEY,
                      adapter            TEXT    NOT NULL,
                      directory          TEXT    NOT NULL,
-                     launch_time_millis INTEGER NOT NULL
+                     launch_time_millis INTEGER NOT NULL,
+                     pane               TEXT    NOT NULL
                  );
                  PRAGMA user_version = 1;
                  COMMIT;",
@@ -139,7 +142,7 @@ impl State {
     /// When SQLite fails.
     pub fn sessions(&self) -> Result<Vec<SessionRow>, StateError> {
         let mut query = self.conn.prepare(
-            "SELECT id, adapter, directory, launch_time_millis FROM sessions
+            "SELECT id, adapter, directory, launch_time_millis, pane FROM sessions
              ORDER BY launch_time_millis, id",
         )?;
         let rows = query.query_map([], |row| {
@@ -148,6 +151,7 @@ impl State {
                 adapter: PathBuf::from(row.get::<_, String>(1)?),
                 directory: PathBuf::from(row.get::<_, String>(2)?),
                 launch_time_millis: row.get(3)?,
+                pane: row.get(4)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -208,8 +212,9 @@ impl Write<'_> {
         write_config().map_err(StateError::Config)
     }
 
-    /// Records `row`, then runs `launch`: if it fails, the transaction
-    /// fails with it, so nothing is recorded.
+    /// Records `row`, then runs `launch`, which answers with the pane the
+    /// agent runs in, and keeps it on the row: if `launch` fails, the
+    /// transaction fails with it, so nothing is recorded.
     ///
     /// # Errors
     ///
@@ -217,19 +222,25 @@ impl Write<'_> {
     pub fn launch_session(
         &mut self,
         row: &SessionRow,
-        launch: impl FnOnce() -> Result<(), ToolError>,
+        launch: impl FnOnce() -> Result<String, ToolError>,
     ) -> Result<(), StateError> {
         self.tx.execute(
-            "INSERT INTO sessions (id, adapter, directory, launch_time_millis)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO sessions (id, adapter, directory, launch_time_millis, pane)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 row.id,
                 utf8(&row.adapter)?,
                 utf8(&row.directory)?,
-                row.launch_time_millis
+                row.launch_time_millis,
+                row.pane
             ],
         )?;
-        launch().map_err(StateError::Tool)
+        let pane = launch().map_err(StateError::Tool)?;
+        self.tx.execute(
+            "UPDATE sessions SET pane = ?1 WHERE id = ?2",
+            params![pane, row.id],
+        )?;
+        Ok(())
     }
 
     /// Forgets session `id`, then runs `stop`: if it fails, the session
@@ -504,7 +515,18 @@ mod tests {
             adapter: "/a/claude".into(),
             directory: "/c/app".into(),
             launch_time_millis: 5,
+            pane: String::new(),
         }
+    }
+
+    #[test]
+    fn a_launched_session_keeps_its_pane() {
+        let (mut state, _dir) = fresh("pane");
+        let written = state.write(|w| w.launch_session(&row("s1"), || Ok("%7".into())));
+        assert!(written.is_ok(), "{written:?}");
+        let rows = state.sessions().unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pane, "%7");
     }
 
     fn launched(id: &str) -> Step {
@@ -538,11 +560,17 @@ mod tests {
     fn a_launched_session_is_listed_and_recorded() {
         let (mut state, dir) = fresh("session");
         let done = state.write(|w| {
-            w.launch_session(&row("s1"), || Ok(()))?;
+            w.launch_session(&row("s1"), || Ok("%1".into()))?;
             w.record(&launched("s1"))
         });
         assert!(done.is_ok(), "{done:?}");
-        assert_eq!(state.sessions().ok(), Some(vec![row("s1")]));
+        assert_eq!(
+            state.sessions().ok(),
+            Some(vec![SessionRow {
+                pane: "%1".into(),
+                ..row("s1")
+            }])
+        );
         assert_eq!(steps(&state), ["SESSION_LAUNCHED"]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -565,7 +593,7 @@ mod tests {
         let (mut state, dir) = fresh("session-stop");
         assert!(
             state
-                .write(|w| w.launch_session(&row("s1"), || Ok(())))
+                .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
                 .is_ok()
         );
         let ran = std::cell::Cell::new(0);
@@ -588,12 +616,18 @@ mod tests {
         let (mut state, dir) = fresh("session-stop-fails");
         assert!(
             state
-                .write(|w| w.launch_session(&row("s1"), || Ok(())))
+                .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
                 .is_ok()
         );
         let failed = state.write(|w| w.stop_session("s1", || Err(tmux_said_no())));
         assert!(matches!(failed, Err(StateError::Tool(_))), "{failed:?}");
-        assert_eq!(state.sessions().ok(), Some(vec![row("s1")]));
+        assert_eq!(
+            state.sessions().ok(),
+            Some(vec![SessionRow {
+                pane: "%1".into(),
+                ..row("s1")
+            }])
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

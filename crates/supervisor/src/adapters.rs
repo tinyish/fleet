@@ -261,8 +261,8 @@ mod tests {
     struct NoMux;
 
     impl Multiplexer for NoMux {
-        fn launch(&self, _: &str, _: &Path, _: &Launched) -> Result<(), ToolError> {
-            Ok(())
+        fn launch(&self, _: &str, _: &Path, _: &Launched) -> Result<String, ToolError> {
+            Ok("%0".into())
         }
         fn panes(&self) -> Result<Vec<Pane>, ToolError> {
             Ok(vec![])

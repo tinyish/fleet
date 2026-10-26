@@ -3,6 +3,7 @@
 
 mod adapters;
 mod create;
+mod observe;
 mod projects;
 mod remove;
 mod sessions;

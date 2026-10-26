@@ -168,13 +168,16 @@ pub trait Git {
     fn version(&self) -> Result<String, ToolError>;
 }
 
-/// One pane on tinyfleet's tmux server: its session, the agent's process
-/// id, and whether the agent has exited (the pane stays, so its end can be
-/// read).
+/// One pane on tinyfleet's tmux server: its session, its id, the agent's
+/// process id, and whether the agent has exited (the pane stays, so its end
+/// can be read).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pane {
     /// The session's name: tinyfleet's id for it.
     pub session: String,
+    /// The pane's id, as tmux names it (`%12`): unique on its server, so it
+    /// tells the agent's pane from one a person split off.
+    pub id: String,
     /// The agent's process id.
     pub pid: u32,
     /// Whether the agent has exited.
@@ -184,7 +187,8 @@ pub struct Pane {
 /// The multiplexer that holds agents' sessions: tmux, on tinyfleet's own
 /// server.
 pub trait Multiplexer {
-    /// Starts `program` in a new session named `session`, in `directory`.
+    /// Starts `program` in a new session named `session`, in `directory`,
+    /// and answers with the id of the pane it runs in.
     ///
     /// # Errors
     ///
@@ -194,7 +198,7 @@ pub trait Multiplexer {
         session: &str,
         directory: &Path,
         program: &agent::Launched,
-    ) -> Result<(), ToolError>;
+    ) -> Result<String, ToolError>;
 
     /// Every pane on tinyfleet's server; none when the server is not
     /// running.

@@ -1,8 +1,14 @@
 //! What the supervisor's tests share.
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+
+use fleet_core::agent::{
+    self, Activity, AdapterFault, Launched, Reading, Readings, SessionRef, Speaks,
+};
+use fleet_core::tools::{AgentAdapters, Multiplexer, Pane, ToolError};
 
 use state::State;
 
@@ -115,4 +121,142 @@ pub(crate) fn release(
 /// That release, sound.
 pub(crate) fn good_release(base: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
     release(base, 1, &fleet_core::adapters::sha256_hex(BINARY))
+}
+
+/// tmux, in memory: a launch adds a live pane, whose id it answers with.
+#[derive(Default)]
+pub(crate) struct FakeMux {
+    /// The panes on the server.
+    pub(crate) panes: Mutex<Vec<Pane>>,
+    /// Whether a launch fails.
+    pub(crate) fail_launch: bool,
+    /// Like a tmux that is not installed.
+    pub(crate) missing: bool,
+}
+
+/// What running a tmux that is not installed comes to.
+pub(crate) fn not_installed() -> ToolError {
+    ToolError::CouldNotRun {
+        program: "tmux".into(),
+        error: std::io::Error::from(std::io::ErrorKind::NotFound),
+    }
+}
+
+impl Multiplexer for FakeMux {
+    fn launch(&self, session: &str, _: &Path, _: &Launched) -> Result<String, ToolError> {
+        if self.missing {
+            return Err(not_installed());
+        }
+        if self.fail_launch {
+            return Err(ToolError::Failed {
+                command: "tmux new-session".into(),
+                said: "no".into(),
+            });
+        }
+        let mut panes = self.panes.lock().unwrap_or_else(PoisonError::into_inner);
+        let pid = 100 + u32::try_from(panes.len()).unwrap_or(0);
+        panes.push(Pane {
+            session: session.into(),
+            id: format!("%{pid}"),
+            pid,
+            dead: false,
+        });
+        Ok(format!("%{pid}"))
+    }
+
+    fn panes(&self) -> Result<Vec<Pane>, ToolError> {
+        if self.missing {
+            return Err(not_installed());
+        }
+        Ok(self
+            .panes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone())
+    }
+
+    fn stop(&self, session: &str) -> Result<(), ToolError> {
+        self.panes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|p| p.session != session);
+        Ok(())
+    }
+}
+
+/// Agent adapters in memory: a launch runs `/bin/agent`, and a read finds
+/// every asked session idle, unless told otherwise.
+#[derive(Default)]
+pub(crate) struct FakeAgents {
+    /// The adapter of each launch, in order.
+    pub(crate) launches: Mutex<Vec<PathBuf>>,
+    /// The adapter and the sessions of each read, in order.
+    pub(crate) reads: Mutex<Vec<(PathBuf, Vec<SessionRef>)>>,
+    /// How every launch fails, if it does.
+    pub(crate) launch_fault: Option<AdapterFault>,
+    /// How every read fails, if it does.
+    pub(crate) read_fault: Option<AdapterFault>,
+    /// Each adapter's answer to a read, verbatim; one it does not hold
+    /// answers with no readings. Unset, every asked session is idle.
+    pub(crate) readings: Option<BTreeMap<PathBuf, Vec<Reading>>>,
+}
+
+impl AgentAdapters for FakeAgents {
+    fn launch(&self, adapter: &Path, _: &agent::Launch) -> Result<Launched, AdapterFault> {
+        self.launches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(adapter.to_path_buf());
+        match &self.launch_fault {
+            Some(fault) => Err(fault.clone()),
+            None => Ok(Launched {
+                argv: vec!["/bin/agent".into()],
+                env: BTreeMap::new(),
+            }),
+        }
+    }
+
+    fn read(&self, adapter: &Path, request: &agent::Read) -> Result<Readings, AdapterFault> {
+        self.reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((adapter.to_path_buf(), request.sessions.clone()));
+        if let Some(fault) = &self.read_fault {
+            return Err(fault.clone());
+        }
+        if let Some(readings) = &self.readings {
+            return Ok(Readings {
+                sessions: readings.get(adapter).cloned().unwrap_or_default(),
+            });
+        }
+        Ok(Readings {
+            sessions: request
+                .sessions
+                .iter()
+                .map(|s| Reading {
+                    session: s.session.clone(),
+                    activity: Activity::Idle,
+                    reason: None,
+                })
+                .collect(),
+        })
+    }
+
+    fn protocol(&self, _: &Path) -> Result<Speaks, AdapterFault> {
+        Ok(Speaks { protocol: 1 })
+    }
+}
+
+/// Agent adapters a test keeps a handle on, to see what was asked of them.
+pub(crate) struct Shared(pub(crate) std::sync::Arc<FakeAgents>);
+impl AgentAdapters for Shared {
+    fn launch(&self, a: &Path, r: &agent::Launch) -> Result<Launched, AdapterFault> {
+        self.0.launch(a, r)
+    }
+    fn read(&self, a: &Path, r: &agent::Read) -> Result<Readings, AdapterFault> {
+        self.0.read(a, r)
+    }
+    fn protocol(&self, a: &Path) -> Result<Speaks, AdapterFault> {
+        self.0.protocol(a)
+    }
 }

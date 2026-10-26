@@ -66,7 +66,12 @@ impl Tmux {
 }
 
 impl Multiplexer for Tmux {
-    fn launch(&self, session: &str, directory: &Path, program: &Launched) -> Result<(), ToolError> {
+    fn launch(
+        &self,
+        session: &str,
+        directory: &Path,
+        program: &Launched,
+    ) -> Result<String, ToolError> {
         if !directory.is_dir() {
             return Err(ToolError::File {
                 doing: FileStep::Read,
@@ -84,6 +89,9 @@ impl Multiplexer for Tmux {
             ";",
             "new-session",
             "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
             "-s",
             session,
             "-c",
@@ -102,7 +110,11 @@ impl Multiplexer for Tmux {
                 .map(|e| OsString::from(escaped(e))),
         );
         args.extend(program.argv.iter().map(|a| OsString::from(escaped(a))));
-        self.run("new-session", &args).map(|_| ())
+        let out = self.run("new-session", &args)?;
+        pane_id(&out.stdout).ok_or_else(|| ToolError::Failed {
+            command: "tmux new-session".into(),
+            said: String::new(),
+        })
     }
 
     fn panes(&self) -> Result<Vec<Pane>, ToolError> {
@@ -110,7 +122,7 @@ impl Multiplexer for Tmux {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_dead}",
+            "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}",
         ]
         .iter()
         .map(OsString::from)
@@ -180,9 +192,21 @@ fn no_server(said: &str) -> bool {
 fn pane(line: &str) -> Option<Pane> {
     let mut fields = line.split('\t');
     let session = fields.next()?.to_owned();
+    let id = fields.next()?.to_owned();
     let pid = fields.next()?.parse().ok()?;
     let dead = fields.next()? == "1";
-    Some(Pane { session, pid, dead })
+    Some(Pane {
+        session,
+        id,
+        pid,
+        dead,
+    })
+}
+
+/// The pane id `new-session -P` printed, or none when it printed nothing.
+fn pane_id(stdout: &[u8]) -> Option<String> {
+    let id = String::from_utf8_lossy(stdout).trim().to_owned();
+    (!id.is_empty()).then_some(id)
 }
 
 #[cfg(test)]
@@ -273,7 +297,7 @@ mod tests {
         assert_eq!(pwd.trim(), dir.display().to_string());
         let panes = s.tmux.panes().unwrap_or_default();
         assert!(
-            matches!(panes.as_slice(), [Pane { session, dead: false, pid }] if session == "s1" && *pid > 0),
+            matches!(panes.as_slice(), [Pane { session, dead: false, pid, .. }] if session == "s1" && *pid > 0),
             "{panes:?}"
         );
         assert!(s.tmux.stop("s1").is_ok());
@@ -282,6 +306,41 @@ mod tests {
             s.tmux.stop("s1").is_ok(),
             "stopping a session that is not there is fine"
         );
+    }
+
+    #[test]
+    fn a_pane_id_is_read_trimmed_and_an_empty_one_is_none() {
+        assert_eq!(pane_id(b"%12\n").as_deref(), Some("%12"));
+        assert_eq!(pane_id(b"  %3 ").as_deref(), Some("%3"));
+        assert_eq!(pane_id(b"\n"), None);
+        assert_eq!(pane_id(b""), None);
+    }
+
+    #[test]
+    fn the_launch_names_the_agents_pane_and_a_split_off_pane_is_another() {
+        let Some(s) = server("split") else { return };
+        let launched = s.tmux.launch("s10", &s.dir, &sh("sleep 30"));
+        assert!(launched.is_ok(), "{launched:?}");
+        let id = launched.unwrap_or_default();
+        assert!(id.starts_with('%'), "{id}");
+        let split = Command::new("tmux")
+            .arg("-S")
+            .arg(&s.socket)
+            .args([
+                "-f",
+                "/dev/null",
+                "split-window",
+                "-d",
+                "-t",
+                "=s10:",
+                "sleep 30",
+            ])
+            .output();
+        assert!(split.is_ok_and(|o| o.status.success()));
+        let panes = s.tmux.panes().unwrap_or_default();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        assert!(panes.iter().all(|p| p.session == "s10"));
+        assert_eq!(panes.iter().filter(|p| p.id == id).count(), 1, "{panes:?}");
     }
 
     #[test]

@@ -104,6 +104,7 @@ mod tests {
     fn pane(dead: bool) -> Pane {
         Pane {
             session: "s1".into(),
+            id: "%1".into(),
             pid: 7,
             dead,
         }

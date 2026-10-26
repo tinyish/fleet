@@ -1,17 +1,16 @@
 //! Agents' sessions: launched through an adapter into tmux, listed with
 //! each one's state, and stopped.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-use fleet_core::agent::{self, Reading, SessionRef, Verb};
+use fleet_core::agent::{self, SessionState, Verb};
 use fleet_core::protocol::{Reply, Response, Status, response};
 use fleet_core::status;
-use fleet_core::tools::{Pane, ToolError};
+use fleet_core::tools::ToolError;
 use state::{SessionRow, State, StateError, Step, now_millis};
 
 use crate::{Error, Tools, adapters, lock};
@@ -67,6 +66,7 @@ pub(crate) fn launch(
         adapter: program,
         directory: ask.directory.clone(),
         launch_time_millis: now_millis(),
+        pane: String::new(),
     };
     let step = Step::SessionLaunched {
         session: row.id.clone(),
@@ -94,54 +94,21 @@ pub(crate) fn launch(
     }
 }
 
-/// Every session with its state: tmux says which panes are alive, and each
-/// adapter, asked once for all of its live sessions, what its agents are
-/// doing.
+/// Every session with its state, as observe reads them.
 pub(crate) fn list(state: &Mutex<State>, tools: &Tools) -> Result<Reply, Error> {
     let rows = lock(state).sessions()?;
-    let panes = match tools.mux.panes() {
-        Ok(panes) => panes,
+    let observed = match crate::observe::observe(tools, &rows, now_millis()) {
+        Ok(observed) => observed,
         Err(e) => return Ok(Reply::Status(tool_status(e))),
     };
-    let panes: BTreeMap<&str, &Pane> = panes.iter().map(|p| (p.session.as_str(), p)).collect();
-    let mut asks: BTreeMap<&Path, Vec<SessionRef>> = BTreeMap::new();
-    for row in &rows {
-        if let Some(pane) = panes.get(row.id.as_str()).filter(|p| !p.dead) {
-            asks.entry(&row.adapter).or_default().push(SessionRef {
-                session: row.id.clone(),
-                pid: pane.pid,
-                directory: row.directory.clone(),
-            });
-        }
-    }
-    let mut readings: BTreeMap<String, Reading> = BTreeMap::new();
-    let mut faults = Vec::new();
-    for (adapter, sessions) in asks {
-        let asked: Vec<String> = sessions.iter().map(|s| s.session.clone()).collect();
-        match tools.agents.read(adapter, &agent::Read { sessions }) {
-            Ok(answer) => readings.extend(
-                answer
-                    .sessions
-                    .into_iter()
-                    .filter(|r| asked.contains(&r.session))
-                    .map(|r| (r.session.clone(), r)),
-            ),
-            Err(fault) => faults.push(response::Fault {
-                adapter: adapter.to_path_buf(),
-                fault,
-            }),
-        }
-    }
-    let now = now_millis();
     let sessions = rows
         .into_iter()
         .map(|row| response::Listed {
-            state: agent::state_of(
-                panes.get(row.id.as_str()).copied(),
-                readings.get(&row.id),
-                row.launch_time_millis,
-                now,
-            ),
+            state: observed
+                .states
+                .get(&row.id)
+                .copied()
+                .unwrap_or(SessionState::Unknown),
             session: row.id,
             adapter: row.adapter,
             directory: row.directory,
@@ -149,7 +116,10 @@ pub(crate) fn list(state: &Mutex<State>, tools: &Tools) -> Result<Reply, Error> 
         })
         .collect();
     Ok(Reply::Response(Response::Session(
-        response::Session::Listed { sessions, faults },
+        response::Session::Listed {
+            sessions,
+            faults: observed.faults,
+        },
     )))
 }
 
@@ -218,137 +188,15 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
 
-    use fleet_core::agent::{
-        self, Activity, AdapterFault, Launched, Reading, Readings, SessionState, Speaks, Verb,
-    };
+    use fleet_core::agent::{AdapterFault, SessionState, Verb};
     use fleet_core::protocol::{Reply, Response, Status, response};
-    use fleet_core::tools::{AgentAdapters, Multiplexer, Pane, ToolError};
+    use fleet_core::tools::Pane;
 
     use crate::Tools;
-    use crate::testing::tree;
-
-    #[derive(Default)]
-    struct FakeMux {
-        panes: Mutex<Vec<Pane>>,
-        fail_launch: bool,
-        /// Like a tmux that is not installed.
-        missing: bool,
-    }
-
-    fn not_installed() -> ToolError {
-        ToolError::CouldNotRun {
-            program: "tmux".into(),
-            error: std::io::Error::from(std::io::ErrorKind::NotFound),
-        }
-    }
-
-    impl Multiplexer for FakeMux {
-        fn launch(&self, session: &str, _: &Path, _: &Launched) -> Result<(), ToolError> {
-            if self.missing {
-                return Err(not_installed());
-            }
-            if self.fail_launch {
-                return Err(ToolError::Failed {
-                    command: "tmux new-session".into(),
-                    said: "no".into(),
-                });
-            }
-            let mut panes = self.panes.lock().unwrap_or_else(PoisonError::into_inner);
-            let pid = 100 + u32::try_from(panes.len()).unwrap_or(0);
-            panes.push(Pane {
-                session: session.into(),
-                pid,
-                dead: false,
-            });
-            Ok(())
-        }
-
-        fn panes(&self) -> Result<Vec<Pane>, ToolError> {
-            if self.missing {
-                return Err(not_installed());
-            }
-            Ok(self
-                .panes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone())
-        }
-
-        fn stop(&self, session: &str) -> Result<(), ToolError> {
-            self.panes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .retain(|p| p.session != session);
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeAgents {
-        launches: Mutex<Vec<PathBuf>>,
-        reads: Mutex<Vec<(PathBuf, usize)>>,
-        launch_fault: Option<AdapterFault>,
-        read_fault: Option<AdapterFault>,
-    }
-
-    impl AgentAdapters for FakeAgents {
-        fn launch(&self, adapter: &Path, _: &agent::Launch) -> Result<Launched, AdapterFault> {
-            self.launches
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(adapter.to_path_buf());
-            match &self.launch_fault {
-                Some(fault) => Err(fault.clone()),
-                None => Ok(Launched {
-                    argv: vec!["/bin/agent".into()],
-                    env: BTreeMap::new(),
-                }),
-            }
-        }
-
-        fn read(&self, adapter: &Path, request: &agent::Read) -> Result<Readings, AdapterFault> {
-            self.reads
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((adapter.to_path_buf(), request.sessions.len()));
-            if let Some(fault) = &self.read_fault {
-                return Err(fault.clone());
-            }
-            Ok(Readings {
-                sessions: request
-                    .sessions
-                    .iter()
-                    .map(|s| Reading {
-                        session: s.session.clone(),
-                        activity: Activity::Idle,
-                        reason: None,
-                    })
-                    .collect(),
-            })
-        }
-
-        fn protocol(&self, _: &Path) -> Result<Speaks, AdapterFault> {
-            Ok(Speaks { protocol: 1 })
-        }
-    }
-
-    /// Agent adapters a test keeps a handle on, to see what was asked of them.
-    struct Shared(std::sync::Arc<FakeAgents>);
-    impl AgentAdapters for Shared {
-        fn launch(&self, a: &Path, r: &agent::Launch) -> Result<Launched, AdapterFault> {
-            self.0.launch(a, r)
-        }
-        fn read(&self, a: &Path, r: &agent::Read) -> Result<Readings, AdapterFault> {
-            self.0.read(a, r)
-        }
-        fn protocol(&self, a: &Path) -> Result<Speaks, AdapterFault> {
-            self.0.protocol(a)
-        }
-    }
+    use crate::testing::{FakeAgents, FakeMux, Shared, tree};
 
     fn tools(mux: FakeMux, adapters: FakeAgents) -> Tools {
         Tools {
@@ -678,11 +526,13 @@ mod tests {
             assert!(launch(&state, &tools, &store(&root), &ask(adapter, &app)).is_ok());
         }
         assert!(list(&state, &tools).is_ok());
-        let mut reads = adapters
+        let mut reads: Vec<(PathBuf, usize)> = adapters
             .reads
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+            .iter()
+            .map(|(adapter, asked)| (adapter.clone(), asked.len()))
+            .collect();
         reads.sort();
         assert_eq!(
             reads,
