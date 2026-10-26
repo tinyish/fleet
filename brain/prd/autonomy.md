@@ -37,7 +37,7 @@ the user's to build.
   with nothing to show, it has sat idle, or it has hit its usage limit.
 - **Success:** every such stall is noticed, saying which of these it is and
   since when. How long is too long is the user's to set, for a fleet or for
-  one agent definition, or to turn off; a new fleet starts with values that
+  one role, or to turn off; a new fleet starts with values that
   work without setting anything. When tinyfleet cannot tell whether an agent
   is moving, it says so instead of guessing. A stall's end is noticed too:
   the question answered, the agent moving again, the limit lifted.
@@ -57,15 +57,20 @@ the user's to build.
 ### Keeping standing work going
 
 - **Trying to:** have work happen on its own on a schedule, such as triaging
-  the tracker every morning, handing the oldest task to an agent every hour,
-  or writing up the day's landings each evening.
-- **Success:** a routine, the user's own command, runs on its schedule while
-  its fleet is on, and never while it is off. A routine never runs twice at
-  once: a time missed because the machine slept, the fleet was off or the
-  last run was still going is skipped, and the skip is recorded; it never
-  runs late or piles up. Every run is recorded: when it ran and how it
-  ended. A routine can do anything the user can do by hand. tinyfleet ships
-  no routines of its own.
+  the tracker every morning, handing the oldest task to an agent and landing
+  what it delivers, or writing up the day's landings each evening.
+- **Success:** a routine, a workflow the user writes, runs on its schedule
+  while its fleet is on, and never while it is off; turning a fleet off lets
+  a run already going finish. A routine never has two runs going at once: a
+  time that comes while its last run is still going is skipped, and the skip
+  is recorded. A routine can do anything the user can do by hand, do several
+  things at once, wait for hours or until a set time, remember what it did in
+  earlier runs, and wait for the user's answer before going on. A run that
+  dies part way, because the machine restarted or it crashed, never repeats
+  what it already did: it waits for the user to resume it from where it
+  stopped or to abandon it, and the routine's next times still run. Every run
+  is recorded: when it ran, each step it took, and how it ended. tinyfleet
+  ships no routines of its own.
 - **Passes through:** routine, start, stop.
 
 ## What success looks like
@@ -82,8 +87,9 @@ the user's to build.
   is Delivery's, not a reaction to a stall.
 - Reaching the person. A desktop notification or a message to a phone is
   something the user builds on the stalls tinyfleet notices.
-- Routines set off by anything but their schedule. Reacting to a stall or
-  another event is the user's own program, following the fleet as it happens.
+- Routines set off by anything but their schedule. A routine started by a
+  stall, by a change in a session, a tracker or a forge, or by hand comes
+  later.
 - Running a missed routine late.
 - Shipping routines. Like roles, they belong to the user, built or brought.
 - Running anything while the machine is off or asleep.
