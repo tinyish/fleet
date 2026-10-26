@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::status::Status;
+use crate::status::{self, Status};
 
 /// A fleet: its directory and the projects it serves, as canonical absolute
 /// paths, projects sorted.
@@ -86,17 +86,17 @@ pub fn decide_remove(registered: &[Fleet], directory: &Path, named: &[PathBuf]) 
                 || f.projects.iter().any(|p| directory.starts_with(p))
         });
         return match around {
-            Some(f) => RemoveDecision::Refuse(Status::NotFleetDirectory {
+            Some(f) => RemoveDecision::Refuse(Status::Fleet(status::Fleet::NotFleetDirectory {
                 directory: directory.to_path_buf(),
                 fleet: f.directory.clone(),
-            }),
+            })),
             None => RemoveDecision::NothingHere,
         };
     };
     if let Some(stranger) = named.iter().find(|p| !fleet.projects.contains(p)) {
-        return RemoveDecision::Refuse(Status::NotServed {
+        return RemoveDecision::Refuse(Status::Project(status::Project::NotServed {
             path: stranger.clone(),
-        });
+        }));
     }
     if named.is_empty() || fleet.projects.iter().all(|p| named.contains(p)) {
         return RemoveDecision::Whole(fleet.clone());
@@ -126,13 +126,13 @@ pub fn resolve_projects(
     if configured.is_empty() {
         return match repo_root_of(directory) {
             Some(root) if root == directory => Ok(vec![directory.to_path_buf()]),
-            Some(root) => Err(Status::DirectoryNotRepoRoot {
+            Some(root) => Err(Status::Fleet(status::Fleet::DirectoryNotRepoRoot {
                 path: directory.to_path_buf(),
                 root,
-            }),
-            None => Err(Status::DirectoryNotInRepo {
+            })),
+            None => Err(Status::Fleet(status::Fleet::DirectoryNotInRepo {
                 path: directory.to_path_buf(),
-            }),
+            })),
         };
     }
     let mut sorted = configured.to_vec();
@@ -164,11 +164,13 @@ pub fn read_projects(
 ) -> Result<Vec<PathBuf>, Status> {
     let path = directory.join(crate::paths::CONFIG_FILE);
     let text = read(&path).map_err(|e| Status::unusable(&path, &e))?;
-    let parsed = crate::config::parse(&text).map_err(|e| Status::BadConfig {
-        path: path.clone(),
-        line: e.line,
-        column: e.column,
-        error: e.message,
+    let parsed = crate::config::parse(&text).map_err(|e| {
+        Status::File(status::File::BadConfig {
+            path: path.clone(),
+            line: e.line,
+            column: e.column,
+            error: e.message,
+        })
     })?;
     let mut canonical = Vec::new();
     for project in crate::config::projects_of(&parsed, directory) {
@@ -185,9 +187,11 @@ pub fn check_shared(others: &[Fleet], wanted: &Fleet) -> Option<Status> {
             .projects
             .iter()
             .find(|p| other.projects.contains(p))
-            .map(|shared| Status::AlreadyServed {
-                project: shared.clone(),
-                fleet: other.directory.clone(),
+            .map(|shared| {
+                Status::Fleet(status::Fleet::AlreadyServed {
+                    project: shared.clone(),
+                    fleet: other.directory.clone(),
+                })
             })
     })
 }
@@ -208,9 +212,11 @@ pub fn conflicts(claims: &[Fleet]) -> Vec<(PathBuf, Status)> {
                         .projects
                         .iter()
                         .find(|p| other.projects.contains(p))
-                        .map(|shared| Status::AlsoClaimed {
-                            project: shared.clone(),
-                            fleet: other.directory.clone(),
+                        .map(|shared| {
+                            Status::Fleet(status::Fleet::AlsoClaimed {
+                                project: shared.clone(),
+                                fleet: other.directory.clone(),
+                            })
                         })
                 })
                 .map(|status| (fleet.directory.clone(), status))
@@ -247,28 +253,28 @@ pub fn sync(current: &[PathBuf], wanted: &[PathBuf]) -> Change {
 fn project_refusal(directory: &Path, project: &Path, root: Option<PathBuf>) -> Option<Status> {
     match root {
         None => {
-            return Some(Status::ProjectNotInRepo {
+            return Some(Status::Fleet(status::Fleet::ProjectNotInRepo {
                 path: project.to_path_buf(),
-            });
+            }));
         }
         Some(root) if root != project => {
-            return Some(Status::ProjectNotRepoRoot {
+            return Some(Status::Fleet(status::Fleet::ProjectNotRepoRoot {
                 path: project.to_path_buf(),
                 root,
-            });
+            }));
         }
         Some(_) => {}
     }
     if directory == project {
-        return Some(Status::ProjectIsFleetDirectory {
+        return Some(Status::Fleet(status::Fleet::ProjectIsFleetDirectory {
             path: project.to_path_buf(),
-        });
+        }));
     }
     if directory.starts_with(project) {
-        return Some(Status::WingmanInsideProject {
+        return Some(Status::Fleet(status::Fleet::WingmanInsideProject {
             directory: directory.to_path_buf(),
             project: project.to_path_buf(),
-        });
+        }));
     }
     None
 }
@@ -285,35 +291,35 @@ fn refusal_against(registered: &[Fleet], wanted: &Fleet) -> Option<CreateDecisio
         if sorted(&same.projects) == sorted(&wanted.projects) {
             return Some(CreateDecision::AlreadyHere(same.clone()));
         }
-        return refuse(Status::AlreadyHereServingOthers {
+        return refuse(Status::Fleet(status::Fleet::AlreadyHereServingOthers {
             directory: wanted.directory.clone(),
             serving: same.projects.clone(),
             asked: wanted.projects.clone(),
-        });
+        }));
     }
     for other in registered {
         if wanted.directory.starts_with(&other.directory) {
-            return refuse(Status::InsideFleet {
+            return refuse(Status::Fleet(status::Fleet::InsideFleet {
                 directory: wanted.directory.clone(),
                 fleet: other.directory.clone(),
-            });
+            }));
         }
         if other.directory.starts_with(&wanted.directory) {
-            return refuse(Status::ContainsFleet {
+            return refuse(Status::Fleet(status::Fleet::ContainsFleet {
                 directory: wanted.directory.clone(),
                 fleet: other.directory.clone(),
-            });
+            }));
         }
         let inside = other
             .projects
             .iter()
             .find(|p| wanted.directory.starts_with(p) && wanted.directory != **p);
         if let Some(project) = inside {
-            return refuse(Status::InsideServedProject {
+            return refuse(Status::Fleet(status::Fleet::InsideServedProject {
                 directory: wanted.directory.clone(),
                 project: project.clone(),
                 fleet: other.directory.clone(),
-            });
+            }));
         }
     }
     check_shared(registered, wanted).map(CreateDecision::Refuse)
@@ -379,17 +385,17 @@ mod tests {
             vec![
                 (
                     p("/f/a"),
-                    Status::AlsoClaimed {
+                    Status::Fleet(status::Fleet::AlsoClaimed {
                         project: p("/c/api"),
                         fleet: p("/f/w")
-                    }
+                    })
                 ),
                 (
                     p("/f/w"),
-                    Status::AlsoClaimed {
+                    Status::Fleet(status::Fleet::AlsoClaimed {
                         project: p("/c/api"),
                         fleet: p("/f/a")
-                    }
+                    })
                 ),
             ]
         );
@@ -401,10 +407,10 @@ mod tests {
         let wanted = fleet("/f/two", &["/c/app", "/c/api"]);
         assert_eq!(
             check_shared(&others, &wanted),
-            Some(Status::AlreadyServed {
+            Some(Status::Fleet(status::Fleet::AlreadyServed {
                 project: p("/c/api"),
                 fleet: p("/f/one")
-            })
+            }))
         );
         assert_eq!(check_shared(&others, &fleet("/f/two", &["/c/app"])), None);
     }
@@ -429,17 +435,17 @@ mod tests {
         let d = decide_create(&[], &p("/c/blog/src"), &[], repos(&["/c/blog"]));
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::DirectoryNotRepoRoot {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::DirectoryNotRepoRoot {
                 path: p("/c/blog/src"),
                 root: p("/c/blog")
-            })
+            }))
         );
         let d = decide_create(&[], &p("/c/notes"), &[], repos(&[]));
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::DirectoryNotInRepo {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::DirectoryNotInRepo {
                 path: p("/c/notes")
-            })
+            }))
         );
     }
 
@@ -462,9 +468,9 @@ mod tests {
         let d = decide_create(&[], &p("/f/work"), &[p("/c/notes")], repos(&[]));
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::ProjectNotInRepo {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::ProjectNotInRepo {
                 path: p("/c/notes")
-            })
+            }))
         );
     }
 
@@ -473,10 +479,10 @@ mod tests {
         let d = decide_create(&[], &p("/c/app/.fleet"), &[p("/c/app")], repos(&["/c/app"]));
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::WingmanInsideProject {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::WingmanInsideProject {
                 directory: p("/c/app/.fleet"),
                 project: p("/c/app")
-            })
+            }))
         );
     }
 
@@ -501,11 +507,11 @@ mod tests {
         );
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::AlreadyHereServingOthers {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::AlreadyHereServingOthers {
                 directory: p("/f/work"),
                 serving: vec![p("/c/app")],
                 asked: vec![p("/c/api")],
-            })
+            }))
         );
     }
 
@@ -520,18 +526,18 @@ mod tests {
         );
         assert_eq!(
             below,
-            CreateDecision::Refuse(Status::InsideFleet {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::InsideFleet {
                 directory: p("/f/work/sub"),
                 fleet: p("/f/work")
-            })
+            }))
         );
         let above = decide_create(&existing, &p("/f"), &[p("/c/api")], repos(&["/c/api"]));
         assert_eq!(
             above,
-            CreateDecision::Refuse(Status::ContainsFleet {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::ContainsFleet {
                 directory: p("/f"),
                 fleet: p("/f/work")
-            })
+            }))
         );
     }
 
@@ -549,10 +555,10 @@ mod tests {
         );
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::InsideFleet {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::InsideFleet {
                 directory: p("/f/work/sub"),
                 fleet: p("/f/work")
-            })
+            }))
         );
     }
 
@@ -580,11 +586,11 @@ mod tests {
         );
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::InsideServedProject {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::InsideServedProject {
                 directory: p("/c/api/tools"),
                 project: p("/c/api"),
                 fleet: p("/f/wing"),
-            })
+            }))
         );
     }
 
@@ -593,7 +599,9 @@ mod tests {
         let d = decide_create(&[], &p("/c/app"), &[p("/c/app")], repos(&["/c/app"]));
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::ProjectIsFleetDirectory { path: p("/c/app") })
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::ProjectIsFleetDirectory {
+                path: p("/c/app")
+            }))
         );
     }
 
@@ -602,10 +610,10 @@ mod tests {
         let d = decide_create(&[], &p("/f/work"), &[p("/c/app/src")], repos(&["/c/app"]));
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::ProjectNotRepoRoot {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::ProjectNotRepoRoot {
                 path: p("/c/app/src"),
                 root: p("/c/app")
-            })
+            }))
         );
     }
 
@@ -615,10 +623,10 @@ mod tests {
         let d = decide_create(&existing, &p("/c/app"), &[], repos(&["/c/app"]));
         assert_eq!(
             d,
-            CreateDecision::Refuse(Status::AlreadyServed {
+            CreateDecision::Refuse(Status::Fleet(status::Fleet::AlreadyServed {
                 project: p("/c/app"),
                 fleet: p("/f/work")
-            })
+            }))
         );
     }
 
@@ -657,7 +665,9 @@ mod tests {
         let registered = [fleet("/w", &["/c/api"]), fleet("/c/app", &["/c/app"])];
         assert_eq!(
             decide_remove(&registered, Path::new("/w"), &[p("/c/app")]),
-            RemoveDecision::Refuse(Status::NotServed { path: p("/c/app") })
+            RemoveDecision::Refuse(Status::Project(status::Project::NotServed {
+                path: p("/c/app")
+            }))
         );
     }
 
@@ -666,17 +676,17 @@ mod tests {
         let registered = [fleet("/c/app", &["/c/app"]), fleet("/w", &["/c/api"])];
         assert_eq!(
             decide_remove(&registered, Path::new("/c/app/src"), &[]),
-            RemoveDecision::Refuse(Status::NotFleetDirectory {
+            RemoveDecision::Refuse(Status::Fleet(status::Fleet::NotFleetDirectory {
                 directory: p("/c/app/src"),
                 fleet: p("/c/app"),
-            })
+            }))
         );
         assert_eq!(
             decide_remove(&registered, Path::new("/c/api/lib"), &[]),
-            RemoveDecision::Refuse(Status::NotFleetDirectory {
+            RemoveDecision::Refuse(Status::Fleet(status::Fleet::NotFleetDirectory {
                 directory: p("/c/api/lib"),
                 fleet: p("/w"),
-            })
+            }))
         );
         assert_eq!(
             decide_remove(&registered, Path::new("/elsewhere"), &[]),

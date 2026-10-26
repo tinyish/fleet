@@ -1,15 +1,14 @@
 //! The words for what goes wrong with agents' sessions.
 
 use fleet_core::agent::{AdapterFault, Verb};
-use fleet_core::protocol;
+use fleet_core::status::Session;
 
 use crate::ui::output::Ink;
 
-/// Why the supervisor said no to a session request; none for a refusal
-/// that is not about sessions.
-pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
-    Some(match status {
-        protocol::Status::AdapterFailed {
+/// Why the supervisor said no to a session request.
+pub(super) fn refused(refusal: &Session, ink: Ink) -> String {
+    match refusal {
+        Session::AdapterFailed {
             adapter,
             verb,
             fault,
@@ -23,20 +22,29 @@ pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
             },
             fault_words(fault)
         ),
-        protocol::Status::MultiplexerCouldNotRun { error } => {
+        Session::MultiplexerCouldNotRun { error } => {
             format!("{} could not be run: {error}", ink.accent("tmux"))
         }
-        protocol::Status::MultiplexerFailed { command, said } if said.is_empty() => {
+        Session::MultiplexerFailed { command, said } if said.is_empty() => {
             format!("{} failed", ink.accent(command))
         }
-        protocol::Status::MultiplexerFailed { command, said } => {
+        Session::MultiplexerFailed { command, said } => {
             format!("{} failed: {said}", ink.accent(command))
         }
-        protocol::Status::NoSuchSession { session } => {
+        Session::NoSuchSession { session } => {
             format!("there is no session {}", ink.accent(session))
         }
-        _ => return None,
-    })
+    }
+}
+
+/// What to do about it: nothing yet, for any session refusal.
+pub(super) fn hint(refusal: &Session, _ink: Ink) -> Option<String> {
+    match refusal {
+        Session::AdapterFailed { .. }
+        | Session::MultiplexerCouldNotRun { .. }
+        | Session::MultiplexerFailed { .. }
+        | Session::NoSuchSession { .. } => None,
+    }
 }
 
 fn fault_words(fault: &AdapterFault) -> String {
@@ -71,16 +79,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn adapter_failed(fault: AdapterFault) -> String {
-        refused(
-            &protocol::Status::AdapterFailed {
+        let words = refused(
+            &Session::AdapterFailed {
                 adapter: PathBuf::from("/a/claude"),
                 verb: Verb::Read,
                 fault,
             },
             OUT.piped(),
-        )
-        .map(|w| console::strip_ansi_codes(&w).into_owned())
-        .unwrap_or_default()
+        );
+        console::strip_ansi_codes(&words).into_owned()
     }
 
     #[test]
@@ -104,17 +111,6 @@ mod tests {
                 said: String::new()
             }),
             "the adapter /a/claude failed to read its sessions: a signal ended it"
-        );
-    }
-
-    #[test]
-    fn other_refusals_are_not_this_modules() {
-        assert_eq!(
-            refused(
-                &protocol::Status::NotServed { path: "/x".into() },
-                OUT.piped()
-            ),
-            None
         );
     }
 }

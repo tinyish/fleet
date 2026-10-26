@@ -1,9 +1,6 @@
-//! What `fleet create` says when it is done, and when a `fleet.toml` is
-//! already there.
+//! What `fleet create` says when it is done.
 
-use std::path::{Path, PathBuf};
-
-use fleet_core::protocol::{self, response};
+use fleet_core::protocol::response;
 
 use crate::ui::output::Ink;
 
@@ -46,62 +43,11 @@ pub(super) fn created(response: &response::Create, ink: Ink) -> String {
     )
 }
 
-/// A `fleet.toml` no fleet owns lists other projects than those asked for.
-pub(super) fn config_differs(path: &Path, listed: &[PathBuf], ink: Ink) -> String {
-    format!(
-        "{} is already here, serving {}",
-        ink.path(path),
-        ink.paths(listed)
-    )
-}
-
-/// The way out of `config_differs`: take the file up as it is.
-pub(super) fn take_it_up(ink: Ink) -> String {
-    format!(
-        "run {} without {} to take it up as it is",
-        ink.accent("fleet create"),
-        ink.accent("--project")
-    )
-}
-
-/// Why a fleet or a project cannot go where it was asked: inside, around or
-/// on top of another fleet. None for any other refusal.
-pub(super) fn placement(status: &protocol::Status, ink: Ink) -> Option<String> {
-    Some(match status {
-        protocol::Status::InsideFleet { directory, fleet }
-        | protocol::Status::NotFleetDirectory { directory, fleet } => format!(
-            "{} is inside the fleet in {}",
-            ink.path(directory),
-            ink.path(fleet)
-        ),
-        protocol::Status::ContainsFleet { directory, fleet } => format!(
-            "{} contains the fleet in {}",
-            ink.path(directory),
-            ink.path(fleet)
-        ),
-        protocol::Status::InsideServedProject {
-            directory,
-            project,
-            fleet,
-        } => format!(
-            "{} is inside {}, which the fleet in {} serves",
-            ink.path(directory),
-            ink.path(project),
-            ink.path(fleet)
-        ),
-        protocol::Status::AlreadyServed { project, fleet } => format!(
-            "{} is already served by the fleet in {}",
-            ink.path(project),
-            ink.path(fleet)
-        ),
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::output::{ERR, OUT};
+    use crate::ui::output::OUT;
+    use std::path::PathBuf;
 
     fn plain(s: &str) -> String {
         console::strip_ansi_codes(s).into_owned()
@@ -138,23 +84,6 @@ mod tests {
                 OUT.piped()
             )),
             "created a fleet in /code/app -- welcome aboard"
-        );
-    }
-
-    #[test]
-    fn a_differing_file_names_what_it_lists_and_how_to_take_it_up() {
-        let listed = [PathBuf::from("/code/api"), PathBuf::from("/code/web")];
-        assert_eq!(
-            plain(&config_differs(
-                Path::new("/code/wing/fleet.toml"),
-                &listed,
-                ERR.piped()
-            )),
-            "/code/wing/fleet.toml is already here, serving /code/api, /code/web"
-        );
-        assert_eq!(
-            plain(&take_it_up(ERR.piped())),
-            "run fleet create without --project to take it up as it is"
         );
     }
 }

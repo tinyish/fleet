@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use fleet_core::fleets::{self, Fleet, conflicts};
 use fleet_core::protocol::{Reply, Response, Status, response};
+use fleet_core::status;
 use state::{State, StateError, Step, Write};
 
 use crate::{Error, lock, repo_root_of};
@@ -199,13 +200,13 @@ fn not_served(fleets: &[Fleet], path: &Path) -> Status {
         .flat_map(|f| f.projects.iter())
         .find(|p| path.starts_with(p));
     match inside {
-        Some(project) => Status::InsideProject {
+        Some(project) => Status::Project(status::Project::InsideProject {
             path: path.to_path_buf(),
             project: project.clone(),
-        },
-        None => Status::NotServed {
+        }),
+        None => Status::Project(status::Project::NotServed {
             path: path.to_path_buf(),
-        },
+        }),
     }
 }
 
@@ -225,11 +226,13 @@ pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, 
         .iter()
         .find(|(f, _)| f.projects.contains(&project))
     {
-        return Ok(Reply::Status(Status::CannotTurnOn {
-            project,
-            fleet: fleet.directory.clone(),
-            why: Box::new(why.clone()),
-        }));
+        return Ok(Reply::Status(Status::Project(
+            status::Project::CannotTurnOn {
+                project,
+                fleet: fleet.directory.clone(),
+                why: Box::new(why.clone()),
+            },
+        )));
     }
     if !reread.ok.iter().any(|f| f.projects.contains(&project)) {
         let dropped = reread
@@ -237,10 +240,12 @@ pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, 
             .iter()
             .find(|(_, c)| c.removed.contains(&project));
         if let Some((fleet, _)) = dropped {
-            return Ok(Reply::Status(Status::NoLongerServed {
-                project,
-                fleet: fleet.clone(),
-            }));
+            return Ok(Reply::Status(Status::Project(
+                status::Project::NoLongerServed {
+                    project,
+                    fleet: fleet.clone(),
+                },
+            )));
         }
         let all: Vec<Fleet> = reread
             .ok
@@ -349,7 +354,12 @@ mod tests {
         write_config(&root, &["app", "web"]);
         let reply = project_on(&state, &root.join("code").join("blog")).ok();
         assert!(
-            matches!(reply, Some(Reply::Status(Status::NotServed { .. }))),
+            matches!(
+                reply,
+                Some(Reply::Status(Status::Project(
+                    status::Project::NotServed { .. }
+                )))
+            ),
             "{reply:?}"
         );
         assert_eq!(lock(&state).fleets().ok(), Some(vec![before]));

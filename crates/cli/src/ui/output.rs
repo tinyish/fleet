@@ -308,7 +308,7 @@ fn doctor_lines(report: &[Found], terminal: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_core::protocol;
+    use fleet_core::{protocol, status};
 
     #[test]
     fn a_path_keeps_its_last_two_directories_or_shows_as_it_is() {
@@ -389,9 +389,9 @@ mod tests {
     fn a_partial_start_is_a_done_line_then_an_error_line_per_fleet_left_off() {
         let off = |fleet: &str| protocol::response::StayedOff {
             fleet: PathBuf::from(fleet),
-            why: protocol::Status::Missing {
+            why: protocol::Status::File(status::File::Missing {
                 path: PathBuf::from(fleet).join("fleet.toml"),
-            },
+            }),
         };
         let ending = Err(Status::PartlyOn {
             response: protocol::response::AllOn {

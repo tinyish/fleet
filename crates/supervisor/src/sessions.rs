@@ -10,6 +10,7 @@ use std::sync::Mutex;
 
 use fleet_core::agent::{self, Reading, SessionRef, Verb};
 use fleet_core::protocol::{Reply, Response, Status, response};
+use fleet_core::status;
 use fleet_core::tools::{Pane, ToolError};
 use state::{SessionRow, State, StateError, Step, now_millis};
 
@@ -36,9 +37,9 @@ pub(crate) fn launch(
     ask: &Ask,
 ) -> Result<Reply, Error> {
     if !ask.directory.is_dir() {
-        return Ok(Reply::Status(Status::Missing {
+        return Ok(Reply::Status(Status::File(status::File::Missing {
             path: ask.directory.clone(),
-        }));
+        })));
     }
     let program = match adapters::resolve(store, tools, &ask.adapter) {
         Ok(program) => program,
@@ -52,11 +53,13 @@ pub(crate) fn launch(
     let launched = match tools.agents.launch(&program, &request) {
         Ok(launched) => launched,
         Err(fault) => {
-            return Ok(Reply::Status(Status::AdapterFailed {
-                adapter: program.clone(),
-                verb: Verb::Launch,
-                fault,
-            }));
+            return Ok(Reply::Status(Status::Session(
+                status::Session::AdapterFailed {
+                    adapter: program.clone(),
+                    verb: Verb::Launch,
+                    fault,
+                },
+            )));
         }
     };
     let row = SessionRow {
@@ -169,9 +172,11 @@ pub(crate) fn stop(state: &Mutex<State>, tools: &Tools, session: &str) -> Result
                 session: session.to_owned(),
             },
         ))),
-        Ok(false) => Ok(Reply::Status(Status::NoSuchSession {
-            session: session.to_owned(),
-        })),
+        Ok(false) => Ok(Reply::Status(Status::Session(
+            status::Session::NoSuchSession {
+                session: session.to_owned(),
+            },
+        ))),
         Err(StateError::Tool(e)) => Ok(Reply::Status(tool_status(e))),
         Err(e) => Err(e.into()),
     }
@@ -180,15 +185,19 @@ pub(crate) fn stop(state: &Mutex<State>, tools: &Tools, session: &str) -> Result
 /// What tmux failing comes to, as the facts the CLI words.
 fn tool_status(error: ToolError) -> Status {
     match error {
-        ToolError::Failed { command, said } => Status::MultiplexerFailed { command, said },
-        ToolError::CouldNotRun { error, .. } => Status::MultiplexerCouldNotRun {
-            error: error.to_string(),
-        },
-        ToolError::File { path, .. } => Status::Missing { path },
-        other => Status::MultiplexerFailed {
+        ToolError::Failed { command, said } => {
+            Status::Session(status::Session::MultiplexerFailed { command, said })
+        }
+        ToolError::CouldNotRun { error, .. } => {
+            Status::Session(status::Session::MultiplexerCouldNotRun {
+                error: error.to_string(),
+            })
+        }
+        ToolError::File { path, .. } => Status::File(status::File::Missing { path }),
+        other => Status::Session(status::Session::MultiplexerFailed {
             command: "tmux".into(),
             said: format!("{other:?}"),
-        },
+        }),
     }
 }
 
@@ -390,11 +399,13 @@ mod tests {
         let tools = tools(FakeMux::default(), FakeAgents::default());
         let app = root.join("code/app");
         let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app));
-        let id = launched(&reply.unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })));
+        let id = launched(&reply.unwrap_or(Reply::Status(Status::Project(
+            status::Project::NotServed { path: app.clone() },
+        ))));
         assert!(id.starts_with('s') && id.len() == 11, "{id}");
-        let (sessions, faults) = listed(
-            &list(&state, &tools).unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })),
-        );
+        let (sessions, faults) = listed(&list(&state, &tools).unwrap_or(Reply::Status(
+            Status::Project(status::Project::NotServed { path: app.clone() }),
+        )));
         assert_eq!(faults, []);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session, id);
@@ -429,9 +440,9 @@ mod tests {
             }),
             net: Box::new(crate::testing::FakeNet::default()),
         };
-        let (sessions, faults) = listed(
-            &list(&state, &tools).unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })),
-        );
+        let (sessions, faults) = listed(&list(&state, &tools).unwrap_or(Reply::Status(
+            Status::Project(status::Project::NotServed { path: app.clone() }),
+        )));
         assert_eq!(sessions[0].state, SessionState::Gone);
         assert_eq!(faults, []);
     }
@@ -451,9 +462,9 @@ mod tests {
             },
         );
         assert!(launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).is_ok());
-        let (sessions, faults) = listed(
-            &list(&state, &tools).unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })),
-        );
+        let (sessions, faults) = listed(&list(&state, &tools).unwrap_or(Reply::Status(
+            Status::Project(status::Project::NotServed { path: app.clone() }),
+        )));
         assert_eq!(sessions[0].state, SessionState::Unknown);
         assert_eq!(
             faults,
@@ -477,7 +488,12 @@ mod tests {
         );
         let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).ok();
         assert!(
-            matches!(reply, Some(Reply::Status(Status::MultiplexerFailed { .. }))),
+            matches!(
+                reply,
+                Some(Reply::Status(Status::Session(
+                    status::Session::MultiplexerFailed { .. }
+                )))
+            ),
             "{reply:?}"
         );
         assert_eq!(crate::lock(&state).sessions().ok(), Some(vec![]));
@@ -494,9 +510,11 @@ mod tests {
             },
             FakeAgents::default(),
         );
-        let refused = Some(Reply::Status(Status::MultiplexerCouldNotRun {
-            error: std::io::Error::from(std::io::ErrorKind::NotFound).to_string(),
-        }));
+        let refused = Some(Reply::Status(Status::Session(
+            status::Session::MultiplexerCouldNotRun {
+                error: std::io::Error::from(std::io::ErrorKind::NotFound).to_string(),
+            },
+        )));
         assert_eq!(
             launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).ok(),
             refused
@@ -511,7 +529,12 @@ mod tests {
         let tools = tools(FakeMux::default(), adapters);
         let nope = root.join("nope");
         let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &nope)).ok();
-        assert_eq!(reply, Some(Reply::Status(Status::Missing { path: nope })));
+        assert_eq!(
+            reply,
+            Some(Reply::Status(Status::File(status::File::Missing {
+                path: nope
+            })))
+        );
     }
 
     #[test]
@@ -532,11 +555,13 @@ mod tests {
         let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app)).ok();
         assert_eq!(
             reply,
-            Some(Reply::Status(Status::AdapterFailed {
-                adapter: PathBuf::from("/a/claude"),
-                verb: Verb::Launch,
-                fault
-            }))
+            Some(Reply::Status(Status::Session(
+                status::Session::AdapterFailed {
+                    adapter: PathBuf::from("/a/claude"),
+                    verb: Verb::Launch,
+                    fault
+                }
+            )))
         );
     }
 
@@ -546,7 +571,9 @@ mod tests {
         let app = root.join("code/app");
         let tools = tools(FakeMux::default(), FakeAgents::default());
         let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app));
-        let id = launched(&reply.unwrap_or(Reply::Status(Status::NotServed { path: app.clone() })));
+        let id = launched(&reply.unwrap_or(Reply::Status(Status::Project(
+            status::Project::NotServed { path: app.clone() },
+        ))));
         assert_eq!(
             stop(&state, &tools, &id).ok(),
             Some(Reply::Response(Response::Session(
@@ -558,7 +585,9 @@ mod tests {
         assert_eq!(tools.mux.panes().ok(), Some(vec![]));
         assert_eq!(
             stop(&state, &tools, &id).ok(),
-            Some(Reply::Status(Status::NoSuchSession { session: id }))
+            Some(Reply::Status(Status::Session(
+                status::Session::NoSuchSession { session: id }
+            )))
         );
     }
 
@@ -592,10 +621,11 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         assert_eq!(launches, vec![kept.clone()]);
-        let (sessions, _) = listed(
-            &list(&state, &tools)
-                .unwrap_or_else(|_| Reply::Status(Status::NotServed { path: "/".into() })),
-        );
+        let (sessions, _) = listed(&list(&state, &tools).unwrap_or_else(|_| {
+            Reply::Status(Status::Project(status::Project::NotServed {
+                path: "/".into(),
+            }))
+        }));
         assert_eq!(
             sessions
                 .iter()
@@ -618,10 +648,12 @@ mod tests {
         let reply = launch(&state, &tools, &store(&root), &ask("claude-code", &app)).ok();
         assert_eq!(
             reply,
-            Some(Reply::Status(Status::AdapterUnpinned {
-                name: "claude-code".into(),
-                latest: None
-            }))
+            Some(Reply::Status(Status::Adapter(
+                status::Adapter::AdapterUnpinned {
+                    name: "claude-code".into(),
+                    latest: None
+                }
+            )))
         );
         assert!(
             adapters

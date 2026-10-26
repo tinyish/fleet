@@ -246,9 +246,10 @@ fn all_ons(broken: bool) -> Vec<response::AllOn> {
                 off(WING, bad_config()),
                 off(
                     APP,
-                    protocol::Status::Missing {
+                    fleet_core::status::File::Missing {
                         path: path("/code/app/fleet.toml"),
-                    },
+                    }
+                    .into(),
                 ),
             ],
             forgotten: vec![],
@@ -257,12 +258,7 @@ fn all_ons(broken: bool) -> Vec<response::AllOn> {
 }
 
 pub(super) fn bad_config() -> protocol::Status {
-    protocol::Status::BadConfig {
-        path: path("/code/wing/fleet.toml"),
-        line: Some(1),
-        column: Some(13),
-        error: "unclosed array, expected `]`".into(),
-    }
+    super::file::bad_config_sample().into()
 }
 
 /// What create can answer. `response::Create` is a struct, so the compiler
@@ -306,10 +302,13 @@ fn creates() -> Vec<response::Create> {
 fn statuses(kind: StatusKind) -> Vec<(String, Status)> {
     match kind {
         StatusKind::Refused => fleet_core::status::StatusKind::iter()
-            .flat_map(|k| {
-                refusals::refusals(k)
-                    .into_iter()
-                    .map(move |r| (format!("Status::Refused({k:?})"), Status::Refused(r)))
+            .flat_map(|area| {
+                refusals::refusals(area).into_iter().map(move |(k, r)| {
+                    (
+                        format!("Status::Refused({area:?}::{k})"),
+                        Status::Refused(r),
+                    )
+                })
             })
             .collect(),
         StatusKind::Cannot => ProblemKind::iter()
@@ -527,7 +526,9 @@ mod tests {
         let labels: HashSet<String> = endings().into_iter().map(|s| s.label).collect();
         for kind in fleet_core::status::StatusKind::iter() {
             assert!(
-                labels.contains(&format!("Status::Refused({kind:?})")),
+                labels
+                    .iter()
+                    .any(|l| l.starts_with(&format!("Status::Refused({kind:?}"))),
                 "{kind:?}"
             );
         }
@@ -537,6 +538,26 @@ mod tests {
                     .iter()
                     .any(|l| l.starts_with(&format!("Response::{kind:?}"))),
                 "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_refusal_kind_has_a_sample() {
+        // An area whose samples are a Vec per arm could give none for a
+        // kind and still compile: this catches it.
+        use fleet_core::status::{AdapterKind, FileKind, FleetKind, ProjectKind, SessionKind};
+        let labels: HashSet<String> = endings().into_iter().map(|s| s.label).collect();
+        let kinds = FleetKind::iter()
+            .map(|k| format!("Fleet::{k:?}"))
+            .chain(ProjectKind::iter().map(|k| format!("Project::{k:?}")))
+            .chain(FileKind::iter().map(|k| format!("File::{k:?}")))
+            .chain(SessionKind::iter().map(|k| format!("Session::{k:?}")))
+            .chain(AdapterKind::iter().map(|k| format!("Adapter::{k:?}")));
+        for kind in kinds {
+            assert!(
+                labels.contains(&format!("Status::Refused({kind})")),
+                "{kind} has no sample"
             );
         }
     }

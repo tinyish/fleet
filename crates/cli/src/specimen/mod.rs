@@ -3,10 +3,14 @@
 //! Compiled only with the `specimen` feature, so a release build has no such
 //! command. Its labels are code identifiers, never sentences.
 
-mod delivery;
+mod adapter;
 mod doctor;
+mod file;
+mod fleet;
+mod project;
 mod refusals;
 mod samples;
+mod session;
 
 use std::io::{self, Write};
 use std::process::ExitCode;

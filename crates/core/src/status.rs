@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AdapterFault, Verb};
 
-/// Why the supervisor says no: a rule's verdict, or a problem with a path or
-/// a file. Facts only: the CLI words them (core.md invariant 9). The CLI and
-/// the protocol write it as `protocol::Status`.
+/// Why the supervisor says no, grouped by what it is about: where a fleet
+/// can go, one project's on or off, a path or a config file, agents'
+/// sessions, or naming and fetching adapters. Facts only: the CLI words them
+/// (core.md invariant 9), one words file and one specimen file per area.
+/// The CLI and the protocol write it as `protocol::Status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "specimen",
@@ -18,6 +20,32 @@ use crate::agent::{AdapterFault, Verb};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    /// Where a fleet can go: create's and remove's rules.
+    Fleet(Fleet),
+    /// One project, turned on or off.
+    Project(Project),
+    /// A path, or a fleet's config file.
+    File(File),
+    /// Agents' sessions: their adapters' answers, and tmux.
+    Session(Session),
+    /// Naming and fetching adapters.
+    Adapter(Adapter),
+    /// The request could not be understood.
+    Malformed {
+        /// What was wrong with it.
+        error: String,
+    },
+}
+
+/// Where a fleet can go: the rules create and remove apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(FleetKind), derive(strum::EnumIter))
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Fleet {
     /// A default fleet's directory is in no git repository.
     DirectoryNotInRepo {
         /// The directory.
@@ -93,6 +121,73 @@ pub enum Status {
         /// The fleet serving it.
         fleet: PathBuf,
     },
+    /// Two fleets' configs both name this project.
+    AlsoClaimed {
+        /// The project.
+        project: PathBuf,
+        /// The other fleet that names it.
+        fleet: PathBuf,
+    },
+    /// Remove was run inside a fleet's directory or one of its projects, not
+    /// at the fleet's directory.
+    NotFleetDirectory {
+        /// The directory remove was run in.
+        directory: PathBuf,
+        /// The fleet it is inside.
+        fleet: PathBuf,
+    },
+}
+
+/// One project, turned on or off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(ProjectKind), derive(strum::EnumIter))
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Project {
+    /// No fleet serves this path.
+    NotServed {
+        /// The path asked about.
+        path: PathBuf,
+    },
+    /// This path is inside a project, not at its root.
+    InsideProject {
+        /// The path asked about.
+        path: PathBuf,
+        /// The project it is inside.
+        project: PathBuf,
+    },
+    /// Re-reading its fleet's config just dropped this project.
+    NoLongerServed {
+        /// The project.
+        project: PathBuf,
+        /// The fleet whose config no longer names it.
+        fleet: PathBuf,
+    },
+    /// This project could not be turned on: its fleet's config did not read,
+    /// or clashed with another fleet's. Its own on or off, and its fleet's
+    /// other projects', stay as they were.
+    CannotTurnOn {
+        /// The project.
+        project: PathBuf,
+        /// Its fleet.
+        fleet: PathBuf,
+        /// Why the fleet's config cannot be used.
+        why: Box<Status>,
+    },
+}
+
+/// A path, or a fleet's config file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(FileKind), derive(strum::EnumIter))
+)]
+#[serde(rename_all = "snake_case")]
+pub enum File {
     /// A path does not exist.
     Missing {
         /// The path.
@@ -104,14 +199,6 @@ pub enum Status {
         path: PathBuf,
         /// What the system said.
         error: String,
-    },
-    /// A `fleet.toml` no fleet owns is already there, listing other
-    /// projects than the ones asked for; it was left alone.
-    ConfigDiffers {
-        /// The file.
-        path: PathBuf,
-        /// The projects it lists.
-        listed: Vec<PathBuf>,
     },
     /// A file could not be written; nothing was registered.
     CannotWrite {
@@ -132,56 +219,25 @@ pub enum Status {
         /// What the parser said, in one line.
         error: String,
     },
-    /// Two fleets' configs both name this project.
-    AlsoClaimed {
-        /// The project.
-        project: PathBuf,
-        /// The other fleet that names it.
-        fleet: PathBuf,
-    },
-    /// No fleet serves this path.
-    NotServed {
-        /// The path asked about.
+    /// A `fleet.toml` no fleet owns is already there, listing other
+    /// projects than the ones asked for; it was left alone.
+    ConfigDiffers {
+        /// The file.
         path: PathBuf,
+        /// The projects it lists.
+        listed: Vec<PathBuf>,
     },
-    /// This path is inside a project, not at its root.
-    InsideProject {
-        /// The path asked about.
-        path: PathBuf,
-        /// The project it is inside.
-        project: PathBuf,
-    },
-    /// Remove was run inside a fleet's directory or one of its projects, not
-    /// at the fleet's directory.
-    NotFleetDirectory {
-        /// The directory remove was run in.
-        directory: PathBuf,
-        /// The fleet it is inside.
-        fleet: PathBuf,
-    },
-    /// Re-reading its fleet's config just dropped this project.
-    NoLongerServed {
-        /// The project.
-        project: PathBuf,
-        /// The fleet whose config no longer names it.
-        fleet: PathBuf,
-    },
-    /// This project could not be turned on: its fleet's config did not read,
-    /// or clashed with another fleet's. Its own on or off, and its fleet's
-    /// other projects', stay as they were.
-    CannotTurnOn {
-        /// The project.
-        project: PathBuf,
-        /// Its fleet.
-        fleet: PathBuf,
-        /// Why the fleet's config cannot be used.
-        why: Box<Status>,
-    },
-    /// The request could not be understood.
-    Malformed {
-        /// What was wrong with it.
-        error: String,
-    },
+}
+
+/// Agents' sessions: their adapters' answers, and tmux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(SessionKind), derive(strum::EnumIter))
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Session {
     /// An agent adapter failed to answer.
     AdapterFailed {
         /// The adapter program.
@@ -208,6 +264,17 @@ pub enum Status {
         /// The id asked for.
         session: String,
     },
+}
+
+/// Naming and fetching adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(AdapterKind), derive(strum::EnumIter))
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Adapter {
     /// An adapter was named without its version.
     AdapterUnpinned {
         /// The name.
@@ -314,6 +381,36 @@ pub enum Mismatch {
     BuildMissing,
 }
 
+impl From<Fleet> for Status {
+    fn from(refusal: Fleet) -> Self {
+        Status::Fleet(refusal)
+    }
+}
+
+impl From<Project> for Status {
+    fn from(refusal: Project) -> Self {
+        Status::Project(refusal)
+    }
+}
+
+impl From<File> for Status {
+    fn from(refusal: File) -> Self {
+        Status::File(refusal)
+    }
+}
+
+impl From<Session> for Status {
+    fn from(refusal: Session) -> Self {
+        Status::Session(refusal)
+    }
+}
+
+impl From<Adapter> for Status {
+    fn from(refusal: Adapter) -> Self {
+        Status::Adapter(refusal)
+    }
+}
+
 impl Status {
     /// Why a path could not be used, from what the system said: it does not
     /// exist, or it could not be read.
@@ -321,12 +418,13 @@ impl Status {
     pub fn unusable(path: &Path, e: &io::Error) -> Status {
         let path = path.to_path_buf();
         if e.kind() == io::ErrorKind::NotFound {
-            Status::Missing { path }
+            File::Missing { path }.into()
         } else {
-            Status::Unreadable {
+            File::Unreadable {
                 path,
                 error: e.to_string(),
             }
+            .into()
         }
     }
 }

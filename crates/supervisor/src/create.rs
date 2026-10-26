@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use fleet_core::config::{self, Config};
 use fleet_core::fleets::{self, CreateDecision, decide_create};
 use fleet_core::protocol::{Reply, Response, Status, response};
+use fleet_core::status;
 use state::{State, Step};
 
 use crate::{Error, lock, repo_root_of};
@@ -80,10 +81,10 @@ pub(crate) fn create(
     match written {
         Ok(()) => {}
         Err(state::StateError::Config(e)) => {
-            return Ok(Reply::Status(Status::CannotWrite {
+            return Ok(Reply::Status(Status::File(status::File::CannotWrite {
                 path,
                 error: e.to_string(),
-            }));
+            })));
         }
         Err(e) => return Err(e.into()),
     }
@@ -111,10 +112,10 @@ fn adopted_projects(directory: &Path, asked: &[PathBuf]) -> Result<Vec<PathBuf>,
         asked.sort();
         asked.dedup();
         if asked != listed {
-            return Err(Status::ConfigDiffers {
+            return Err(Status::File(status::File::ConfigDiffers {
                 path: directory.join(fleet_core::paths::CONFIG_FILE),
                 listed,
-            });
+            }));
         }
     }
     if listed == [directory] {
@@ -191,10 +192,10 @@ mod tests {
         let reply = create(&state, &wing, &[code(&root, "api")]).ok();
         assert_eq!(
             reply,
-            Some(Reply::Status(Status::ConfigDiffers {
+            Some(Reply::Status(Status::File(status::File::ConfigDiffers {
                 path: wing.join("fleet.toml"),
                 listed: vec![code(&root, "api"), code(&root, "blog")],
-            }))
+            })))
         );
         assert_eq!(fleets(&state), Vec::<Fleet>::new());
         let _ = fs::remove_dir_all(root);
@@ -207,7 +208,10 @@ mod tests {
         let _ = fs::write(app.join("fleet.toml"), "projects = [");
         let reply = create(&state, &app, &[]).ok();
         assert!(
-            matches!(&reply, Some(Reply::Status(Status::BadConfig { .. }))),
+            matches!(
+                &reply,
+                Some(Reply::Status(Status::File(status::File::BadConfig { .. })))
+            ),
             "{reply:?}"
         );
         assert_eq!(fleets(&state), Vec::<Fleet>::new());
@@ -223,7 +227,12 @@ mod tests {
         let _ = fs::write(wing.join("fleet.toml"), "projects = [\"../code/api\"]\n");
         let reply = create(&state, &wing, &[]).ok();
         assert!(
-            matches!(&reply, Some(Reply::Status(Status::AlreadyServed { .. }))),
+            matches!(
+                &reply,
+                Some(Reply::Status(Status::Fleet(
+                    status::Fleet::AlreadyServed { .. }
+                )))
+            ),
             "{reply:?}"
         );
         assert_eq!(fleets(&state).len(), 1);

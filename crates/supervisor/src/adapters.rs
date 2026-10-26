@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use fleet_core::adapters::{self, AGENT_PROTOCOLS, AdapterRef, Manifest, Named};
 use fleet_core::agent::Verb;
 use fleet_core::protocol::Status;
-use fleet_core::status::Mismatch;
+use fleet_core::status::{self, Mismatch};
 use fleet_core::tools::{Fetched, ToolError};
 
 use crate::Tools;
@@ -48,10 +48,12 @@ pub(crate) fn resolve(store: &Store, tools: &Tools, reference: &str) -> Result<P
     match adapters::parse_ref(reference) {
         Ok(AdapterRef::Path(path)) => speaks(tools, &path, reference).map(|_| path),
         Ok(AdapterRef::Named(named)) => kept(store, tools, &named),
-        Err(Status::AdapterUnpinned { name, .. }) => Err(Status::AdapterUnpinned {
-            latest: latest(store, tools, &name),
-            name,
-        }),
+        Err(Status::Adapter(status::Adapter::AdapterUnpinned { name, .. })) => {
+            Err(Status::Adapter(status::Adapter::AdapterUnpinned {
+                latest: latest(store, tools, &name),
+                name,
+            }))
+        }
         Err(status) => Err(status),
     }
 }
@@ -65,14 +67,13 @@ fn speaks(tools: &Tools, program: &Path, adapter: &str) -> Result<u32, Status> {
 /// [`speaks`], a fault naming the program as `shown`: where a build being
 /// fetched would be kept, not its temp file.
 fn speaks_as(tools: &Tools, program: &Path, shown: &Path, adapter: &str) -> Result<u32, Status> {
-    let speaks = tools
-        .agents
-        .protocol(program)
-        .map_err(|fault| Status::AdapterFailed {
+    let speaks = tools.agents.protocol(program).map_err(|fault| {
+        Status::Session(status::Session::AdapterFailed {
             adapter: shown.to_path_buf(),
             verb: Verb::Protocol,
             fault,
-        })?;
+        })
+    })?;
     adapters::check_protocol(adapter, speaks.protocol, AGENT_PROTOCOLS)?;
     Ok(speaks.protocol)
 }
@@ -85,37 +86,41 @@ fn kept(store: &Store, tools: &Tools, named: &Named) -> Result<PathBuf, Status> 
     }
     let dir = kept.parent().unwrap_or(&store.dir);
     fs::create_dir_all(dir).map_err(|e| not_kept(dir, &e))?;
-    let target = adapters::target().ok_or_else(|| Status::NoBuildFor {
-        name: named.name.clone(),
-        version: named.version.to_string(),
-        target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+    let target = adapters::target().ok_or_else(|| {
+        Status::Adapter(status::Adapter::NoBuildFor {
+            name: named.name.clone(),
+            version: named.version.to_string(),
+            target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        })
     })?;
     let url = named.manifest_url(store.releases());
     let manifest = Temp::new(dir, "manifest.json");
     if download(tools, &url, &manifest.0)? == Fetched::NotFound {
-        return Err(Status::NoSuchRelease {
+        return Err(Status::Adapter(status::Adapter::NoSuchRelease {
             name: named.name.clone(),
             version: named.version.to_string(),
-        });
+        }));
     }
     let read: Manifest = fs::read(&manifest.0)
         .map_err(|e| e.to_string())
         .and_then(|bytes| adapters::read_manifest(&bytes))
-        .map_err(|error| Status::BadManifest {
-            url: url.clone(),
-            error,
+        .map_err(|error| {
+            Status::Adapter(status::Adapter::BadManifest {
+                url: url.clone(),
+                error,
+            })
         })?;
     let sha = adapters::check_manifest(named, &read, &url, target)?;
     let binary = fetch_binary(store, tools, named, target, dir, &sha)?;
     let build = speaks_as(tools, &binary.0, &kept, &named.to_string())?;
     if build != read.protocol {
-        return Err(Status::ReleaseMismatch {
+        return Err(Status::Adapter(status::Adapter::ReleaseMismatch {
             url,
             what: Mismatch::BuildSpeaks {
                 manifest: read.protocol,
                 build,
             },
-        });
+        }));
     }
     fs::rename(&binary.0, &kept).map_err(|e| not_kept(&kept, &e))?;
     Ok(kept)
@@ -134,20 +139,20 @@ fn fetch_binary(
     let url = named.binary_url(store.releases(), target);
     let binary = Temp::new(dir, &named.program());
     if download(tools, &url, &binary.0)? == Fetched::NotFound {
-        return Err(Status::ReleaseMismatch {
+        return Err(Status::Adapter(status::Adapter::ReleaseMismatch {
             url,
             what: Mismatch::BuildMissing,
-        });
+        }));
     }
     let bytes = fs::read(&binary.0).map_err(|e| not_kept(&binary.0, &e))?;
     let got = adapters::sha256_hex(&bytes);
     if got != sha {
-        return Err(Status::ChecksumMismatch {
+        return Err(Status::Adapter(status::Adapter::ChecksumMismatch {
             name: named.name.clone(),
             version: named.version.to_string(),
             expected: sha.to_owned(),
             got,
-        });
+        }));
     }
     fs::set_permissions(&binary.0, fs::Permissions::from_mode(0o755))
         .map_err(|e| not_kept(&binary.0, &e))?;
@@ -157,19 +162,19 @@ fn fetch_binary(
 /// Downloads `url` to `to`, a failure as the refusal it is.
 fn download(tools: &Tools, url: &str, to: &Path) -> Result<Fetched, Status> {
     tools.net.download(url, to).map_err(|e| match e {
-        ToolError::CouldNotRun { error, .. } => Status::NoDownloader {
+        ToolError::CouldNotRun { error, .. } => Status::Adapter(status::Adapter::NoDownloader {
             error: error.to_string(),
-        },
-        ToolError::Failed { said, .. } => Status::DownloadFailed {
+        }),
+        ToolError::Failed { said, .. } => Status::Adapter(status::Adapter::DownloadFailed {
             url: url.to_owned(),
             said,
-        },
+        }),
         ToolError::File { path, error, .. } => not_kept(&path, &error),
         // The network's driver answers no other kind of failure.
-        _ => Status::DownloadFailed {
+        _ => Status::Adapter(status::Adapter::DownloadFailed {
             url: url.to_owned(),
             said: String::new(),
-        },
+        }),
     })
 }
 
@@ -188,10 +193,10 @@ fn latest(store: &Store, tools: &Tools, name: &str) -> Option<String> {
 }
 
 fn not_kept(path: &Path, error: &io::Error) -> Status {
-    Status::AdapterNotKept {
+    Status::Adapter(status::Adapter::AdapterNotKept {
         path: path.to_path_buf(),
         error: error.to_string(),
-    }
+    })
 }
 
 /// A file being fetched, `.<file>-<pid>-<n>` beside where it will be kept,
@@ -371,10 +376,10 @@ mod tests {
                 &tools(FakeNet::default(), Ok(1)),
                 "claude-code@2.1.285"
             ),
-            Err(Status::NoSuchRelease {
+            Err(Status::Adapter(status::Adapter::NoSuchRelease {
                 name: "claude-code".into(),
                 version: "2.1.285".into()
-            })
+            }))
         );
         assert_eq!(leftovers(&d), Vec::<String>::new());
     }
@@ -399,10 +404,10 @@ mod tests {
         };
         assert!(matches!(
             resolve(&store(&d), &t, "claude-code@2.1.285"),
-            Err(Status::ReleaseMismatch {
+            Err(Status::Adapter(status::Adapter::ReleaseMismatch {
                 what: fleet_core::status::Mismatch::OtherRelease { .. },
                 ..
-            })
+            }))
         ));
         assert_eq!(net.count(), 1);
         assert!(!kept(&d).exists());
@@ -429,7 +434,7 @@ mod tests {
                 ),
                 "claude-code@2.1.285"
             ),
-            Err(Status::BadManifest { .. })
+            Err(Status::Adapter(status::Adapter::BadManifest { .. }))
         ));
     }
 
@@ -447,11 +452,11 @@ mod tests {
         };
         assert_eq!(
             resolve(&store(&d), &t, "claude-code@2.1.285"),
-            Err(Status::ProtocolMismatch {
+            Err(Status::Adapter(status::Adapter::ProtocolMismatch {
                 adapter: "claude-code@2.1.285".into(),
                 speaks: 2,
                 fleet_speaks: vec![1]
-            })
+            }))
         );
         assert_eq!(net.count(), 1);
     }
@@ -473,12 +478,12 @@ mod tests {
         );
         assert_eq!(
             got,
-            Err(Status::ChecksumMismatch {
+            Err(Status::Adapter(status::Adapter::ChecksumMismatch {
                 name: "claude-code".into(),
                 version: "2.1.285".into(),
                 expected: "0".repeat(64),
                 got: adapters::sha256_hex(BINARY),
-            })
+            }))
         );
         assert!(!kept(&d).exists());
         assert_eq!(leftovers(&d), Vec::<String>::new());
@@ -499,7 +504,13 @@ mod tests {
             "claude-code@2.1.285",
         );
         assert!(
-            matches!(got, Err(Status::ProtocolMismatch { speaks: 2, .. })),
+            matches!(
+                got,
+                Err(Status::Adapter(status::Adapter::ProtocolMismatch {
+                    speaks: 2,
+                    ..
+                }))
+            ),
             "{got:?}"
         );
         assert!(!kept(&d).exists());
@@ -523,10 +534,10 @@ mod tests {
                 ),
                 "claude-code@2.1.285"
             ),
-            Err(Status::ReleaseMismatch {
+            Err(Status::Adapter(status::Adapter::ReleaseMismatch {
                 what: fleet_core::status::Mismatch::BuildMissing,
                 ..
-            })
+            }))
         ));
         assert_eq!(leftovers(&d), Vec::<String>::new());
     }
@@ -541,10 +552,10 @@ mod tests {
         };
         assert_eq!(
             resolve(&Store::new(&d.0, None), &tools(net, Ok(1)), "claude-code"),
-            Err(Status::AdapterUnpinned {
+            Err(Status::Adapter(status::Adapter::AdapterUnpinned {
                 name: "claude-code".into(),
                 latest: Some("2.1.290".into())
-            })
+            }))
         );
         let net = Arc::new(FakeNet::default());
         let t = Tools {
@@ -554,10 +565,10 @@ mod tests {
         };
         assert_eq!(
             resolve(&store(&d), &t, "claude-code"),
-            Err(Status::AdapterUnpinned {
+            Err(Status::Adapter(status::Adapter::AdapterUnpinned {
                 name: "claude-code".into(),
                 latest: None
-            })
+            }))
         );
         assert_eq!(
             net.count(),
@@ -577,11 +588,11 @@ mod tests {
         );
         assert_eq!(
             resolve(&s, &tools(FakeNet::default(), Ok(2)), "/a/mine"),
-            Err(Status::ProtocolMismatch {
+            Err(Status::Adapter(status::Adapter::ProtocolMismatch {
                 adapter: "/a/mine".into(),
                 speaks: 2,
                 fleet_speaks: vec![1]
-            })
+            }))
         );
         let fault = AdapterFault::Exited {
             code: Some(2),
@@ -593,11 +604,11 @@ mod tests {
                 &tools(FakeNet::default(), Err(fault.clone())),
                 "/a/mine"
             ),
-            Err(Status::AdapterFailed {
+            Err(Status::Session(status::Session::AdapterFailed {
                 adapter: "/a/mine".into(),
                 verb: Verb::Protocol,
                 fault
-            })
+            }))
         );
     }
 
@@ -618,11 +629,11 @@ mod tests {
                 &tools(net, Err(fault.clone())),
                 "claude-code@2.1.285"
             ),
-            Err(Status::AdapterFailed {
+            Err(Status::Session(status::Session::AdapterFailed {
                 adapter: kept(&d),
                 verb: Verb::Protocol,
                 fault
-            })
+            }))
         );
         assert_eq!(leftovers(&d), Vec::<String>::new());
     }
@@ -642,7 +653,13 @@ mod tests {
             ),
             "claude-code@2.1.285",
         );
-        assert!(matches!(got, Err(Status::AdapterNotKept { .. })), "{got:?}");
+        assert!(
+            matches!(
+                got,
+                Err(Status::Adapter(status::Adapter::AdapterNotKept { .. }))
+            ),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -685,7 +702,7 @@ mod tests {
                 ),
                 "claude-code@2.1.285"
             ),
-            Err(Status::NoDownloader { .. })
+            Err(Status::Adapter(status::Adapter::NoDownloader { .. }))
         ));
     }
 }

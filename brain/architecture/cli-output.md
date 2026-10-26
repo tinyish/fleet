@@ -34,9 +34,9 @@ the same way and in one place. What the operating system or a parser says
 
 | Layer | Holds | File |
 | --- | --- | --- |
-| **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, …); `Status` is why not: a rule's verdict (`DirectoryNotRepoRoot { path, root }`, `AlreadyServed { project, fleet }`, …) or a problem with a path or file (`Missing { path }`, `ConfigDiffers { path, listed }`, …). On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"missing":{…}}}`. | `crates/core/src/protocol.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
+| **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, …); `Status` is why not, grouped by what it is about: `Fleet` (where a fleet can go: `Fleet(DirectoryNotRepoRoot { path, root })`, …), `Project` (one project on or off), `File` (a path or a config file: `File(Missing { path })`, …), `Session`, `Adapter`, and `Malformed`. On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"file":{"missing":{…}}}}`. | `crates/core/src/protocol.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
 | **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`, `Doctor`) goes in. Doctor is the one command that does not end this way: its report is a list of findings (`doctor::Found`, each with its check and verdict) that `output::doctor` prints, and its exit code comes from the findings. | `crates/cli/src/protocol.rs` (all of them, `Request` included) |
-| **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), the help text clap shows, and doctor's report (`found`, `found_next`, `checked`, `verdict`, in its own submodule) | `crates/cli/src/ui/words/mod.rs`, `crates/cli/src/ui/words/doctor.rs` |
+| **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), the help text clap shows, doctor's report (`found`, `found_next`, `checked`, `verdict`, in its own submodule), and one submodule per area of `protocol::Status` holding that area's refusals and their hints, each matched with no `_` arm | `crates/cli/src/ui/words/mod.rs`, `crates/cli/src/ui/words/doctor.rs`, `crates/cli/src/ui/words/{fleet,project,file,session,adapters}.rs` |
 | **Output** | Where a line goes and how it starts: `Mark`, `line`, `lines` (every line an ending prints, with its mark), `report`, `doctor` (doctor's report), and `Ink` for colouring the parts of a sentence | `crates/cli/src/ui/output.rs` |
 | **Theme** | The symbols, the palette (`Tone`, `paint_on`), and the cliclack `Theme` that draws prompts and spinners | `crates/cli/src/ui/theme.rs` |
 | **Prompts and spinners** | `confirm(question, default)` and `spinner(message)`, drawn with cliclack in the theme | `crates/cli/src/ui/mod.rs` |
@@ -176,9 +176,13 @@ and word it in `words::tool`. A driver never formats a sentence.
 **A new thing the supervisor can say.** Add a variant to the command's own
 `protocol::response::…` enum (or a new command's enum, plus its `Request` and
 `Response` variants and a `client` helper) for something it did, or a
-`Status` variant (in `crates/core/src/status.rs`) for a reason it says no. Field names follow the AIPs (core.md § Naming). Then:
+variant of its area's enum in `crates/core/src/status.rs` (`Fleet`, `Project`,
+`File`, `Session`, `Adapter`; a new area is a new variant of `Status` with an
+enum of its own) for a reason it says no. Field names follow the AIPs
+(core.md § Naming). Then:
 - the supervisor returns the variant;
-- `ui/words` gets one match arm for it (the compiler points at the missing arm);
+- its area's words file gets an arm in `refused` and one in `hint`, and its
+  area's specimen file a sample (the compiler points at all three);
 - a protocol test round-trips it.
 
 The supervisor never builds the sentence.
@@ -187,8 +191,10 @@ The supervisor never builds the sentence.
 `Status` in `protocol.rs` (a new `Problem` or `Doubt` for a new reason). A
 `Status` variant also gives its exit code in `Status::exit_code`.
 
-**A hint after an ending.** Add a match arm to `words::next` for that
-`Status`, or to `words::next_after` for a `Response`; `report` prints it
+**A hint after an ending.** Give a refusal's arm in its area's `hint` a
+sentence (an arm with no hint says `None`, written out), or, for one of the
+CLI's own endings, its arm in `words::next`; for a `Response`, add an arm to
+`words::next_after`. `report` prints it
 under the ending's lines. A status line says what
 is wrong; what to do about it goes in the hint, never after a semicolon.
 
@@ -221,12 +227,12 @@ It cannot fall behind: every enum a command can end with has a kind twin
 (strum's `EnumDiscriminants`) under that feature, and the specimen builds a
 sample for each kind in an exhaustive `match`. A new variant does not
 compile with `--all-features` until it has a sample in
-`crates/cli/src/specimen/` (`samples.rs` for endings, `doctor.rs` for
-doctor's findings). What the compiler cannot check is a choice
-of values rather than a variant: the shapes of `protocol::response::Create`
-(a struct), wording that depends on a field's value (a tool that failed
-saying nothing), which combinations of nested facts are shown, and whether
-a new status should have a hint (`words::next` falls back to none).
+`crates/cli/src/specimen/` (`samples.rs` for endings, one file per area for
+refusals, `doctor.rs` for doctor's findings). What the compiler cannot check
+is a choice of values rather than a variant: the shapes of
+`protocol::response::Create` (a struct), wording that depends on a field's
+value (a tool that failed saying nothing), and which combinations of nested
+facts are shown.
 
 ## Why it is built this way
 

@@ -491,6 +491,7 @@ pub fn read_reply(r: &mut impl BufRead) -> Result<Reply, ProtocolError> {
 mod tests {
     use super::*;
     use crate::agent::{AdapterFault, Reason, SessionState, Verb};
+    use crate::status;
     use std::io::Cursor;
 
     #[test]
@@ -546,12 +547,12 @@ mod tests {
                 }],
                 stayed_off: vec![response::StayedOff {
                     fleet: PathBuf::from("/f/w"),
-                    why: Status::BadConfig {
+                    why: Status::File(status::File::BadConfig {
                         path: PathBuf::from("/f/w/fleet.toml"),
                         line: Some(1),
                         column: None,
                         error: "expected `]`".into(),
-                    },
+                    }),
                 }],
                 forgotten: vec![PathBuf::from("/f/old")],
             }))),
@@ -568,14 +569,14 @@ mod tests {
                     others: vec![PathBuf::from("/c/api")],
                 },
             ))),
-            Reply::Status(Status::CannotTurnOn {
+            Reply::Status(Status::Project(status::Project::CannotTurnOn {
                 project: PathBuf::from("/c/api"),
                 fleet: PathBuf::from("/f/w"),
-                why: Box::new(Status::AlsoClaimed {
+                why: Box::new(Status::Fleet(status::Fleet::AlsoClaimed {
                     project: PathBuf::from("/c/api"),
                     fleet: PathBuf::from("/f/a"),
-                }),
-            }),
+                })),
+            })),
             Reply::Response(Response::Stop(response::Stop::AllOff)),
             Reply::Response(Response::Create(response::Create {
                 directory: PathBuf::from("/f/work"),
@@ -583,13 +584,13 @@ mod tests {
                 created: true,
                 adopted: true,
             })),
-            Reply::Status(Status::AlreadyServed {
+            Reply::Status(Status::Fleet(status::Fleet::AlreadyServed {
                 project: PathBuf::from("/c/app"),
                 fleet: PathBuf::from("/f/work"),
-            }),
-            Reply::Status(Status::Missing {
+            })),
+            Reply::Status(Status::File(status::File::Missing {
                 path: PathBuf::from("/x"),
-            }),
+            })),
         ];
         for reply in replies {
             let mut buf = Vec::new();
@@ -611,11 +612,60 @@ mod tests {
         .ok();
         assert_eq!(buf, b"{\"response\":{\"stop\":\"all_off\"}}\n");
         let mut buf = Vec::new();
-        let missing = Status::Missing {
+        let missing: Status = status::File::Missing {
             path: PathBuf::from("/x"),
-        };
+        }
+        .into();
         write_reply(&mut buf, &Reply::Status(missing)).ok();
-        assert_eq!(buf, b"{\"status\":{\"missing\":{\"path\":\"/x\"}}}\n");
+        assert_eq!(
+            buf,
+            b"{\"status\":{\"file\":{\"missing\":{\"path\":\"/x\"}}}}\n"
+        );
+    }
+
+    #[test]
+    fn one_refusal_of_each_area_round_trips() {
+        let why: Status = status::Fleet::AlsoClaimed {
+            project: "/c/api".into(),
+            fleet: "/f/other".into(),
+        }
+        .into();
+        let refusals: Vec<Status> = vec![
+            status::Fleet::InsideFleet {
+                directory: "/f/a/b".into(),
+                fleet: "/f/a".into(),
+            }
+            .into(),
+            status::Project::CannotTurnOn {
+                project: "/c/api".into(),
+                fleet: "/f/wing".into(),
+                why: Box::new(why),
+            }
+            .into(),
+            status::File::Unreadable {
+                path: "/c/x".into(),
+                error: "denied".into(),
+            }
+            .into(),
+            status::Session::NoSuchSession {
+                session: "s0123456789".into(),
+            }
+            .into(),
+            status::Adapter::ReleaseMismatch {
+                url: "https://r/m.json".into(),
+                what: status::Mismatch::BuildMissing,
+            }
+            .into(),
+            Status::Malformed {
+                error: "eof".into(),
+            },
+        ];
+        for status in refusals {
+            let mut buf = Vec::new();
+            write_reply(&mut buf, &Reply::Status(status.clone())).ok();
+            let back = read_reply(&mut buf.as_slice()).ok();
+            assert_eq!(back, Some(Reply::Status(status)));
+        }
     }
 
     #[test]
@@ -644,24 +694,24 @@ mod tests {
             Reply::Response(Response::Session(response::Session::Stopped {
                 session: "s1".into(),
             })),
-            Reply::Status(Status::AdapterFailed {
+            Reply::Status(Status::Session(status::Session::AdapterFailed {
                 adapter: PathBuf::from("/a/claude"),
                 verb: Verb::Launch,
                 fault: AdapterFault::Exited {
                     code: Some(1),
                     said: "claude: not found".into(),
                 },
-            }),
-            Reply::Status(Status::MultiplexerCouldNotRun {
+            })),
+            Reply::Status(Status::Session(status::Session::MultiplexerCouldNotRun {
                 error: "No such file or directory (os error 2)".into(),
-            }),
-            Reply::Status(Status::MultiplexerFailed {
+            })),
+            Reply::Status(Status::Session(status::Session::MultiplexerFailed {
                 command: "tmux new-session".into(),
                 said: "no".into(),
-            }),
-            Reply::Status(Status::NoSuchSession {
+            })),
+            Reply::Status(Status::Session(status::Session::NoSuchSession {
                 session: "s9".into(),
-            }),
+            })),
         ];
         for reply in replies {
             let mut buf = Vec::new();

@@ -126,6 +126,7 @@ impl Step {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_core::status;
 
     fn all() -> Vec<Step> {
         vec![
@@ -156,9 +157,9 @@ mod tests {
             },
             Step::FleetConfigBroken {
                 fleet: "/f".into(),
-                why: Status::Missing {
+                why: Status::File(status::File::Missing {
                     path: "/f/fleet.toml".into(),
-                },
+                }),
             },
             Step::FleetRemoved {
                 directory: "/f".into(),

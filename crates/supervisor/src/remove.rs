@@ -11,6 +11,7 @@ use fleet_core::paths::CONFIG_FILE;
 use fleet_core::protocol::request::ConfigChoice;
 use fleet_core::protocol::response::{self, ConfigFate};
 use fleet_core::protocol::{Reply, Response, Status};
+use fleet_core::status;
 use state::{State, StateError, Step};
 
 use crate::{Error, lock};
@@ -124,12 +125,12 @@ fn take(state: &mut State, fleet: Fleet, taken: Vec<PathBuf>) -> Result<Reply, E
     let edited = match edited {
         Ok(edited) => edited,
         Err(e) => {
-            return Ok(Reply::Status(Status::BadConfig {
+            return Ok(Reply::Status(Status::File(status::File::BadConfig {
                 path,
                 line: e.line,
                 column: e.column,
                 error: e.message,
-            }));
+            })));
         }
     };
     let written = state.write(|w| {
@@ -167,10 +168,10 @@ fn replace(path: &Path, text: &str) -> io::Result<()> {
 }
 
 fn cannot_write(path: PathBuf, error: &io::Error) -> Reply {
-    Reply::Status(Status::CannotWrite {
+    Reply::Status(Status::File(status::File::CannotWrite {
         path,
         error: error.to_string(),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -328,10 +329,12 @@ mod tests {
         let reply = removed(&state, &src, &[], true);
         assert_eq!(
             reply,
-            Some(Reply::Status(Status::NotFleetDirectory {
-                directory: src,
-                fleet: app.clone()
-            }))
+            Some(Reply::Status(Status::Fleet(
+                status::Fleet::NotFleetDirectory {
+                    directory: src,
+                    fleet: app.clone()
+                }
+            )))
         );
         assert_eq!(fleets(&state), 1);
         assert!(app.join("fleet.toml").exists());
@@ -347,7 +350,12 @@ mod tests {
         let reply = removed(&state, &app, &[], true);
         let _ = fs::set_permissions(&app, fs::Permissions::from_mode(0o755));
         assert!(
-            matches!(&reply, Some(Reply::Status(Status::CannotWrite { .. }))),
+            matches!(
+                &reply,
+                Some(Reply::Status(Status::File(
+                    status::File::CannotWrite { .. }
+                )))
+            ),
             "{reply:?}"
         );
         assert_eq!(fleets(&state), 1);

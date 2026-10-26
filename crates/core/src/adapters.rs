@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::status::{Mismatch, Status};
+use crate::status::{self, Mismatch, Status};
 
 /// Where fleet-adapters' release files are downloaded from:
 /// `<RELEASES>/<tag>/<file>`.
@@ -129,20 +129,22 @@ fn is_name(name: &str) -> bool {
 ///
 /// # Errors
 ///
-/// [`Status::AdapterUnpinned`] for a bare name (its latest not looked up
-/// here), [`Status::NotAnAdapter`] for anything else.
+/// [`status::Adapter::AdapterUnpinned`] for a bare name (its latest not
+/// looked up here), [`status::Adapter::NotAnAdapter`] for anything else.
 pub fn parse_ref(text: &str) -> Result<AdapterRef, Status> {
     if text.contains('/') {
         return Ok(AdapterRef::Path(PathBuf::from(text)));
     }
-    let not_one = || Status::NotAnAdapter {
-        reference: text.to_owned(),
+    let not_one = || {
+        Status::Adapter(status::Adapter::NotAnAdapter {
+            reference: text.to_owned(),
+        })
     };
     match text.split_once('@') {
-        None if is_name(text) => Err(Status::AdapterUnpinned {
+        None if is_name(text) => Err(Status::Adapter(status::Adapter::AdapterUnpinned {
             name: text.to_owned(),
             latest: None,
-        }),
+        })),
         Some((name, version)) if is_name(name) => Version::parse(version)
             .map(|version| {
                 AdapterRef::Named(Named {
@@ -236,8 +238,8 @@ pub fn read_manifest(bytes: &[u8]) -> Result<Manifest, String> {
 ///
 /// # Errors
 ///
-/// [`Status::ReleaseMismatch`], [`Status::ProtocolMismatch`] or
-/// [`Status::NoBuildFor`].
+/// [`status::Adapter::ReleaseMismatch`],
+/// [`status::Adapter::ProtocolMismatch`] or [`status::Adapter::NoBuildFor`].
 pub fn check_manifest(
     named: &Named,
     manifest: &Manifest,
@@ -245,23 +247,25 @@ pub fn check_manifest(
     target: &str,
 ) -> Result<String, Status> {
     if manifest.name != named.name || manifest.version != named.version.as_str() {
-        return Err(Status::ReleaseMismatch {
+        return Err(Status::Adapter(status::Adapter::ReleaseMismatch {
             url: url.to_owned(),
             what: Mismatch::OtherRelease {
                 name: manifest.name.clone(),
                 version: manifest.version.clone(),
             },
-        });
+        }));
     }
     check_protocol(&named.to_string(), manifest.protocol, AGENT_PROTOCOLS)?;
     manifest
         .targets
         .get(target)
         .map(|sha| sha.to_ascii_lowercase())
-        .ok_or_else(|| Status::NoBuildFor {
-            name: named.name.clone(),
-            version: named.version.to_string(),
-            target: target.to_owned(),
+        .ok_or_else(|| {
+            Status::Adapter(status::Adapter::NoBuildFor {
+                name: named.name.clone(),
+                version: named.version.to_string(),
+                target: target.to_owned(),
+            })
         })
 }
 
@@ -270,16 +274,17 @@ pub fn check_manifest(
 ///
 /// # Errors
 ///
-/// [`Status::ProtocolMismatch`] when `fleet` does not hold `speaks`.
+/// [`status::Adapter::ProtocolMismatch`] when `fleet` does not hold
+/// `speaks`.
 pub fn check_protocol(adapter: &str, speaks: u32, fleet: &[u32]) -> Result<(), Status> {
     if fleet.contains(&speaks) {
         Ok(())
     } else {
-        Err(Status::ProtocolMismatch {
+        Err(Status::Adapter(status::Adapter::ProtocolMismatch {
             adapter: adapter.to_owned(),
             speaks,
             fleet_speaks: fleet.to_vec(),
-        })
+        }))
     }
 }
 
@@ -370,10 +375,10 @@ mod tests {
     fn a_bare_name_is_unpinned() {
         assert_eq!(
             parse_ref("claude-code").err(),
-            Some(Status::AdapterUnpinned {
+            Some(Status::Adapter(status::Adapter::AdapterUnpinned {
                 name: "claude-code".into(),
                 latest: None
-            })
+            }))
         );
     }
 
@@ -394,9 +399,9 @@ mod tests {
         ] {
             assert_eq!(
                 parse_ref(text).err(),
-                Some(Status::NotAnAdapter {
+                Some(Status::Adapter(status::Adapter::NotAnAdapter {
                     reference: text.into()
-                }),
+                })),
                 "{text:?}"
             );
         }
@@ -436,21 +441,21 @@ mod tests {
         );
         assert_eq!(
             check_manifest(&n, &manifest("codex", "2.1.286", 1), "u", t),
-            Err(Status::ReleaseMismatch {
+            Err(Status::Adapter(status::Adapter::ReleaseMismatch {
                 url: "u".into(),
                 what: crate::status::Mismatch::OtherRelease {
                     name: "codex".into(),
                     version: "2.1.286".into()
                 }
-            })
+            }))
         );
         assert_eq!(
             check_manifest(&n, &manifest("claude-code", "2.1.285", 2), "u", t),
-            Err(Status::ProtocolMismatch {
+            Err(Status::Adapter(status::Adapter::ProtocolMismatch {
                 adapter: "claude-code@2.1.285".into(),
                 speaks: 2,
                 fleet_speaks: vec![1]
-            })
+            }))
         );
         assert_eq!(
             check_manifest(
@@ -459,11 +464,11 @@ mod tests {
                 "u",
                 "x86_64-apple-darwin"
             ),
-            Err(Status::NoBuildFor {
+            Err(Status::Adapter(status::Adapter::NoBuildFor {
                 name: "claude-code".into(),
                 version: "2.1.285".into(),
                 target: "x86_64-apple-darwin".into()
-            })
+            }))
         );
     }
 
@@ -484,11 +489,11 @@ mod tests {
         for speaks in [0, 2] {
             assert_eq!(
                 check_protocol("a", speaks, &[1]),
-                Err(Status::ProtocolMismatch {
+                Err(Status::Adapter(status::Adapter::ProtocolMismatch {
                     adapter: "a".into(),
                     speaks,
                     fleet_speaks: vec![1]
-                })
+                }))
             );
         }
     }

@@ -1,16 +1,14 @@
 //! The words for what goes wrong naming and fetching adapters.
 
-use fleet_core::protocol;
-use fleet_core::status::Mismatch;
+use fleet_core::status::{Adapter, Mismatch};
 
 use crate::ui::output::Ink;
 
-/// Why an adapter could not be named or fetched; none for a refusal that
-/// is not about that.
-pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
-    use protocol::Status as S;
-    Some(match status {
-        S::AdapterUnpinned {
+/// Why an adapter could not be named or fetched.
+pub(super) fn refused(refusal: &Adapter, ink: Ink) -> String {
+    use Adapter as A;
+    match refusal {
+        A::AdapterUnpinned {
             name,
             latest: Some(latest),
         } => format!(
@@ -18,25 +16,25 @@ pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
             ink.accent(name),
             ink.accent(format!("{name}@{latest}"))
         ),
-        S::AdapterUnpinned { name, latest: None } => format!(
+        A::AdapterUnpinned { name, latest: None } => format!(
             "the adapter {} needs a version, as {}",
             ink.accent(name),
             ink.accent(format!("{name}@<version>"))
         ),
-        S::NotAnAdapter { reference } => format!(
+        A::NotAnAdapter { reference } => format!(
             "{} is not an adapter: name one by its path, or as <name>@<version>",
             ink.accent(reference)
         ),
-        S::NoSuchRelease { name, version } => {
+        A::NoSuchRelease { name, version } => {
             format!(
                 "fleet-adapters has no release {} {version}",
                 ink.accent(name)
             )
         }
-        S::BadManifest { url, error } => {
+        A::BadManifest { url, error } => {
             format!("the manifest at {} does not read: {error}", ink.accent(url))
         }
-        S::NoBuildFor {
+        A::NoBuildFor {
             name,
             version,
             target,
@@ -44,7 +42,7 @@ pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
             "{} {version} has no build for this machine ({target})",
             ink.accent(name)
         ),
-        S::ChecksumMismatch {
+        A::ChecksumMismatch {
             name,
             version,
             expected,
@@ -53,7 +51,7 @@ pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
             "the download of {} {version} is not the one released: its SHA-256 is {got}, not {expected}",
             ink.accent(name)
         ),
-        S::ProtocolMismatch {
+        A::ProtocolMismatch {
             adapter,
             speaks,
             fleet_speaks,
@@ -67,21 +65,38 @@ pub(super) fn refused(status: &protocol::Status, ink: Ink) -> Option<String> {
                 "update the adapter"
             }
         ),
-        S::DownloadFailed { url, said } if said.is_empty() => {
+        A::DownloadFailed { url, said } if said.is_empty() => {
             format!("could not download {}", ink.accent(url))
         }
-        S::DownloadFailed { url, said } => {
+        A::DownloadFailed { url, said } => {
             format!("could not download {}: {said}", ink.accent(url))
         }
-        S::ReleaseMismatch { url, what } => mismatch(url, what, ink),
-        S::NoDownloader { error } => {
+        A::ReleaseMismatch { url, what } => mismatch(url, what, ink),
+        A::NoDownloader { error } => {
             format!("{} could not be run: {error}", ink.accent("curl"))
         }
-        S::AdapterNotKept { path, error } => {
+        A::AdapterNotKept { path, error } => {
             format!("could not keep the adapter in {}: {error}", ink.path(path))
         }
-        _ => return None,
-    })
+    }
+}
+
+/// What to do about it: nothing yet, for any adapter refusal.
+pub(super) fn hint(refusal: &Adapter, _ink: Ink) -> Option<String> {
+    use Adapter as A;
+    match refusal {
+        A::AdapterUnpinned { .. }
+        | A::NotAnAdapter { .. }
+        | A::NoSuchRelease { .. }
+        | A::BadManifest { .. }
+        | A::NoBuildFor { .. }
+        | A::ChecksumMismatch { .. }
+        | A::ProtocolMismatch { .. }
+        | A::DownloadFailed { .. }
+        | A::NoDownloader { .. }
+        | A::ReleaseMismatch { .. }
+        | A::AdapterNotKept { .. } => None,
+    }
 }
 
 /// How the release at `url` does not hold together.
@@ -117,12 +132,10 @@ fn either(numbers: &[u32]) -> String {
 mod tests {
     use super::*;
     use crate::ui::output::OUT;
-    use fleet_core::protocol::Status as S;
+    use fleet_core::status::Adapter as S;
 
     fn says(status: &S) -> String {
-        refused(status, OUT.piped())
-            .map(|w| console::strip_ansi_codes(&w).into_owned())
-            .unwrap_or_default()
+        console::strip_ansi_codes(&refused(status, OUT.piped())).into_owned()
     }
 
     fn s(text: &str) -> String {
@@ -261,14 +274,6 @@ mod tests {
                 fleet_speaks: vec![2, 3]
             }),
             "the adapter /a/mine speaks agent protocol 1, and this fleet speaks 2 or 3: update the adapter"
-        );
-    }
-
-    #[test]
-    fn other_refusals_are_not_this_modules() {
-        assert_eq!(
-            refused(&S::NotServed { path: "/x".into() }, OUT.piped()),
-            None
         );
     }
 }

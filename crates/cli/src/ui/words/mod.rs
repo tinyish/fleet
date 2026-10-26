@@ -14,6 +14,9 @@ use crate::ui::output::Ink;
 mod adapters;
 mod create;
 mod doctor;
+mod file;
+mod fleet;
+mod project;
 pub(crate) mod remove;
 mod session;
 pub(crate) mod uninstall;
@@ -233,67 +236,62 @@ fn picked_up(picked: &[protocol::response::PickedUp], ink: Ink) -> Option<String
 /// What to do about a status, when there is something to do: the hint
 /// line printed under it.
 pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
-    let create = ink.accent("fleet create");
-    let project_flag = ink.accent("--project");
-    Some(match status {
-        Status::NotRunning => format!("run {} to start it", ink.accent("fleet start")),
-        Status::NeedsAnswer => uninstall::add_flag(ink),
-        Status::Cannot(Problem::Uninstall { .. }) => uninstall::try_again(ink),
-        Status::Refused(protocol::Status::DirectoryNotInRepo { .. }) => {
-            format!("run {create} at a repository's root")
-        }
-        Status::Refused(protocol::Status::DirectoryNotRepoRoot { root, .. }) => {
-            format!("run {create} in {}", ink.whole_path(root))
-        }
-        Status::Refused(protocol::Status::ProjectNotRepoRoot { root, .. }) => {
-            format!(
-                "pass the repository's root, {}, instead",
-                ink.whole_path(root)
-            )
-        }
-        Status::Refused(protocol::Status::ProjectIsFleetDirectory { .. }) => {
-            format!("run {create} without {project_flag} to make a fleet of this repository itself")
-        }
-        Status::Cannot(Problem::SocketPathTooLong(_)) => format!(
+    match status {
+        Status::Refused(refusal) => refused_hint(refusal, ink),
+        Status::Cannot(problem) => cannot_hint(problem, ink),
+        Status::NotRunning => Some(format!("run {} to start it", ink.accent("fleet start"))),
+        Status::NeedsAnswer => Some(uninstall::add_flag(ink)),
+        Status::PartlyOn { .. } => Some(format!(
+            "fix each {} named above, then run {}",
+            ink.accent("fleet.toml"),
+            ink.accent("fleet start")
+        )),
+        Status::CouldNotTell(doubt) => match doubt {
+            Doubt::NoAnswer { log, .. } | Doubt::StoppedUnanswered { log, .. } => {
+                Some(format!("check its log: {}", ink.accent(log)))
+            }
+            Doubt::StillAnswers { .. } | Doubt::Socket { .. } | Doubt::OddReply { .. } => None,
+        },
+    }
+}
+
+/// The hint for a refusal, from its area.
+fn refused_hint(status: &protocol::Status, ink: Ink) -> Option<String> {
+    match status {
+        protocol::Status::Fleet(refusal) => fleet::hint(refusal, ink),
+        protocol::Status::Project(refusal) => project::hint(refusal, ink),
+        protocol::Status::File(refusal) => file::hint(refusal, ink),
+        protocol::Status::Session(refusal) => session::hint(refusal, ink),
+        protocol::Status::Adapter(refusal) => adapters::hint(refusal, ink),
+        protocol::Status::Malformed { .. } => None,
+    }
+}
+
+/// The hint for a problem on the CLI's side.
+fn cannot_hint(problem: &Problem, ink: Ink) -> Option<String> {
+    match problem {
+        Problem::Uninstall { .. } => Some(uninstall::try_again(ink)),
+        Problem::SocketPathTooLong(_) => Some(format!(
             "set {} to a shorter directory",
             ink.accent("FLEET_STATE_DIR")
-        ),
-        Status::Cannot(Problem::ServiceManager {
+        )),
+        Problem::ServiceManager {
             error: ToolError::OwnedElsewhere { theirs, .. },
             ..
-        }) => format!(
+        } => Some(format!(
             "run {} first to stop it",
             ink.accent(format!(
                 "FLEET_STATE_DIR={} fleet stop",
                 shell_quoted(&theirs.display().to_string())
             ))
-        ),
-        Status::Refused(protocol::Status::InsideProject { project, .. }) => {
-            format!("name its root, {}", ink.whole_path(project))
-        }
-        Status::Refused(protocol::Status::ConfigDiffers { .. }) => create::take_it_up(ink),
-        Status::Refused(protocol::Status::NotFleetDirectory { fleet, .. }) => format!(
-            "run {} in {}",
-            ink.accent("fleet remove"),
-            ink.whole_path(fleet)
-        ),
-        Status::Refused(protocol::Status::CannotTurnOn { fleet, .. }) => format!(
-            "fix the {} in {}, then try again",
-            ink.accent("fleet.toml"),
-            ink.path(fleet)
-        ),
-        Status::PartlyOn { .. } => format!(
-            "fix each {} named above, then run {}",
-            ink.accent("fleet.toml"),
-            ink.accent("fleet start")
-        ),
-        Status::CouldNotTell(
-            Doubt::NoAnswer { log, .. } | Doubt::StoppedUnanswered { log, .. },
-        ) => {
-            format!("check its log: {}", ink.accent(log))
-        }
-        _ => return None,
-    })
+        )),
+        Problem::ServiceManager { .. }
+        | Problem::UnsupportedOs
+        | Problem::StateDir(_)
+        | Problem::NoCurrentDir(_)
+        | Problem::BadPath { .. }
+        | Problem::NoBinary(_) => None,
+    }
 }
 
 /// `s` as one shell word: as it is when that is safe, else single-quoted.
@@ -306,134 +304,17 @@ fn shell_quoted(s: &str) -> String {
     }
 }
 
-/// Why the supervisor said no.
+/// Why the supervisor said no, in its area's words.
 fn refused(status: &protocol::Status, ink: Ink) -> String {
     match status {
-        protocol::Status::DirectoryNotRepoRoot { path, root } => format!(
-            "{} is inside the repository at {}",
-            ink.path(path),
-            ink.path(root)
-        ),
-        protocol::Status::DirectoryNotInRepo { path }
-        | protocol::Status::ProjectNotInRepo { path } => {
-            format!("{} is not in a git repository", ink.path(path))
-        }
-        protocol::Status::ProjectNotRepoRoot { path, .. } => {
-            format!("{} is not a repository's root", ink.path(path))
-        }
-        protocol::Status::ProjectIsFleetDirectory { path } => {
-            format!("{} is the fleet's own directory", ink.path(path))
-        }
-        protocol::Status::WingmanInsideProject { directory, project } => format!(
-            "a wingman fleet's directory must be outside the repositories it serves; \
-             {} is inside {}",
-            ink.path(directory),
-            ink.path(project)
-        ),
-        protocol::Status::AlreadyHereServingOthers { serving, asked, .. } => format!(
-            "a fleet is already here, serving {}; asked for {}",
-            ink.paths(serving),
-            ink.paths(asked)
-        ),
-        protocol::Status::InsideFleet { .. }
-        | protocol::Status::NotFleetDirectory { .. }
-        | protocol::Status::ContainsFleet { .. }
-        | protocol::Status::InsideServedProject { .. }
-        | protocol::Status::AlreadyServed { .. } => {
-            create::placement(status, ink).unwrap_or_default()
-        }
-        protocol::Status::Missing { path } => format!("{} does not exist", ink.path(path)),
-        protocol::Status::Unreadable { path, error } => format!("{}: {error}", ink.path(path)),
-        protocol::Status::ConfigDiffers { path, listed } => {
-            create::config_differs(path, listed, ink)
-        }
-        protocol::Status::CannotWrite { path, error } => {
-            format!(
-                "writing {}: {error}; nothing was registered",
-                ink.path(path)
-            )
-        }
-        protocol::Status::BadConfig {
-            path,
-            line,
-            column,
-            error,
-        } => bad_config(path, *line, *column, error, ink),
-        protocol::Status::AlsoClaimed { project, fleet } => format!(
-            "{} is also claimed by the fleet in {}",
-            ink.path(project),
-            ink.path(fleet)
-        ),
-        protocol::Status::NotServed { path } => format!("no fleet serves {}", ink.path(path)),
-        protocol::Status::InsideProject { path, project } => format!(
-            "{} is inside the project {}",
-            ink.path(path),
-            ink.path(project)
-        ),
-        protocol::Status::NoLongerServed { project, fleet } => format!(
-            "the fleet in {} no longer serves {}: its {} dropped it",
-            ink.path(fleet),
-            ink.path(project),
-            ink.accent("fleet.toml")
-        ),
-        protocol::Status::CannotTurnOn { .. } => cannot_turn_on(status, ink),
+        protocol::Status::Fleet(refusal) => fleet::refused(refusal, ink),
+        protocol::Status::Project(refusal) => project::refused(refusal, ink),
+        protocol::Status::File(refusal) => file::refused(refusal, ink),
+        protocol::Status::Session(refusal) => session::refused(refusal, ink),
+        protocol::Status::Adapter(refusal) => adapters::refused(refusal, ink),
         protocol::Status::Malformed { error } => {
             format!("the supervisor could not understand the request: {error}")
         }
-        protocol::Status::AdapterFailed { .. }
-        | protocol::Status::MultiplexerCouldNotRun { .. }
-        | protocol::Status::MultiplexerFailed { .. }
-        | protocol::Status::NoSuchSession { .. } => {
-            session::refused(status, ink).unwrap_or_default()
-        }
-        protocol::Status::AdapterUnpinned { .. }
-        | protocol::Status::NotAnAdapter { .. }
-        | protocol::Status::NoSuchRelease { .. }
-        | protocol::Status::BadManifest { .. }
-        | protocol::Status::NoBuildFor { .. }
-        | protocol::Status::ChecksumMismatch { .. }
-        | protocol::Status::ProtocolMismatch { .. }
-        | protocol::Status::DownloadFailed { .. }
-        | protocol::Status::NoDownloader { .. }
-        | protocol::Status::AdapterNotKept { .. }
-        | protocol::Status::ReleaseMismatch { .. } => {
-            adapters::refused(status, ink).unwrap_or_default()
-        }
-    }
-}
-
-/// A project that could not be turned on because of its fleet's config.
-fn cannot_turn_on(status: &protocol::Status, ink: Ink) -> String {
-    let protocol::Status::CannotTurnOn {
-        project,
-        fleet,
-        why,
-    } = status
-    else {
-        return String::new();
-    };
-    format!(
-        "{} cannot be turned on: the config of the fleet in {} cannot be used: {}",
-        ink.path(project),
-        ink.path(fleet),
-        refused(why, ink)
-    )
-}
-
-/// A fleet's config that does not read, and where when the parser knows.
-fn bad_config(
-    path: &std::path::Path,
-    line: Option<usize>,
-    column: Option<usize>,
-    error: &str,
-    ink: Ink,
-) -> String {
-    match (line, column) {
-        (Some(line), Some(column)) => format!(
-            "{} does not read: line {line}, column {column}: {error}",
-            ink.path(path)
-        ),
-        _ => format!("{} does not read: {error}", ink.path(path)),
     }
 }
 
@@ -595,10 +476,27 @@ mod tests {
 
     #[test]
     fn not_served_sends_nobody_to_create() {
-        let status = Status::Refused(protocol::Status::NotServed {
-            path: "/code/web".into(),
-        });
+        let status = Status::Refused(
+            fleet_core::status::Project::NotServed {
+                path: "/code/web".into(),
+            }
+            .into(),
+        );
         assert_eq!(next(&status, crate::ui::output::ERR), None);
+    }
+
+    #[test]
+    fn a_hint_moved_to_its_area_still_shows() {
+        let status = Status::Refused(
+            fleet_core::status::Fleet::DirectoryNotRepoRoot {
+                path: "/code/app/src".into(),
+                root: "/code/app".into(),
+            }
+            .into(),
+        );
+        let hint = next(&status, crate::ui::output::ERR.piped())
+            .map(|h| console::strip_ansi_codes(&h).into_owned());
+        assert_eq!(hint.as_deref(), Some("run fleet create in /code/app"));
     }
 
     #[test]
