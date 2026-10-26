@@ -20,7 +20,7 @@ use fleet_core::paths::{Os, PathError, state_dir};
 use fleet_core::tools::{Git, Network, NoServiceManager, ServiceManager};
 
 use crate::protocol::{Problem, Request, Status};
-use cmd::{create, doctor, projects, remove, start, stop, uninstall};
+use cmd::{create, doctor, projects, remove, start, status, stop, uninstall};
 use ui::{output, words};
 
 // The invocation as clap parses it. Its help text is in words.rs.
@@ -93,6 +93,7 @@ where
         Request::Stop {
             project: Some(project),
         } => setup(service).and_then(|(_, dir)| projects::stop(&dir, project)),
+        Request::Status => setup(service).and_then(|(_, dir)| status::run(&dir)),
         Request::Uninstall => {
             setup(service).and_then(|(service, dir)| uninstall::run(&dir, service, ask))
         }
@@ -153,7 +154,7 @@ mod release_tests {
 
     #[test]
     fn debug_is_not_a_command_in_a_release_build() {
-        let err = Args::try_parse_from(["fleet", "debug", "list"]).err();
+        let err = Args::try_parse_from(["fleet", "debug", "stop", "s0"]).err();
         assert!(
             matches!(&err, Some(e) if e.kind() == clap::error::ErrorKind::InvalidSubcommand),
             "{err:?}"

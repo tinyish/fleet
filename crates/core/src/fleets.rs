@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::seats::{self, Roster};
 use crate::status::{self, Status};
 
 /// A fleet: its directory and the projects it serves, as canonical absolute
@@ -146,22 +147,24 @@ pub fn resolve_projects(
     Ok(sorted)
 }
 
-/// The projects the `fleet.toml` in `directory` says the fleet serves,
-/// resolved as [`resolve_projects`] does. Pure: the file is read with
-/// `read`, each project path is made canonical with `canonicalize`, and
-/// `repo_root_of` says where a repository's root is.
+/// What the `fleet.toml` in `directory` says of its fleet: the projects it
+/// serves, resolved as [`resolve_projects`] does, and its roles and seats,
+/// checked by [`seats::roster_of`]. Pure: the file is read with `read`, each
+/// project path is made canonical with `canonicalize`, and `repo_root_of`
+/// says where a repository's root is.
 ///
 /// # Errors
 ///
 /// Why the config cannot be used: the file is missing or unreadable, it
-/// does not parse, a project it names does not exist, or a project is not a
-/// repository's root.
-pub fn read_projects(
+/// does not parse, a project it names does not exist or is not a
+/// repository's root, or its roles and seats break a rule. A broken project
+/// is reported before a broken roster.
+pub fn read_fleet(
     directory: &Path,
     read: impl Fn(&Path) -> std::io::Result<String>,
     canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
     repo_root_of: impl Fn(&Path) -> Option<PathBuf>,
-) -> Result<Vec<PathBuf>, Status> {
+) -> Result<(Vec<PathBuf>, Roster), Status> {
     let path = directory.join(crate::paths::CONFIG_FILE);
     let text = read(&path).map_err(|e| Status::unusable(&path, &e))?;
     let parsed = crate::config::parse(&text).map_err(|e| {
@@ -176,7 +179,27 @@ pub fn read_projects(
     for project in crate::config::projects_of(&parsed, directory) {
         canonical.push(canonicalize(&project).map_err(|e| Status::unusable(&project, &e))?);
     }
-    resolve_projects(directory, &canonical, repo_root_of)
+    let projects = resolve_projects(directory, &canonical, repo_root_of)?;
+    Ok((projects, seats::roster_of(&parsed, directory, &path)?))
+}
+
+/// The fleet holding `directory`: the one whose directory, or one of whose
+/// projects, it is or is inside, by whole path components; the nearest,
+/// when it is inside two.
+#[must_use]
+pub fn holding<'a>(fleets: &'a [Fleet], directory: &Path) -> Option<&'a Fleet> {
+    fleets
+        .iter()
+        .filter_map(|f| {
+            std::iter::once(&f.directory)
+                .chain(&f.projects)
+                .filter(|p| directory.starts_with(p))
+                .map(|p| p.components().count())
+                .max()
+                .map(|depth| (depth, f))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, f)| f)
 }
 
 /// A project of `wanted` that a fleet in `others` already serves.
@@ -692,5 +715,52 @@ mod tests {
             decide_remove(&registered, Path::new("/elsewhere"), &[]),
             RemoveDecision::NothingHere
         );
+    }
+
+    #[test]
+    fn read_fleet_reads_projects_and_roster_from_one_file() {
+        let text = "[roles.w]\nadapter = \"/a\"\n[seats.s]\nrole = \"w\"\n";
+        let got = read_fleet(
+            Path::new("/c/app"),
+            |_| Ok(text.to_owned()),
+            |p| Ok(p.to_path_buf()),
+            |p| Some(p.to_path_buf()),
+        );
+        assert_eq!(
+            got.map(|(projects, roster)| (projects, roster.seats.len())),
+            Ok((vec![p("/c/app")], 1))
+        );
+    }
+
+    #[test]
+    fn read_fleet_reports_a_broken_project_before_a_broken_roster() {
+        let text = "projects = [\"/c/nowhere\"]\n[seats.s]\nrole = \"none\"\n";
+        let got = read_fleet(
+            Path::new("/w"),
+            |_| Ok(text.to_owned()),
+            |p| Ok(p.to_path_buf()),
+            |_| None,
+        );
+        assert!(matches!(got, Err(Status::Fleet(_))), "{got:?}");
+    }
+
+    #[test]
+    fn holding_finds_the_fleet_of_a_directory_inside_it_or_its_projects() {
+        let fleets = vec![fleet("/w", &["/c/api"]), fleet("/c/blog", &["/c/blog"])];
+        let at = |d: &str| holding(&fleets, Path::new(d)).map(|f| f.directory.clone());
+        assert_eq!(at("/w"), Some(p("/w")));
+        assert_eq!(at("/w/notes"), Some(p("/w")));
+        assert_eq!(at("/c/api/src"), Some(p("/w")));
+        assert_eq!(at("/c/blog"), Some(p("/c/blog")));
+        assert_eq!(at("/c/blogger"), None);
+        assert_eq!(at("/c"), None);
+        assert_eq!(at("/elsewhere"), None);
+        let nested = vec![
+            fleet("/c/blog", &["/c/blog"]),
+            fleet("/c/blog/wing", &["/c/api"]),
+        ];
+        let at = |d: &str| holding(&nested, Path::new(d)).map(|f| f.directory.clone());
+        assert_eq!(at("/c/blog/wing/x"), Some(p("/c/blog/wing")), "the nearest");
+        assert_eq!(at("/c/blog/src"), Some(p("/c/blog")));
     }
 }

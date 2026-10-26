@@ -88,8 +88,11 @@ pub enum Step {
     SessionLaunched {
         /// tinyfleet's id for it.
         session: String,
-        /// The adapter program that said what to run.
+        /// The adapter that said what to run, as it was named: a path, or
+        /// `<name>@<version>`.
         adapter: String,
+        /// The program `adapter` resolved to, as the session's row keeps it.
+        program: String,
         /// Where its agent works.
         directory: String,
         /// The model it was asked to run.
@@ -98,11 +101,85 @@ pub enum Step {
         /// What the agent was first told.
         #[serde(skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The fleet of the seat it was launched for.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fleet: Option<String>,
+        /// That seat.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seat: Option<String>,
     },
     /// A session was stopped: its tmux session ended and it is forgotten.
     SessionStopped {
         /// tinyfleet's id for it.
         session: String,
+    },
+    /// Re-reading a fleet's config gave it a seat.
+    SeatAdded {
+        /// The fleet's directory.
+        fleet: String,
+        /// The seat.
+        seat: String,
+        /// The label of its role.
+        role: String,
+    },
+    /// Re-reading a fleet's config took a seat away; its session, if any,
+    /// is left running, never revived.
+    SeatRemoved {
+        /// The fleet's directory.
+        fleet: String,
+        /// The seat.
+        seat: String,
+    },
+    /// Re-reading a fleet's config changed how a role runs; its seats'
+    /// sessions carry on as launched until their next revival.
+    RoleChanged {
+        /// The fleet's directory.
+        fleet: String,
+        /// The role's label.
+        role: String,
+    },
+    /// Re-reading a fleet's config moved a seat to another role; its session
+    /// carries on as launched until its next revival.
+    SeatChanged {
+        /// The fleet's directory.
+        fleet: String,
+        /// The seat.
+        seat: String,
+        /// The label of the role it now runs as.
+        role: String,
+    },
+    /// Re-reading a fleet's config gave it a role.
+    RoleAdded {
+        /// The fleet's directory.
+        fleet: String,
+        /// The role's label.
+        role: String,
+    },
+    /// Re-reading a fleet's config took a role away.
+    RoleRemoved {
+        /// The fleet's directory.
+        fleet: String,
+        /// The role's label.
+        role: String,
+    },
+    /// A seat's session whose pane had ended was cleared, before it was
+    /// launched again.
+    SessionGone {
+        /// tinyfleet's id for it.
+        session: String,
+        /// The fleet's directory.
+        fleet: String,
+        /// The seat.
+        seat: String,
+    },
+    /// Launching a seat failed; it backs off.
+    SeatLaunchFailed {
+        /// The fleet's directory.
+        fleet: String,
+        /// The seat.
+        seat: String,
+        /// Why, as the facts the CLI words.
+        why: Status,
     },
 }
 
@@ -175,13 +252,54 @@ mod tests {
             },
             Step::SessionLaunched {
                 session: "s1".into(),
-                adapter: "/a/claude".into(),
+                adapter: "claude-code@2.1.285".into(),
+                program: "/s/adapters/claude-code/2.1.285/fleet-claude-code".into(),
                 directory: "/c/app".into(),
                 model: Some("sonnet".into()),
                 prompt: None,
+                fleet: Some("/c/app".into()),
+                seat: Some("scribe".into()),
             },
             Step::SessionStopped {
                 session: "s1".into(),
+            },
+            Step::SeatAdded {
+                fleet: "/c/app".into(),
+                seat: "scribe".into(),
+                role: "writer".into(),
+            },
+            Step::SeatRemoved {
+                fleet: "/c/app".into(),
+                seat: "scribe".into(),
+            },
+            Step::RoleChanged {
+                fleet: "/c/app".into(),
+                role: "writer".into(),
+            },
+            Step::SeatChanged {
+                fleet: "/c/app".into(),
+                seat: "scribe".into(),
+                role: "critic".into(),
+            },
+            Step::RoleAdded {
+                fleet: "/c/app".into(),
+                role: "critic".into(),
+            },
+            Step::RoleRemoved {
+                fleet: "/c/app".into(),
+                role: "writer".into(),
+            },
+            Step::SessionGone {
+                session: "s1".into(),
+                fleet: "/c/app".into(),
+                seat: "scribe".into(),
+            },
+            Step::SeatLaunchFailed {
+                fleet: "/c/app".into(),
+                seat: "scribe".into(),
+                why: Status::File(status::File::Missing {
+                    path: "/c/app/notes".into(),
+                }),
             },
         ]
     }
@@ -209,7 +327,15 @@ mod tests {
                 "PROJECTS_TAKEN",
                 "FLEET_FORGOTTEN",
                 "SESSION_LAUNCHED",
-                "SESSION_STOPPED"
+                "SESSION_STOPPED",
+                "SEAT_ADDED",
+                "SEAT_REMOVED",
+                "ROLE_CHANGED",
+                "SEAT_CHANGED",
+                "ROLE_ADDED",
+                "ROLE_REMOVED",
+                "SESSION_GONE",
+                "SEAT_LAUNCH_FAILED"
             ]
         );
     }
@@ -227,6 +353,27 @@ mod tests {
         assert_eq!(
             Step::EveryFleetOn.to_row().ok().map(|r| r.1),
             Some("{}".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_debug_sessions_launch_names_no_seat() {
+        let launched = Step::SessionLaunched {
+            session: "s1".into(),
+            adapter: "/a/claude".into(),
+            program: "/a/claude".into(),
+            directory: "/c/app".into(),
+            model: None,
+            prompt: None,
+            fleet: None,
+            seat: None,
+        };
+        assert_eq!(
+            launched.to_row().ok().map(|r| r.1),
+            Some(
+                r#"{"adapter":"/a/claude","directory":"/c/app","program":"/a/claude","session":"s1"}"#
+                    .to_owned()
+            )
         );
     }
 }

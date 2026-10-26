@@ -1,6 +1,8 @@
 //! A fleet's config file, `fleet.toml`: what the person writes and the
 //! supervisor reads. Pure: rendering and parsing text.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::fleets::Fleet;
@@ -13,6 +15,37 @@ pub struct Config {
     /// The repositories a wingman fleet serves, as absolute paths.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
+    /// How to run each kind of agent, by its label.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, RoleEntry>,
+    /// The agents the supervisor keeps running, by their names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seats: BTreeMap<String, SeatEntry>,
+}
+
+/// One `[roles.<label>]` table, as written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleEntry {
+    /// The agent's adapter: a path, or `<name>@<version>`.
+    pub adapter: String,
+    /// The model, in the agent's own naming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Where the agent works, relative to the fleet directory or absolute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// What the agent is woken with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+/// One `[seats.<name>]` table, as written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeatEntry {
+    /// The label of the role it runs as.
+    pub role: String,
 }
 
 /// The config file could not be read: where, when the parser knows, and
@@ -43,6 +76,7 @@ impl Config {
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
+            ..Config::default()
         }
     }
 }
@@ -178,6 +212,7 @@ mod tests {
     fn relative_projects_resolve_against_the_fleet_directory() {
         let config = Config {
             projects: vec!["../code/app".into(), "/c/api".into()],
+            ..Config::default()
         };
         assert_eq!(
             projects_of(&config, std::path::Path::new("/f/work")),
@@ -203,7 +238,8 @@ mod tests {
         assert_eq!(
             parse(&text).ok(),
             Some(Config {
-                projects: Vec::new()
+                projects: Vec::new(),
+                ..Config::default()
             })
         );
     }

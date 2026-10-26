@@ -9,5 +9,6 @@ pub mod config;
 pub mod fleets;
 pub mod paths;
 pub mod protocol;
+pub mod seats;
 pub mod status;
 pub mod tools;

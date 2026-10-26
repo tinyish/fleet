@@ -1,7 +1,9 @@
 # Agents working on tinyfleet
 
 Read `CONTRIBUTING.md` before your first item. It is how tinyfleet is built,
-and it binds you. The rules you are most likely to break:
+and it binds you. Read `brain/conventions.md` too, before you design or write
+code: it holds the corrections Alberto has made once and wants never to make
+again. The rules you are most likely to break:
 
 - **Never look at the old code.** tinyfleet is being rebuilt from scratch.
   The implementation from before 2026-10-15 lives only on older branches and

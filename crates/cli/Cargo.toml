@@ -16,7 +16,7 @@ strum = { workspace = true, optional = true }
 [features]
 # `fleet specimen`: every line the CLI can print. Never in a release build.
 specimen = ["dep:strum", "fleet-core/specimen"]
-# `fleet debug`: launch, list and stop agents' sessions by hand, printing
+# `fleet debug`: launch and stop agents' sessions by hand, printing
 # the supervisor's replies as JSON. Never in a release build.
 debug = []
 

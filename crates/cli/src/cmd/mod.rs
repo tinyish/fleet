@@ -5,5 +5,6 @@ pub(crate) mod doctor;
 pub(crate) mod projects;
 pub(crate) mod remove;
 pub(crate) mod start;
+pub(crate) mod status;
 pub(crate) mod stop;
 pub(crate) mod uninstall;

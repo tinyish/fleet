@@ -26,6 +26,10 @@ pub(super) fn samples(kind: SessionKind) -> Vec<Session> {
         K::NoSuchSession => vec![S::NoSuchSession {
             session: "s3f9a01c2d4".into(),
         }],
+        K::LaunchTooLong => vec![S::LaunchTooLong {
+            bytes: 20_514,
+            limit: 16_000,
+        }],
     }
 }
 

@@ -227,6 +227,32 @@ pub enum File {
         /// The projects it lists.
         listed: Vec<PathBuf>,
     },
+    /// A role's label or a seat's name in a fleet's config is not letters,
+    /// digits, `-` and `_`, starting with a letter or a digit.
+    BadName {
+        /// The config file.
+        path: PathBuf,
+        /// The name.
+        name: String,
+    },
+    /// A seat in a fleet's config names a role the config does not have.
+    UnknownRole {
+        /// The config file.
+        path: PathBuf,
+        /// The seat.
+        seat: String,
+        /// The role it names.
+        role: String,
+    },
+    /// A role's adapter in a fleet's config is not one tinyfleet can name.
+    RoleAdapter {
+        /// The config file.
+        path: PathBuf,
+        /// The role.
+        role: String,
+        /// Why: an adapter refusal.
+        why: Box<Status>,
+    },
 }
 
 /// Agents' sessions: their adapters' answers, and tmux.
@@ -263,6 +289,14 @@ pub enum Session {
     NoSuchSession {
         /// The id asked for.
         session: String,
+    },
+    /// Launching the agent would make a tmux command longer than it takes:
+    /// its prompt is too long.
+    LaunchTooLong {
+        /// How long the command would be, in bytes.
+        bytes: usize,
+        /// The most tmux takes, in bytes.
+        limit: usize,
     },
 }
 

@@ -43,9 +43,15 @@ impl Tmux {
 
     /// Runs tmux with `args`; a failure names the tmux command, `doing`,
     /// and never the arguments, which hold the agent's environment and
-    /// prompt.
+    /// prompt. tmux runs the same whatever locale the supervisor has: with
+    /// none (as under launchd), tmux writes a list's tabs as `_`, so the
+    /// locale is cleared and `-u` keeps its output as it is.
     fn run(&self, doing: &str, args: &[OsString]) -> Result<Output, ToolError> {
         let out = Command::new(&self.program)
+            .env_remove("LC_ALL")
+            .env_remove("LC_CTYPE")
+            .env_remove("LANG")
+            .arg("-u")
             .arg("-S")
             .arg(&self.socket)
             .args(["-f", "/dev/null"])
@@ -110,6 +116,13 @@ impl Multiplexer for Tmux {
                 .map(|e| OsString::from(escaped(e))),
         );
         args.extend(program.argv.iter().map(|a| OsString::from(escaped(a))));
+        let bytes: usize = args.iter().map(|a| a.len() + 1).sum();
+        if bytes > LIMIT {
+            return Err(ToolError::TooLong {
+                bytes,
+                limit: LIMIT,
+            });
+        }
         let out = self.run("new-session", &args)?;
         pane_id(&out.stdout).ok_or_else(|| ToolError::Failed {
             command: "tmux new-session".into(),
@@ -155,10 +168,24 @@ impl Multiplexer for Tmux {
     }
 }
 
+/// tmux refuses a command longer than about 16 KiB (measured on tmux
+/// 3.7b); a launch longer than this is refused before tmux runs.
+pub const LIMIT: usize = 16_000;
+
 /// What the agent keeps of the supervisor's environment: who it runs as
 /// (Claude Code finds its login in the macOS Keychain by `USER`), where,
-/// and with what shell and language.
-const KEPT: [&str; 7] = ["HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG"];
+/// with what shell and language, and the person's SSH agent, which git over
+/// SSH needs.
+const KEPT: [&str; 8] = [
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TMPDIR",
+    "LANG",
+    "SSH_AUTH_SOCK",
+];
 
 /// The agent's whole environment, as `NAME=value` arguments to `env -i`:
 /// the supervisor's [`KEPT`] variables, tmux's `TERM`, then what the
@@ -461,5 +488,32 @@ mod tests {
             fs::read_to_string(s.dir.join("out")).ok().as_deref(),
             Some("yes|unset|tmux-256color")
         );
+    }
+
+    #[test]
+    fn a_launch_too_long_for_tmux_is_refused_before_tmux_runs() {
+        let Some(s) = server("long") else { return };
+        let mut program = sh("sleep 30");
+        program.argv.push("x".repeat(20_000));
+        let got = s.tmux.launch("s11", &s.dir, &program);
+        assert!(
+            matches!(got, Err(ToolError::TooLong { bytes, limit: LIMIT }) if bytes > 20_000),
+            "{got:?}"
+        );
+        assert!(!s.socket.exists(), "tmux never ran");
+    }
+
+    #[test]
+    fn a_launch_just_under_the_limit_runs() {
+        let Some(s) = server("under") else { return };
+        let mut program = sh("sleep 30");
+        program.argv.push("x".repeat(LIMIT - 4_000));
+        let got = s.tmux.launch("s12", &s.dir, &program);
+        assert!(got.is_ok(), "{got:?}");
+    }
+
+    #[test]
+    fn the_agent_keeps_the_ssh_agents_socket() {
+        assert!(KEPT.contains(&"SSH_AUTH_SOCK"));
     }
 }

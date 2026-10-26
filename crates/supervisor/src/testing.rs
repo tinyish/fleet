@@ -260,3 +260,51 @@ impl AgentAdapters for Shared {
         self.0.protocol(a)
     }
 }
+
+/// tmux a test keeps a handle on, to see and change its panes.
+pub(crate) struct SharedMux(pub(crate) std::sync::Arc<FakeMux>);
+impl Multiplexer for SharedMux {
+    fn launch(&self, s: &str, d: &Path, l: &Launched) -> Result<String, ToolError> {
+        self.0.launch(s, d, l)
+    }
+    fn panes(&self) -> Result<Vec<Pane>, ToolError> {
+        self.0.panes()
+    }
+    fn stop(&self, s: &str) -> Result<(), ToolError> {
+        self.0.stop(s)
+    }
+}
+
+/// A `tree` with a default fleet in `code/app`, on, whose roster has one
+/// role, `w` (adapter `/a/claude`, a prompt), and one seat of it, `scribe`.
+pub(crate) fn with_seat(name: &str) -> (PathBuf, Mutex<State>, fleet_core::fleets::Fleet) {
+    use fleet_core::seats::{Role, Roster, Seat};
+    let (root, state) = tree(name, &["app"]);
+    let app = code(&root, "app");
+    let fleet = fleet_core::fleets::Fleet {
+        directory: app.clone(),
+        projects: vec![app.clone()],
+    };
+    let roster = Roster {
+        roles: vec![Role {
+            label: "w".into(),
+            adapter: "/a/claude".into(),
+            model: None,
+            prompt: Some("You write the notes.".into()),
+            directory: app,
+        }],
+        seats: vec![Seat {
+            name: "scribe".into(),
+            role: "w".into(),
+        }],
+    };
+    let made = state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .write(|w| {
+            w.create_fleet(&fleet, || Ok(()))?;
+            w.set_roster(&fleet.directory, &roster)
+        });
+    assert!(made.is_ok(), "{made:?}");
+    (root, state, fleet)
+}

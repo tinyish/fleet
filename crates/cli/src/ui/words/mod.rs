@@ -16,6 +16,7 @@ mod create;
 mod doctor;
 mod file;
 mod fleet;
+mod overview;
 mod project;
 pub(crate) mod remove;
 mod session;
@@ -56,6 +57,10 @@ pub(crate) const STOP_ABOUT: &str =
 /// The help for `fleet stop --project`.
 pub(crate) const STOP_PROJECT_HELP: &str =
     "Turn only this project off, leaving the supervisor and the rest of its fleet as they are";
+
+/// The help for `fleet status`.
+pub(crate) const STATUS_ABOUT: &str = "Show each seat of the fleet here, or of every fleet, \
+     and what its agent is doing";
 
 /// The question asked at a terminal when the supervisor is not running.
 pub(crate) const START_PROMPT: &str = "The fleet supervisor is not running. Start it?";
@@ -106,6 +111,10 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
             remove::removed(response, ink)
         ),
         Response::Removed { response, .. } => remove::removed(response, ink),
+        Response::Overview {
+            overview,
+            now_millis,
+        } => overview::lines(overview, *now_millis, ink),
     }
 }
 
@@ -163,6 +172,14 @@ pub(crate) fn next_after(response: &Response, ink: Ink) -> Option<String> {
             "run {} in a repository to make one",
             ink.accent("fleet create")
         )),
+        Response::Overview { overview, .. }
+            if overview.fleets.is_empty() && overview.loose.is_empty() =>
+        {
+            Some(format!(
+                "run {} in a repository to make one",
+                ink.accent("fleet create")
+            ))
+        }
         _ => None,
     }
 }
@@ -385,11 +402,12 @@ fn tool(error: &ToolError, ink: Ink) -> String {
             ink.path(path)
         ),
         ToolError::UnitPath { which, path, why } => format!(
-            "the {} path {} {}",
+            "the {} {} {}",
             match which {
-                UnitPath::Program => "program",
-                UnitPath::StateDir => "state directory",
-                UnitPath::Log => "log",
+                UnitPath::Program => "program path",
+                UnitPath::StateDir => "state directory path",
+                UnitPath::Log => "log path",
+                UnitPath::SearchPath => "PATH",
             },
             ink.path(path),
             match why {
@@ -397,6 +415,9 @@ fn tool(error: &ToolError, ink: Ink) -> String {
                 BadUnitPath::Newline => "contains a newline",
             }
         ),
+        ToolError::TooLong { bytes, limit } => {
+            format!("the command would be {bytes} bytes, more than the {limit} it takes")
+        }
     }
 }
 
@@ -432,6 +453,7 @@ fn during_words(during: During) -> String {
         }
         During::TurningOff => "turning every project off".into(),
         During::TurningOffProject => "turning the project off".into(),
+        During::Looking => "asking the supervisor what its agents are doing".into(),
     }
 }
 

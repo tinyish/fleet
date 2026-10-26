@@ -1,5 +1,5 @@
 //! Every line the supervisor writes to its log. A command's words are the
-//! CLI's (`crates/cli/src/words.rs`): the supervisor answers commands with
+//! CLI's (`crates/cli/src/ui/words/`): the supervisor answers commands with
 //! facts and words only its own log, here (core.md invariant 9).
 
 use fleet_core::protocol;
@@ -7,7 +7,7 @@ use std::ffi::OsStr;
 use std::io;
 
 use fleet_core::paths::PathError;
-use fleet_core::protocol::ProtocolError;
+use fleet_core::protocol::{ProtocolError, Status};
 use state::StateError;
 
 use crate::{Doing, Error};
@@ -44,6 +44,16 @@ pub(crate) fn stopped(error: &Error) -> String {
 /// Why one request went unanswered.
 pub(crate) fn request_failed(error: &Error) -> String {
     format!("a request failed: {}", error_words(error))
+}
+
+/// Why a tick of the tending loop could not finish.
+pub(crate) fn tending_failed(error: &Error) -> String {
+    format!("tending the seats failed: {}", error_words(error))
+}
+
+/// Why no seat was launched: tmux could not list its panes.
+pub(crate) fn tmux_unlisted(why: &Status) -> String {
+    format!("tmux could not list its panes, so no seat is launched until it can: {why:?}")
 }
 
 /// Why a connection could not be accepted.

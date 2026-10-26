@@ -41,6 +41,9 @@ pub(crate) enum Request {
         #[arg(long, value_name = "PATH", help = crate::ui::words::STOP_PROJECT_HELP)]
         project: Option<PathBuf>,
     },
+    // `fleet status`.
+    #[command(about = crate::ui::words::STATUS_ABOUT)]
+    Status,
     // `fleet uninstall`.
     #[command(about = crate::ui::words::uninstall::ABOUT)]
     Uninstall,
@@ -106,6 +109,14 @@ pub(crate) enum Response {
         response: protocol::response::Remove,
         /// Whether remove found the supervisor running or started it.
         startup: Startup,
+    },
+    /// What `fleet status` found.
+    Overview {
+        /// What the supervisor said.
+        overview: protocol::response::Overview,
+        /// When it said it, by the CLI's clock, for how long until a seat's
+        /// next try.
+        now_millis: i64,
     },
 }
 
@@ -276,6 +287,8 @@ pub(crate) enum During {
     TurningOffProject,
     /// Removing a fleet, or taking projects out of one.
     Removing,
+    /// Asking what the agents are doing.
+    Looking,
 }
 
 #[cfg(test)]

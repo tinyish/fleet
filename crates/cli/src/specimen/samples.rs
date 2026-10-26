@@ -146,6 +146,13 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
                 })
             })
             .collect(),
+        ResponseKind::Overview => super::overview::overviews()
+            .into_iter()
+            .map(|overview| Response::Overview {
+                overview,
+                now_millis: super::overview::NOW,
+            })
+            .collect(),
     }
 }
 
@@ -426,6 +433,10 @@ fn tool_errors() -> Vec<ToolError> {
                     error: denied(),
                 })
                 .collect(),
+            ToolErrorKind::TooLong => vec![ToolError::TooLong {
+                bytes: 20_514,
+                limit: 16_000,
+            }],
             ToolErrorKind::UnitPath => UnitPath::iter()
                 .flat_map(|which| {
                     BadUnitPath::iter().map(move |why| ToolError::UnitPath {
@@ -446,6 +457,7 @@ fn unit_path(which: UnitPath, why: BadUnitPath) -> PathBuf {
         UnitPath::Program => ("/opt/fleet", "bin/fleet"),
         UnitPath::StateDir => ("/Users/you/fleet", "state"),
         UnitPath::Log => ("/Users/you/fleet/state", "supervisor.log"),
+        UnitPath::SearchPath => ("/opt/homebrew/bin:/usr/bin", ":/bin"),
     };
     let mut bytes = dir.as_bytes().to_vec();
     match why {
@@ -512,6 +524,7 @@ fn durings() -> Vec<During> {
             DuringKind::TurningOff => vec![During::TurningOff],
             DuringKind::TurningOffProject => vec![During::TurningOffProject],
             DuringKind::Removing => vec![During::Removing],
+            DuringKind::Looking => vec![During::Looking],
         })
         .collect()
 }

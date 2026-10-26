@@ -35,16 +35,8 @@ pub(crate) fn observe(
     now_millis: i64,
 ) -> Result<Observed, ToolError> {
     let panes = tools.mux.panes()?;
-    let by_id: BTreeMap<&str, &Pane> = panes.iter().map(|p| (p.id.as_str(), p)).collect();
-    // tmux numbers panes from %0 again when its server restarts, so a
-    // stale row's id can name another session's pane: it must be this
-    // session's too.
-    let pane_of = |row: &SessionRow| {
-        by_id
-            .get(row.pane.as_str())
-            .copied()
-            .filter(|p| p.session == row.id)
-    };
+    let by_id = by_id(&panes);
+    let pane_of = |row: &SessionRow| pane_of(&by_id, row);
     let mut asks: BTreeMap<&Path, Vec<SessionRef>> = BTreeMap::new();
     for row in sessions {
         if let Some(pane) = pane_of(row).filter(|p| !p.dead) {
@@ -88,6 +80,44 @@ pub(crate) fn observe(
     Ok(Observed { states, faults })
 }
 
+/// Whether the agent's pane of each of `sessions` is alive, by session id:
+/// tmux alone, for the tending loop, which never asks an adapter to read.
+///
+/// # Errors
+///
+/// When tmux cannot list its panes.
+pub(crate) fn alive(
+    tools: &Tools,
+    sessions: &[SessionRow],
+) -> Result<BTreeMap<String, bool>, ToolError> {
+    let panes = tools.mux.panes()?;
+    let by_id = by_id(&panes);
+    Ok(sessions
+        .iter()
+        .map(|row| {
+            (
+                row.id.clone(),
+                pane_of(&by_id, row).is_some_and(|p| !p.dead),
+            )
+        })
+        .collect())
+}
+
+/// `panes` by their ids.
+fn by_id(panes: &[Pane]) -> BTreeMap<&str, &Pane> {
+    panes.iter().map(|p| (p.id.as_str(), p)).collect()
+}
+
+/// The agent's pane of `row`: the one with its recorded id, in its session.
+/// tmux numbers panes from %0 again when its server restarts, so a stale
+/// row's id can name another session's pane: it must be this session's too.
+fn pane_of<'a>(by_id: &BTreeMap<&str, &'a Pane>, row: &SessionRow) -> Option<&'a Pane> {
+    by_id
+        .get(row.pane.as_str())
+        .copied()
+        .filter(|p| p.session == row.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +140,9 @@ mod tests {
             directory: "/c/app".into(),
             launch_time_millis: 0,
             pane: pane.into(),
+            fleet: None,
+            seat: None,
+            role_digest: None,
         }
     }
 
@@ -297,5 +330,35 @@ mod tests {
             observe(&t, &[row("s1", "/a/claude", "%1")], NOW),
             Err(ToolError::CouldNotRun { .. })
         ));
+    }
+
+    #[test]
+    fn alive_asks_tmux_alone_and_matches_id_and_session() {
+        let agents = Arc::new(FakeAgents::default());
+        let t = tools(
+            vec![
+                pane("s1", "%1", 100, false),
+                pane("s2", "%2", 200, true),
+                pane("other", "%3", 300, false),
+            ],
+            agents.clone(),
+        );
+        let rows = [
+            row("s1", "/a/claude", "%1"),
+            row("s2", "/a/claude", "%2"),
+            row("s3", "/a/claude", "%3"),
+            row("s4", "/a/claude", "%4"),
+        ];
+        let got = alive(&t, &rows).unwrap_or_default();
+        assert_eq!(
+            got,
+            BTreeMap::from([
+                ("s1".to_owned(), true),
+                ("s2".to_owned(), false),
+                ("s3".to_owned(), false),
+                ("s4".to_owned(), false),
+            ])
+        );
+        assert_eq!(asked(&agents), vec![], "no adapter was asked");
     }
 }

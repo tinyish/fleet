@@ -17,6 +17,10 @@ pub(crate) const ONE: Duration = Duration::from_secs(2);
 /// How long start and stop wait for the supervisor to come or go.
 pub(crate) const WAIT: Duration = Duration::from_secs(10);
 
+/// How long status waits for its answer: the supervisor asks each adapter
+/// to read its sessions, and an adapter may take 20 s before it is a fault.
+pub(crate) const LOOK: Duration = Duration::from_secs(30);
+
 /// The supervisor's socket in `state_dir`.
 pub(crate) fn socket(state_dir: &Path) -> Result<PathBuf, Status> {
     protocol::socket_path(state_dir).map_err(|e| Status::Cannot(Problem::SocketPathTooLong(e.0)))
@@ -93,17 +97,19 @@ pub(crate) fn wait_until(socket: &Path, want: bool, within: Duration) -> bool {
     }
 }
 
-/// Asks for `request` and keeps only the reply of the kind `pick` takes: a
-/// reply of another kind is an odd reply, the supervisor's no is a refusal,
-/// and a failed conversation is something the CLI cannot tell.
+/// Asks for `request`, waiting at most `within`, and keeps only the reply
+/// of the kind `pick` takes: a reply of another kind is an odd reply, the
+/// supervisor's no is a refusal, and a failed conversation is something the
+/// CLI cannot tell.
 fn ask_for<T>(
     socket: &Path,
     request: &Request,
+    within: Duration,
     during: During,
     to: &'static str,
     pick: impl FnOnce(Response) -> Option<T>,
 ) -> Result<T, Status> {
-    match ask(socket, request, ONE) {
+    match ask(socket, request, within) {
         Ok(Reply::Response(response)) => {
             pick(response).ok_or(Status::CouldNotTell(Doubt::OddReply { to }))
         }
@@ -117,10 +123,26 @@ pub(crate) fn create(socket: &Path, create: request::Create) -> Result<response:
     ask_for(
         socket,
         &Request::Create(create),
+        ONE,
         During::Creating,
         "create",
         |r| match r {
             Response::Create(created) => Some(created),
+            _ => None,
+        },
+    )
+}
+
+/// `fleet status`'s request, from `directory`.
+pub(crate) fn overview(socket: &Path, directory: PathBuf) -> Result<response::Overview, Status> {
+    ask_for(
+        socket,
+        &Request::Overview { directory },
+        LOOK,
+        During::Looking,
+        "status",
+        |r| match r {
+            Response::Overview(overview) => Some(overview),
             _ => None,
         },
     )
@@ -131,6 +153,7 @@ pub(crate) fn remove(socket: &Path, remove: request::Remove) -> Result<response:
     ask_for(
         socket,
         &Request::Remove(remove),
+        ONE,
         During::Removing,
         "remove",
         |r| match r {
@@ -146,6 +169,7 @@ pub(crate) fn start_all(socket: &Path, startup: Startup) -> Result<response::All
     ask_for(
         socket,
         &Request::Start(request::Start::All),
+        ONE,
         During::TurningOn(startup),
         "start",
         |r| match r {
@@ -164,6 +188,7 @@ pub(crate) fn start_project(
     ask_for(
         socket,
         &Request::Start(request::Start::Project { project }),
+        ONE,
         During::TurningOnProject(startup),
         "start --project",
         |r| match r {
@@ -178,6 +203,7 @@ pub(crate) fn stop_all(socket: &Path) -> Result<(), Status> {
     ask_for(
         socket,
         &Request::Stop(request::Stop::All),
+        ONE,
         During::TurningOff,
         "stop",
         |r| match r {
@@ -195,6 +221,7 @@ pub(crate) fn stop_project(
     ask_for(
         socket,
         &Request::Stop(request::Stop::Project { project }),
+        ONE,
         During::TurningOffProject,
         "stop --project",
         |r| match r {

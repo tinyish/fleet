@@ -26,6 +26,23 @@ pub(super) fn refused(refusal: &File, ink: Ink) -> String {
             column,
             error,
         } => bad_config(path, *line, *column, error, ink),
+        File::BadName { path, name } => format!(
+            "{} names {}: a name is letters, digits, - and _",
+            ink.path(path),
+            ink.accent(name)
+        ),
+        File::UnknownRole { path, seat, role } => format!(
+            "{}: the seat {} runs as {}, which is not a role there",
+            ink.path(path),
+            ink.accent(seat),
+            ink.accent(role)
+        ),
+        File::RoleAdapter { path, role, why } => format!(
+            "{}: the role {}: {}",
+            ink.path(path),
+            ink.accent(role),
+            super::refused(why, ink)
+        ),
     }
 }
 
@@ -40,7 +57,10 @@ pub(super) fn hint(refusal: &File, ink: Ink) -> Option<String> {
         File::Missing { .. }
         | File::Unreadable { .. }
         | File::CannotWrite { .. }
-        | File::BadConfig { .. } => return None,
+        | File::BadConfig { .. }
+        | File::BadName { .. }
+        | File::UnknownRole { .. }
+        | File::RoleAdapter { .. } => return None,
     })
 }
 

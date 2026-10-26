@@ -30,8 +30,8 @@ Onboarding is built; Delivery's primitives are drawn ahead of their code.
 | Part | Does | Lives |
 | --- | --- | --- |
 | **fleet CLI** | Turns a command into a request to the supervisor and reports the answer. Writes nothing, except starting the supervisor through the service manager. | one command |
-| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps persistent agents alive, holds each message until its agent is idle *(directional: arrives with Delivery)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
-| **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, its agents, the record of every step. | forever |
+| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps every seat filled, holds each message until its agent is idle *(directional: arrives with Delivery)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
+| **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, each fleet's roles and seats as its config last read, agents' sessions, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
 | **tmux server** | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
 | **adapter programs** *(directional for task trackers and forges)* | One program per kind of agent, task tracker or forge. An agent's adapter says how to launch it and reads what state it is in; a tracker's or a forge's reaches that tool. | one request: the supervisor runs it through a driver, and it exits with its answer |
@@ -52,9 +52,11 @@ path, asked for with `--project`, one project at a time: in a wingman fleet,
 stopping one project leaves the others as they were. A fleet whose config does
 not read stays off, named with why, and the others still come on. Once
 started, the supervisor comes back after a logout or a reboot, and every
-project with it as it was, until stop. Once agents arrive with the agent
-adapter (directional), stopping leaves agents' sessions running and starting
-adopts the sessions still there.
+project with it as it was, until stop. Stopping leaves agents' sessions
+running, and starting adopts the sessions still there. When start brings the
+supervisor up, it writes the person's `PATH` into the supervisor's unit, so
+the supervisor, and the agents it launches, find the tools the person's shell
+finds; a running supervisor keeps the `PATH` it started with.
 
 ## Outside tools
 
@@ -87,8 +89,7 @@ kind (`agents/`, `trackers/`, `forges/`), each released like fleet as
 prebuilt binaries. They are not installed with fleet: the first time one
 is run, the supervisor fetches the release for this machine, checks it
 against its SHA-256, and keeps it under the state directory. (Named today
-only by `fleet debug`; a fleet's config names its agents' adapters
-*(directional: with piece 1b)*.) This is the one thing tinyfleet reaches
+by hand with `fleet debug`, and by a fleet's config for its roles.) This is the one thing tinyfleet reaches
 the network for. Users can write their own adapters, in any language, for
 other agents, for trackers such as Linear or Jira, and for forges such as
 GitHub or GitLab, and name them by their path.
@@ -111,9 +112,9 @@ of its own, and adapters, tinyfleet's own included, take it by the tag
 
 ## Primitives
 
-> **Directional,** drawn for Delivery. Built so far, and reached only through
-> a debug build's `fleet debug`: a session launched through an agent adapter,
-> listed with its state, and stopped. Nothing else here is built yet.
+> **Directional,** drawn for Delivery. Built: roles and seats, kept filled by
+> the supervisor and shown by `fleet status`; a debug build's `fleet debug`
+> launches and stops a session by hand. Nothing else here is built yet.
 
 tinyfleet gives a person the building blocks of their own metaharness, and
 nothing that carries an opinion. Roles, workflows, reactions (such as "CI
@@ -122,7 +123,8 @@ top of these by users, through the supervisor's socket.
 
 | Primitive | What it is |
 | --- | --- |
-| agent definition | an entry in a fleet's config: an optional name, persistent or not, which agent adapter, which model, and the prompt the agent is woken with (its role); tinyfleet ships no roles |
+| role | an entry in a fleet's config saying how to run an agent: its label, which agent adapter, which model, the prompt the agent is woken with, and the directory it works in; tinyfleet ships no roles |
+| seat | a named entry in a fleet's config naming a role: an agent the supervisor keeps one session of running |
 | session | one agent running in tmux, on tinyfleet's socket |
 | message | text for one session, typed in once its agent is idle |
 | observe | a session's state and its last reply: asked for, waited on, or subscribed to |
@@ -131,24 +133,27 @@ top of these by users, through the supervisor's socket.
 | land | putting a workspace's branch on a project's trunk, through a forge adapter |
 | record | every step, kept in state; the events a subscriber follows are these steps |
 
-**Agents and sessions.** A persistent agent is one individual, like a
-coworker: the supervisor keeps exactly one session of it running, revives it
-when it is gone, and adopts it on start. Every revival starts fresh, with its
-wake-up prompt; what an agent remembers between lives is its user's to
-arrange. It runs in the directory its definition names, by default the fleet
-directory. Nobody spawns a persistent agent.
+**Seats, roles and sessions.** A seat is one individual, like a coworker:
+the supervisor keeps exactly one session of it running while any project of
+its fleet is on, revives it when it is gone, and adopts it on start. Every
+revival starts fresh, with its role's wake-up prompt; what an agent remembers
+between lives is its user's to arrange. It runs in the directory its role
+names, by default the fleet directory. Off only stops the reviving: nothing
+ends a seat's session but a person or a program telling it to stop. A seat
+taken out of the config leaves its session running, never revived; a role
+changed reaches a seat's session at its next revival. Nobody spawns a seat.
 
-A non-persistent definition is a template. Spawn makes a new session from it,
+A role is also a template. Spawn makes a new session from it,
 in the directory the caller gives (a project's root or a workspace), and
 answers with the session's id. tinyfleet never ends a spawned session on its
 own: it ends when it is told to stop, and one that dies is reported gone,
 never revived.
 
-**Messages.** A message goes to a persistent agent by its name or to a spawned
+**Messages.** A message goes to a seat by its name or to a spawned
 session by its id, and is one-way: sending answers once the message is
 queued. The supervisor types it in when the adapter reports the agent idle,
 and records it queued, then delivered, with who sent it: a person, a script
-or another agent's session. A message to a persistent agent being revived
+or another agent's session. A message to a seat being revived
 waits for its new session, and one to an agent that needs you waits until
 someone answers it: nothing is ever typed at a prompt. Reading the answer is
 observe's.
@@ -192,10 +197,10 @@ per project at a time, and refuses a conflict, changing nothing. A GitHub or
 GitLab adapter opens or merges a pull request instead, and reports CI and
 review results, which become events.
 
-**Open.** Not decided yet: how one agent definition serves several projects
-of a wingman fleet, whether a project can override it, which project's on or
-off governs a persistent agent, and how people share definitions. With
-Customization.
+**Open.** Not decided yet: how one role serves several projects of a
+wingman fleet, whether a project can override it, and how people share
+roles. With Customization. Decided: a seat is kept filled while any
+project of its fleet is on.
 
 ## Crates and dependency rules
 
@@ -273,8 +278,10 @@ changes an existing project's on or off: a project added comes in off, and
 one removed from its config is dropped. A fleet whose directory no longer
 exists is forgotten by the re-read, and start says so; one whose directory
 cannot be looked at is not gone, and stays off.
-*(Directional, with the agent adapter: on, it launches or adopts each agent's
-session in tmux; off, it leaves the sessions alone.)*
+Start also copies each fleet's roles and seats into state as its config
+reads, and the supervisor keeps every seat of a fleet with any project on
+filled, adopting the sessions still running; off, it leaves the sessions
+alone. Only state is read to do it, so a reboot needs no config.
 
 **remove**: the CLI asks the supervisor to remove the fleet whose directory
 is the current one, or, with `--project`, to take those projects out of a
@@ -344,6 +351,7 @@ contract's (see Boundaries).
     *(directional: arrives with Delivery)*.
 12. A message is typed into a session only while its agent is idle
     *(directional: arrives with Delivery)*.
+13. A seat has at most one live session.
 
 ## Where things are on disk
 
@@ -366,7 +374,7 @@ Each boundary's authoritative form lives in code; this table points at it.
 | CLI | person or script ↔ `fleet` | the transcript evals in `tests/cmd/` |
 | protocol | CLI ↔ supervisor: a `Request`, then a `Reply` (a `Response` or a `Status`) | `crates/core/src/protocol.rs` |
 | state schema | supervisor ↔ state | the migration in `crates/state/src/lib.rs` |
-| config file | person ↔ supervisor (and doctor, which reads it) | `crates/core/src/config.rs`, read through `fleets::read_projects` |
+| config file | person ↔ supervisor (and doctor, which reads it) | `crates/core/src/config.rs`, and `crates/core/src/seats.rs` for roles and seats, read through `fleets::read_fleet` |
 | tool interfaces | core ↔ drivers | `crates/core/src/tools.rs` |
 | adapter protocol | supervisor, through a driver ↔ adapter programs | `crates/adapter-sdk/src/agent.rs` for agents, and `crates/adapter-sdk/src/lib.rs` for what every adapter answers to `protocol`; *directional:* tasks and forges |
 | adapter releases | fleet-adapters' releases ↔ the supervisor | `crates/core/src/adapters.rs` |
@@ -441,8 +449,8 @@ debug`.
 | adapter | an external program tinyfleet reaches an agent, a task tracker or a forge through, run once per request; users can write their own; its protocol is `fleet-adapter-sdk`'s |
 | forge | where a branch lands: plain git onto the local trunk, or a host such as GitHub or GitLab |
 | primitive | a building block tinyfleet gives users for their own metaharness; it carries no opinion |
-| agent definition | an entry in a fleet's config saying how to run an agent: its name, whether it is persistent, its adapter, its model and its wake-up prompt |
-| persistent agent | an agent the supervisor keeps one session of running, revived fresh when it is gone |
+| role | an entry in a fleet's config saying how to run an agent: its label, its adapter, its model, its wake-up prompt and its directory |
+| seat | a named agent of a fleet, running as its role says, that the supervisor keeps one session of running, revived fresh when it is gone |
 | session | a tmux session on tinyfleet's socket, running one agent; a spawned session ends only when told to stop |
 | workspace | a git worktree on its own branch, under the state directory |
 | event | a recorded step, as a subscriber sees it |

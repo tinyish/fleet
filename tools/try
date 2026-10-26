@@ -90,8 +90,8 @@ banner() {
     say "  plain \`fleet stop\`, and \`fleet start\` while this supervisor is down, are refused"
     say "  while your real supervisor is installed. Do not follow that refusal's hint here:"
     say "  it stops your real supervisor."
-    say "  \`fleet debug launch|list|stop\` drives agents' sessions; watch one with"
-    say "  \`tmux -S state/tmux.sock attach -t <id>\`"
+    say "  \`fleet status\` shows the seats; \`fleet debug launch|stop\` drives a session by hand;"
+    say "  watch one with \`tmux -S state/tmux.sock attach -t <id>\`"
     say "  exit the shell to stop this supervisor and delete the sandbox"
 }
 

@@ -118,7 +118,7 @@ jobs:
         if: matrix.runs
         run: |
           status=0
-          target/${{ matrix.target }}/release/fleet debug list >/dev/null 2>&1 || status=$?
+          target/${{ matrix.target }}/release/fleet debug stop s0 >/dev/null 2>&1 || status=$?
           if [ "$status" -ne 2 ]; then
             echo "::error::fleet debug exited $status; a release binary must refuse it as an unknown command (exit 2)"
             exit 1

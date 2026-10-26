@@ -30,6 +30,12 @@ pub enum Request {
     Remove(request::Remove),
     /// For agents' sessions: `fleet debug` now.
     Session(request::Session),
+    /// For `fleet status`: the seats of the fleet holding `directory`, or
+    /// of every fleet when none holds it.
+    Overview {
+        /// The CLI's current directory, absolute.
+        directory: PathBuf,
+    },
 }
 
 /// The requests of each command. Always written with the module, as in
@@ -116,8 +122,6 @@ pub mod request {
             #[serde(default, skip_serializing_if = "Option::is_none")]
             prompt: Option<String>,
         },
-        /// Every session, with its state.
-        List,
         /// Stop a session: end its tmux session and forget it.
         Stop {
             /// The session's id.
@@ -158,6 +162,8 @@ pub enum Response {
     Remove(response::Remove),
     /// What was done to agents' sessions.
     Session(response::Session),
+    /// What `fleet status` shows.
+    Overview(response::Overview),
 }
 
 /// The responses of each command. Always written with the module, as in
@@ -326,15 +332,6 @@ pub mod response {
             /// Its id.
             session: String,
         },
-        /// Every session, with its state.
-        Listed {
-            /// The sessions, oldest first.
-            sessions: Vec<Listed>,
-            /// The adapters that failed to read their sessions, which are
-            /// unknown.
-            #[serde(default, skip_serializing_if = "Vec::is_empty")]
-            faults: Vec<Fault>,
-        },
         /// A session was stopped.
         Stopped {
             /// Its id.
@@ -364,6 +361,78 @@ pub mod response {
         pub adapter: PathBuf,
         /// How it failed.
         pub fault: AdapterFault,
+    }
+
+    /// What `fleet status` shows: the fleet holding the directory asked
+    /// about, or, when none holds it, every fleet and the sessions of none.
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Overview {
+        /// The fleets, by directory.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub fleets: Vec<FleetOverview>,
+        /// Sessions of no fleet: `fleet debug`'s, and those of a fleet
+        /// since removed. Only when every fleet is shown.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub loose: Vec<Listed>,
+        /// The adapters that failed to read their sessions, which are
+        /// unknown.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub faults: Vec<Fault>,
+    }
+
+    /// One fleet's seats.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct FleetOverview {
+        /// The fleet's directory.
+        pub directory: PathBuf,
+        /// Whether any of its projects is on, so its seats are kept filled.
+        pub on: bool,
+        /// Its seats, by name.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub seats: Vec<SeatOverview>,
+        /// Sessions of seats its config no longer has.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub orphans: Vec<Orphan>,
+    }
+
+    /// One seat, and its session.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct SeatOverview {
+        /// The seat's name.
+        pub name: String,
+        /// The label of its role.
+        pub role: String,
+        /// Its session: the live one, else the newest; none before its
+        /// first launch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub session: Option<Listed>,
+        /// Whether that session was launched from its role as it was
+        /// before an edit.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub older_role: bool,
+        /// Whether it is backing off: no session alive, and a wait.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub down: Option<Down>,
+    }
+
+    /// A seat backing off.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Down {
+        /// Why its last launch failed, or why nothing could be launched;
+        /// none when its sessions keep ending.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub why: Option<super::Status>,
+        /// When it is tried next, by the supervisor's clock.
+        pub next_try_millis: i64,
+    }
+
+    /// A session of a seat its fleet's config no longer has: never revived.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Orphan {
+        /// The seat it was launched for.
+        pub seat: String,
+        /// The session.
+        pub session: Listed,
     }
 
     /// A fleet whose config did not read, and why.
@@ -517,7 +586,9 @@ mod tests {
                 model: Some("sonnet".into()),
                 prompt: Some("hi; there".into()),
             }),
-            Request::Session(request::Session::List),
+            Request::Overview {
+                directory: PathBuf::from("/c/app/src"),
+            },
             Request::Session(request::Session::Stop {
                 session: "s1".into(),
             }),
@@ -674,23 +745,7 @@ mod tests {
             Reply::Response(Response::Session(response::Session::Launched {
                 session: "s1".into(),
             })),
-            Reply::Response(Response::Session(response::Session::Listed {
-                sessions: vec![response::Listed {
-                    session: "s1".into(),
-                    adapter: PathBuf::from("/a/claude"),
-                    directory: PathBuf::from("/c/app"),
-                    state: SessionState::NeedsYou {
-                        reason: Some(Reason::Permission),
-                    },
-                    launch_time_millis: 5,
-                }],
-                faults: vec![response::Fault {
-                    adapter: PathBuf::from("/a/codex"),
-                    fault: AdapterFault::TimedOut {
-                        after_millis: 20_000,
-                    },
-                }],
-            })),
+            Reply::Response(Response::Overview(overview())),
             Reply::Response(Response::Session(response::Session::Stopped {
                 session: "s1".into(),
             })),
@@ -720,21 +775,93 @@ mod tests {
         }
     }
 
+    fn listed(session: &str, state: SessionState) -> response::Listed {
+        response::Listed {
+            session: session.into(),
+            adapter: PathBuf::from("/a/claude"),
+            directory: PathBuf::from("/c/app"),
+            state,
+            launch_time_millis: 5,
+        }
+    }
+
+    /// An overview with one of everything.
+    fn overview() -> response::Overview {
+        response::Overview {
+            fleets: vec![response::FleetOverview {
+                directory: PathBuf::from("/c/app"),
+                on: true,
+                seats: vec![
+                    response::SeatOverview {
+                        name: "scribe".into(),
+                        role: "writer".into(),
+                        session: Some(listed(
+                            "s1",
+                            SessionState::NeedsYou {
+                                reason: Some(Reason::Permission),
+                            },
+                        )),
+                        older_role: true,
+                        down: None,
+                    },
+                    response::SeatOverview {
+                        name: "reader".into(),
+                        role: "writer".into(),
+                        session: None,
+                        older_role: false,
+                        down: Some(response::Down {
+                            why: Some(Status::Session(status::Session::NoSuchSession {
+                                session: "s0".into(),
+                            })),
+                            next_try_millis: 9,
+                        }),
+                    },
+                ],
+                orphans: vec![response::Orphan {
+                    seat: "old".into(),
+                    session: listed("s2", SessionState::Idle),
+                }],
+            }],
+            loose: vec![listed("s3", SessionState::Gone)],
+            faults: vec![response::Fault {
+                adapter: PathBuf::from("/a/codex"),
+                fault: AdapterFault::TimedOut {
+                    after_millis: 20_000,
+                },
+            }],
+        }
+    }
+
     #[test]
-    fn the_session_wire_nests_by_command() {
-        assert_eq!(
-            read_request(&mut Cursor::new(b"{\"session\":\"list\"}\n".to_vec())).ok(),
-            Some(Request::Session(request::Session::List))
-        );
+    fn the_overview_wire_leaves_out_what_is_empty() {
         let mut buf = Vec::new();
-        let listed = response::Session::Listed {
-            sessions: vec![],
-            faults: vec![],
+        let ask = Request::Overview {
+            directory: PathBuf::from("/c"),
         };
-        write_reply(&mut buf, &Reply::Response(Response::Session(listed))).ok();
+        write_request(&mut buf, &ask).ok();
+        assert_eq!(buf, b"{\"overview\":{\"directory\":\"/c\"}}\n");
+        let mut buf = Vec::new();
+        let seat = response::SeatOverview {
+            name: "s".into(),
+            role: "w".into(),
+            session: None,
+            older_role: false,
+            down: None,
+        };
+        let o = response::Overview {
+            fleets: vec![response::FleetOverview {
+                directory: PathBuf::from("/c"),
+                on: false,
+                seats: vec![seat],
+                orphans: vec![],
+            }],
+            ..response::Overview::default()
+        };
+        write_reply(&mut buf, &Reply::Response(Response::Overview(o))).ok();
         assert_eq!(
-            buf,
-            b"{\"response\":{\"session\":{\"listed\":{\"sessions\":[]}}}}\n"
+            String::from_utf8_lossy(&buf),
+            "{\"response\":{\"overview\":{\"fleets\":[{\"directory\":\"/c\",\"on\":false,\
+             \"seats\":[{\"name\":\"s\",\"role\":\"w\"}]}]}}}\n"
         );
     }
 

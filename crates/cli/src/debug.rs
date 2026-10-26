@@ -1,5 +1,5 @@
-//! `fleet debug`: launch, list and stop agents' sessions by hand, to try a
-//! piece before its real verbs exist. It prints the supervisor's reply as
+//! `fleet debug`: launch and stop agents' sessions by hand, to try a piece
+//! before its real verbs exist; `fleet status` lists them. It prints the supervisor's reply as
 //! the protocol's JSON line, so it has no words of its own: like the
 //! specimen's labels, what it shows is facts and code identifiers. Compiled
 //! only with the `debug` feature, so a release build has no such command.
@@ -45,8 +45,6 @@ enum What {
         #[arg(long)]
         prompt: Option<String>,
     },
-    /// Every session, with its state.
-    List,
     /// Stop a session.
     Stop {
         /// The session's id.
@@ -109,7 +107,6 @@ fn request_for(what: What, cwd: &Path) -> Request {
             model,
             prompt,
         },
-        What::List => request::Session::List,
         What::Stop { session } => request::Session::Stop { session },
     })
 }
@@ -183,11 +180,8 @@ mod tests {
     }
 
     #[test]
-    fn list_and_stop_ask_for_what_they_name() {
-        assert_eq!(
-            parsed(&["debug", "list"]),
-            Some(Request::Session(request::Session::List))
-        );
+    fn stop_asks_for_what_it_names_and_list_is_gone() {
+        assert_eq!(parsed(&["debug", "list"]), None);
         assert_eq!(
             parsed(&["debug", "stop", "s1"]),
             Some(Request::Session(request::Session::Stop {

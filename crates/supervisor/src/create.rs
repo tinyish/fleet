@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use fleet_core::config::{self, Config};
 use fleet_core::fleets::{self, CreateDecision, decide_create};
 use fleet_core::protocol::{Reply, Response, Status, response};
+use fleet_core::seats::{self, Roster};
 use fleet_core::status;
 use state::{State, Step};
 
@@ -35,13 +36,13 @@ pub(crate) fn create(
     let path = directory.join(fleet_core::paths::CONFIG_FILE);
     // A file no fleet owns is adopted: the fleet is the one it describes.
     let adopting = path.exists() && !registered.iter().any(|f| f.directory == directory);
-    let asked = if adopting {
-        match adopted_projects(&directory, &canonical) {
-            Ok(projects) => projects,
+    let (asked, roster) = if adopting {
+        match adopted(&directory, &canonical) {
+            Ok(adopted) => adopted,
             Err(status) => return Ok(Reply::Status(status)),
         }
     } else {
-        canonical
+        (canonical, Roster::default())
     };
     let fleet = match decide_create(&registered, &directory, &asked, repo_root_of) {
         CreateDecision::Create(fleet) => fleet,
@@ -76,6 +77,8 @@ pub(crate) fn create(
                 .open(&path)?
                 .write_all(text.as_bytes())
         })?;
+        let moved = seats::diff(&Roster::default(), &roster);
+        crate::projects::set_roster(w, &fleet.directory, &roster, &moved)?;
         w.record(&created)
     });
     match written {
@@ -97,11 +100,11 @@ pub(crate) fn create(
 }
 
 /// The projects to create from the `fleet.toml` already in `directory`,
-/// read as start reads it. Projects `asked` for must be the ones it lists.
-/// A default fleet's file lists its own directory, which create takes as no
-/// projects.
-fn adopted_projects(directory: &Path, asked: &[PathBuf]) -> Result<Vec<PathBuf>, Status> {
-    let listed = fleets::read_projects(
+/// read as start reads it, and its roles and seats. Projects `asked` for
+/// must be the ones it lists. A default fleet's file lists its own
+/// directory, which create takes as no projects.
+fn adopted(directory: &Path, asked: &[PathBuf]) -> Result<(Vec<PathBuf>, Roster), Status> {
+    let (listed, roster) = fleets::read_fleet(
         directory,
         |p| fs::read_to_string(p),
         |p| fs::canonicalize(p),
@@ -119,9 +122,9 @@ fn adopted_projects(directory: &Path, asked: &[PathBuf]) -> Result<Vec<PathBuf>,
         }
     }
     if listed == [directory] {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), roster));
     }
-    Ok(listed)
+    Ok((listed, roster))
 }
 
 #[cfg(test)]
@@ -246,6 +249,54 @@ mod tests {
         let made = created(create(&state, &app, &[]).ok());
         assert_eq!(made.map(|c| c.adopted), Some(false));
         assert!(app.join("fleet.toml").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn seats_of(state: &Mutex<State>, fleet: &Path) -> Vec<String> {
+        let roster = lock(state).roster(fleet).unwrap_or_default();
+        roster.seats.into_iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn an_adopted_file_brings_its_roles_and_seats() {
+        let (root, state) = tree("adopt-seats", &["app"]);
+        let app = code(&root, "app");
+        let _ = fs::write(
+            app.join("fleet.toml"),
+            "[roles.w]\nadapter = \"/a/claude\"\n[seats.scribe]\nrole = \"w\"\n",
+        );
+        assert!(created(create(&state, &app, &[]).ok()).is_some());
+        assert_eq!(seats_of(&state, &app), ["scribe"]);
+        let steps = lock(&state).steps().unwrap_or_default();
+        assert_eq!(steps, ["ROLE_ADDED", "SEAT_ADDED", "FLEET_CREATED"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_adopted_file_whose_seats_break_a_rule_is_refused() {
+        let (root, state) = tree("adopt-bad-seat", &["app"]);
+        let app = code(&root, "app");
+        let _ = fs::write(app.join("fleet.toml"), "[seats.scribe]\nrole = \"w\"\n");
+        let reply = create(&state, &app, &[]).ok();
+        assert!(
+            matches!(
+                &reply,
+                Some(Reply::Status(Status::File(
+                    status::File::UnknownRole { .. }
+                )))
+            ),
+            "{reply:?}"
+        );
+        assert_eq!(fleets(&state), Vec::<Fleet>::new());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_fresh_fleet_has_no_seats() {
+        let (root, state) = tree("fresh-seats", &["app"]);
+        let app = code(&root, "app");
+        assert!(created(create(&state, &app, &[]).ok()).is_some());
+        assert_eq!(seats_of(&state, &app), Vec::<String>::new());
         let _ = fs::remove_dir_all(root);
     }
 }

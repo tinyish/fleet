@@ -45,6 +45,7 @@ pub(crate) fn ensure_supervisor(
     let unit = SupervisorUnit {
         program,
         state_dir: state_dir.to_path_buf(),
+        search_path: std::env::var_os("PATH"),
     };
     service.enable_and_start(&unit).map_err(|error| {
         Status::Cannot(Problem::ServiceManager {

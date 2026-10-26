@@ -360,14 +360,14 @@ fn project_found() -> Option<Found> {
         Err(e) => return Some(Found::NoCurrentDir(e)),
     };
     let dir = here.ancestors().find(|d| d.join(CONFIG_FILE).is_file())?;
-    let read = fleets::read_projects(
+    let read = fleets::read_fleet(
         dir,
         |p| fs::read_to_string(p),
         |p| fs::canonicalize(p),
         repo_root_of,
     );
     Some(match read {
-        Ok(projects) => Found::FleetPresent {
+        Ok((projects, _)) => Found::FleetPresent {
             dir: dir.to_path_buf(),
             projects: projects.len(),
         },

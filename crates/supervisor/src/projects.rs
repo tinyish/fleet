@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use fleet_core::fleets::{self, Fleet, conflicts};
 use fleet_core::protocol::{Reply, Response, Status, response};
+use fleet_core::seats::{self, Roster, RosterChange};
 use fleet_core::status;
 use state::{State, StateError, Step, Write};
 
@@ -16,19 +17,22 @@ fn shown(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// The fleet as its config now describes it: read, parsed and resolved, but
-/// not yet checked against other fleets.
-fn read_resolved(fleet: &Fleet) -> Result<Fleet, Status> {
-    let projects = fleets::read_projects(
+/// The fleet as its config now describes it, and its roles and seats:
+/// read, parsed and resolved, but not yet checked against other fleets.
+fn read_resolved(fleet: &Fleet) -> Result<(Fleet, Roster), Status> {
+    let (projects, roster) = fleets::read_fleet(
         &fleet.directory,
         |p| fs::read_to_string(p),
         |p| fs::canonicalize(p),
         repo_root_of,
     )?;
-    Ok(Fleet {
-        directory: fleet.directory.clone(),
-        projects,
-    })
+    Ok((
+        Fleet {
+            directory: fleet.directory.clone(),
+            projects,
+        },
+        roster,
+    ))
 }
 
 /// What re-reading every fleet's config would change, before any of it is
@@ -40,6 +44,8 @@ struct Reread {
     broken: Vec<(Fleet, Status)>,
     /// What each fleet that read gains and loses.
     changes: Vec<(PathBuf, fleets::Change)>,
+    /// Each fleet that read: its roles and seats, and what moved in them.
+    rosters: Vec<(PathBuf, Roster, RosterChange)>,
     /// Fleets whose directory no longer exists: they are forgotten. One that
     /// cannot be looked at (permission denied) is not gone; it is broken.
     gone: Vec<Fleet>,
@@ -60,24 +66,27 @@ fn reread_all(state: &State) -> Result<Reread, Error> {
             continue;
         }
         match read_resolved(&fleet) {
-            Ok(wanted) => read.push((fleet, wanted)),
+            Ok((wanted, roster)) => read.push((fleet, wanted, roster)),
             Err(why) => broken.push((fleet, why)),
         }
     }
     let claims: Vec<Fleet> = read
         .iter()
-        .map(|(_, wanted)| wanted.clone())
+        .map(|(_, wanted, _)| wanted.clone())
         .chain(broken.iter().map(|(stored, _)| stored.clone()))
         .collect();
     let clashes = conflicts(&claims);
     let mut ok = Vec::new();
     let mut changes = Vec::new();
-    for (stored, wanted) in read {
+    let mut rosters = Vec::new();
+    for (stored, wanted, roster) in read {
         if let Some((_, why)) = clashes.iter().find(|(dir, _)| *dir == stored.directory) {
             broken.push((stored, why.clone()));
         } else {
             let change = fleets::sync(&stored.projects, &wanted.projects);
             changes.push((stored.directory.clone(), change));
+            let moved = seats::diff(&state.roster(&stored.directory)?, &roster);
+            rosters.push((stored.directory.clone(), roster, moved));
             ok.push(wanted);
         }
     }
@@ -85,6 +94,7 @@ fn reread_all(state: &State) -> Result<Reread, Error> {
         ok,
         broken,
         changes,
+        rosters,
         gone,
     })
 }
@@ -110,7 +120,8 @@ impl Reread {
 
     /// Writes the re-read and records its steps, inside the caller's
     /// transaction. A project only added comes in off; a moved one keeps its
-    /// on or off.
+    /// on or off. A fleet that read has its roles and seats replaced; a
+    /// broken one keeps the ones it had.
     fn apply(&self, w: &mut Write<'_>) -> Result<(), StateError> {
         w.apply_reread(&self.changes)?;
         for (fleet, change) in &self.changes {
@@ -127,6 +138,9 @@ impl Reread {
                 })?;
             }
         }
+        for (fleet, roster, moved) in &self.rosters {
+            set_roster(w, fleet, roster, moved)?;
+        }
         for (fleet, why) in &self.broken {
             w.record(&Step::FleetConfigBroken {
                 fleet: shown(&fleet.directory),
@@ -141,6 +155,58 @@ impl Reread {
         }
         Ok(())
     }
+}
+
+/// Keeps `roster` as `fleet`'s roles and seats, recording what `moved`: a
+/// role before the seats that name it, and after the seats that leave it.
+pub(crate) fn set_roster(
+    w: &mut Write<'_>,
+    fleet: &Path,
+    roster: &Roster,
+    moved: &RosterChange,
+) -> Result<(), StateError> {
+    w.set_roster(fleet, roster)?;
+    let f = shown(fleet);
+    let mut steps = Vec::new();
+    for role in &moved.roles_added {
+        steps.push(Step::RoleAdded {
+            fleet: f.clone(),
+            role: role.clone(),
+        });
+    }
+    for role in &moved.changed {
+        steps.push(Step::RoleChanged {
+            fleet: f.clone(),
+            role: role.clone(),
+        });
+    }
+    for seat in &moved.added {
+        steps.push(Step::SeatAdded {
+            fleet: f.clone(),
+            seat: seat.name.clone(),
+            role: seat.role.clone(),
+        });
+    }
+    for seat in &moved.moved {
+        steps.push(Step::SeatChanged {
+            fleet: f.clone(),
+            seat: seat.name.clone(),
+            role: seat.role.clone(),
+        });
+    }
+    for seat in &moved.removed {
+        steps.push(Step::SeatRemoved {
+            fleet: f.clone(),
+            seat: seat.clone(),
+        });
+    }
+    for role in &moved.roles_removed {
+        steps.push(Step::RoleRemoved {
+            fleet: f.clone(),
+            role: role.clone(),
+        });
+    }
+    steps.iter().try_for_each(|step| w.record(step))
 }
 
 /// Re-reads every fleet's config and turns every project on. A fleet whose
@@ -425,6 +491,94 @@ mod tests {
         assert_eq!(all.as_ref().map(|a| a.forgotten.len()), Some(0), "{all:?}");
         assert_eq!(all.map(|a| a.stayed_off.len()), Some(1));
         assert_eq!(lock(&state).fleets().map(|f| f.len()).ok(), Some(1));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_config_with(root: &Path, projects: &[&str], extra: &str) {
+        write_config(root, projects);
+        let path = root.join("wing").join("fleet.toml");
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let _ = fs::write(path, format!("{text}{extra}"));
+    }
+
+    const SEAT: &str = "[roles.w]\nadapter = \"/a/claude\"\n[seats.scribe]\nrole = \"w\"\n";
+
+    fn seats_of(state: &Mutex<State>, fleet: &Path) -> Vec<String> {
+        let roster = lock(state).roster(fleet).unwrap_or_default();
+        roster.seats.into_iter().map(|s| s.name).collect()
+    }
+
+    fn steps_of(state: &Mutex<State>) -> Vec<String> {
+        lock(state).steps().unwrap_or_default()
+    }
+
+    #[test]
+    fn start_keeps_each_fleets_roster_and_records_what_moved() {
+        let (root, state) = tree("roster-start", &["api"]);
+        let fleet = wingman(&root, &state, &["api"]);
+        write_config_with(&root, &["api"], SEAT);
+        assert!(all_on(&state).is_ok());
+        assert_eq!(seats_of(&state, &fleet.directory), ["scribe"]);
+        assert!(steps_of(&state).contains(&"SEAT_ADDED".to_owned()));
+        write_config_with(
+            &root,
+            &["api"],
+            "[roles.w]\nadapter = \"/a/other\"\n[seats.critic]\nrole = \"w\"\n",
+        );
+        assert!(all_on(&state).is_ok());
+        assert_eq!(seats_of(&state, &fleet.directory), ["critic"]);
+        let steps = steps_of(&state);
+        for want in ["SEAT_REMOVED", "ROLE_CHANGED"] {
+            assert!(steps.iter().any(|s| s == want), "{want}: {steps:?}");
+        }
+        assert_eq!(steps.iter().filter(|s| *s == "SEAT_ADDED").count(), 2);
+        write_config_with(
+            &root,
+            &["api"],
+            "[roles.k]\nadapter = \"/a/other\"\n[seats.critic]\nrole = \"k\"\n",
+        );
+        assert!(all_on(&state).is_ok());
+        let steps = steps_of(&state);
+        for want in ["SEAT_CHANGED", "ROLE_ADDED", "ROLE_REMOVED"] {
+            assert!(steps.iter().any(|s| s == want), "{want}: {steps:?}");
+        }
+        // Read again unchanged, nothing moved.
+        let before = steps.len();
+        assert!(all_on(&state).is_ok());
+        let after = steps_of(&state);
+        assert!(
+            after[before..]
+                .iter()
+                .all(|s| !s.starts_with("SEAT_") && s != "ROLE_CHANGED"),
+            "{after:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_broken_config_keeps_the_last_roster() {
+        let (root, state) = tree("roster-broken", &["api"]);
+        let fleet = wingman(&root, &state, &["api"]);
+        write_config_with(&root, &["api"], SEAT);
+        assert!(all_on(&state).is_ok());
+        write_config_with(&root, &["api"], "[seats.scribe]\nrole = \"nobody\"\n");
+        let all = all_on_reply(&state);
+        assert_eq!(all.map(|a| a.stayed_off.len()), Some(1));
+        assert_eq!(
+            seats_of(&state, &fleet.directory),
+            ["scribe"],
+            "the snapshot stays as it was"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn start_project_keeps_the_roster_too() {
+        let (root, state) = tree("roster-project", &["api"]);
+        let fleet = wingman(&root, &state, &["api"]);
+        write_config_with(&root, &["api"], SEAT);
+        assert!(project_on(&state, &root.join("code").join("api")).is_ok());
+        assert_eq!(seats_of(&state, &fleet.directory), ["scribe"]);
         let _ = fs::remove_dir_all(root);
     }
 }

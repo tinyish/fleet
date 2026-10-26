@@ -24,6 +24,26 @@ pub(super) fn samples(kind: FileKind) -> Vec<File> {
             error: denied().to_string(),
         },
         K::BadConfig => bad_config_sample(),
+        K::BadName => F::BadName {
+            path: path("/code/app/fleet.toml"),
+            name: "release notes".into(),
+        },
+        K::UnknownRole => F::UnknownRole {
+            path: path("/code/app/fleet.toml"),
+            seat: "scribe".into(),
+            role: "writer".into(),
+        },
+        K::RoleAdapter => F::RoleAdapter {
+            path: path("/code/app/fleet.toml"),
+            role: "writer".into(),
+            why: Box::new(
+                fleet_core::status::Adapter::AdapterUnpinned {
+                    name: "claude-code".into(),
+                    latest: None,
+                }
+                .into(),
+            ),
+        },
     }]
 }
 

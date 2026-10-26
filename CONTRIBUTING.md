@@ -238,6 +238,10 @@ filed as beads.
   - no dead code and no unused dependencies.
 
   Loosening a guard is a change Alberto approves, never a builder's call.
+- **Conventions** (`brain/conventions.md`) hold what the guards cannot check:
+  corrections from review, each with why and where it came from, so none is
+  made twice. A review that corrects something that could come up again adds
+  one.
 - **Scheduled health passes** run at each release, before the docs pass.
   Agents look for duplication, dead code and simplification, security
   problems, and the architecture doc's fidelity. Each finding is an

@@ -1,6 +1,7 @@
 //! The tool interfaces: one trait per kind of outside tool. Drivers
 //! implement them; nothing in this crate runs a tool.
 
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,9 @@ pub struct SupervisorUnit {
     pub program: PathBuf,
     /// The state directory, passed to the supervisor as `FLEET_STATE_DIR`.
     pub state_dir: PathBuf,
+    /// The `PATH` the supervisor, and the agents it launches, run with: the
+    /// CLI's, so they find what the person's shell finds. None writes none.
+    pub search_path: Option<OsString>,
 }
 
 /// An outside tool failed, as facts; the CLI words them.
@@ -63,6 +67,13 @@ pub enum ToolError {
         /// Why it cannot.
         why: BadUnitPath,
     },
+    /// A command would be longer than the tool takes.
+    TooLong {
+        /// How long it would be, in bytes.
+        bytes: usize,
+        /// The most the tool takes, in bytes.
+        limit: usize,
+    },
 }
 
 /// What was being done to a file when it failed.
@@ -91,6 +102,8 @@ pub enum UnitPath {
     StateDir,
     /// The supervisor's log.
     Log,
+    /// The `PATH` it runs with.
+    SearchPath,
 }
 
 /// Why a path cannot go into a unit file.

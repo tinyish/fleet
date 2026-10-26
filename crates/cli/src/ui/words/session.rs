@@ -34,6 +34,11 @@ pub(super) fn refused(refusal: &Session, ink: Ink) -> String {
         Session::NoSuchSession { session } => {
             format!("there is no session {}", ink.accent(session))
         }
+        Session::LaunchTooLong { bytes, limit } => format!(
+            "launching the agent takes a {bytes}-byte {} command, more than the {limit} it \
+             takes: shorten its role's prompt",
+            ink.accent("tmux")
+        ),
     }
 }
 
@@ -43,11 +48,13 @@ pub(super) fn hint(refusal: &Session, _ink: Ink) -> Option<String> {
         Session::AdapterFailed { .. }
         | Session::MultiplexerCouldNotRun { .. }
         | Session::MultiplexerFailed { .. }
-        | Session::NoSuchSession { .. } => None,
+        | Session::NoSuchSession { .. }
+        | Session::LaunchTooLong { .. } => None,
     }
 }
 
-fn fault_words(fault: &AdapterFault) -> String {
+/// How an adapter failed, in words.
+pub(super) fn fault_words(fault: &AdapterFault) -> String {
     match fault {
         AdapterFault::CouldNotRun { error } => format!("it could not be run: {error}"),
         AdapterFault::Exited { code, said } => {

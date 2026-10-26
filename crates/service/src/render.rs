@@ -82,6 +82,13 @@ pub fn systemd_state_dir(text: &str) -> Option<PathBuf> {
 pub fn plist(unit: &SupervisorUnit, log: &Path) -> Result<String, ToolError> {
     let program = xml(text(&unit.program, UnitPath::Program)?);
     let state_dir = xml(text(&unit.state_dir, UnitPath::StateDir)?);
+    let search_path = match &unit.search_path {
+        Some(p) => format!(
+            "\t\t<key>PATH</key>\n\t\t<string>{}</string>\n",
+            xml(text(Path::new(p), UnitPath::SearchPath)?)
+        ),
+        None => String::new(),
+    };
     let log = xml(text(log, UnitPath::Log)?);
     let label = crate::LAUNCHD_LABEL;
     Ok(format!(
@@ -100,7 +107,7 @@ pub fn plist(unit: &SupervisorUnit, log: &Path) -> Result<String, ToolError> {
 \t<dict>
 \t\t<key>FLEET_STATE_DIR</key>
 \t\t<string>{state_dir}</string>
-\t</dict>
+{search_path}\t</dict>
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>KeepAlive</key>
@@ -132,6 +139,16 @@ pub fn systemd_unit(unit: &SupervisorUnit) -> Result<String, ToolError> {
         ),
         false,
     );
+    let search_path = match &unit.search_path {
+        Some(p) => format!(
+            "Environment={}\n",
+            systemd_quoted(
+                &format!("PATH={}", text(Path::new(p), UnitPath::SearchPath)?),
+                false
+            )
+        ),
+        None => String::new(),
+    };
     Ok(format!(
         "[Unit]
 Description=tinyfleet supervisor
@@ -139,7 +156,7 @@ Description=tinyfleet supervisor
 [Service]
 ExecStart={program} supervise
 Environment={env}
-Restart=on-failure
+{search_path}Restart=on-failure
 
 [Install]
 WantedBy=default.target
@@ -155,6 +172,7 @@ mod tests {
         SupervisorUnit {
             program: PathBuf::from(program),
             state_dir: PathBuf::from(state_dir),
+            search_path: None,
         }
     }
 
@@ -213,5 +231,50 @@ mod tests {
     fn a_newline_in_a_path_is_refused() {
         assert!(systemd_unit(&unit("/a\nb", "/s")).is_err());
         assert!(plist(&unit("/a\nb", "/s"), Path::new("/s/l")).is_err());
+    }
+
+    #[test]
+    fn the_path_is_carried_into_both_units_escaped() {
+        let mut u = unit("/bin/fleet", "/s");
+        u.search_path = Some("/opt/homebrew/bin:/a&b/50%".into());
+        let p = plist(&u, Path::new("/s/l")).unwrap_or_default();
+        assert!(
+            p.contains("<key>PATH</key>\n\t\t<string>/opt/homebrew/bin:/a&amp;b/50%</string>"),
+            "{p}"
+        );
+        assert_eq!(plist_state_dir(&p), Some(PathBuf::from("/s")));
+        let s = systemd_unit(&u).unwrap_or_default();
+        assert!(
+            s.contains("Environment=\"PATH=/opt/homebrew/bin:/a&b/50%%\"\n"),
+            "{s}"
+        );
+        assert_eq!(systemd_state_dir(&s), Some(PathBuf::from("/s")));
+    }
+
+    #[test]
+    fn no_path_writes_none_and_a_bad_one_is_refused() {
+        let u = unit("/bin/fleet", "/s");
+        assert!(
+            !plist(&u, Path::new("/s/l"))
+                .unwrap_or_default()
+                .contains("PATH")
+        );
+        assert!(!systemd_unit(&u).unwrap_or_default().contains("PATH"));
+        let mut bad = unit("/bin/fleet", "/s");
+        bad.search_path = Some("/a\n/b".into());
+        assert!(matches!(
+            systemd_unit(&bad),
+            Err(ToolError::UnitPath {
+                which: UnitPath::SearchPath,
+                ..
+            })
+        ));
+        assert!(matches!(
+            plist(&bad, Path::new("/s/l")),
+            Err(ToolError::UnitPath {
+                which: UnitPath::SearchPath,
+                ..
+            })
+        ));
     }
 }

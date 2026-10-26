@@ -4,9 +4,11 @@
 mod adapters;
 mod create;
 mod observe;
+mod overview;
 mod projects;
 mod remove;
 mod sessions;
+mod tending;
 #[cfg(test)]
 mod testing;
 mod words;
@@ -145,6 +147,16 @@ fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
         state_dir,
         std::env::var(fleet_core::adapters::BASE_VAR).ok(),
     ));
+    let tending = Arc::new(tending::Tending::new());
+    {
+        let (state, tools, store, tending) = (
+            Arc::clone(&state),
+            Arc::clone(&tools),
+            Arc::clone(&store),
+            Arc::clone(&tending),
+        );
+        thread::spawn(move || tending::run(&state, &tools, &store, &tending));
+    }
 
     for conn in listener.incoming() {
         match conn {
@@ -152,8 +164,9 @@ fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
                 let state = Arc::clone(&state);
                 let tools = Arc::clone(&tools);
                 let store = Arc::clone(&store);
+                let tending = Arc::clone(&tending);
                 thread::spawn(move || {
-                    if let Err(e) = answer(&state, &tools, &store, &stream) {
+                    if let Err(e) = answer(&state, &tools, &store, &tending, &stream) {
                         log(&words::request_failed(&e));
                     }
                 });
@@ -169,6 +182,7 @@ fn answer(
     state: &Mutex<State>,
     tools: &Tools,
     store: &adapters::Store,
+    tending: &tending::Tending,
     stream: &UnixStream,
 ) -> Result<(), Error> {
     stream
@@ -215,7 +229,9 @@ fn answer(
                 prompt,
             },
         )?,
-        Ok(Request::Session(request::Session::List)) => sessions::list(state, tools)?,
+        Ok(Request::Overview { directory }) => {
+            overview::overview(state, tools, tending, &directory)?
+        }
         Ok(Request::Session(request::Session::Stop { session })) => {
             sessions::stop(state, tools, &session)?
         }
@@ -224,6 +240,10 @@ fn answer(
         Err(ProtocolError::Malformed(error)) => Reply::Status(Status::Malformed { error }),
         Err(e) => return Err(Error::Protocol(e)),
     };
+    // Start and create may have turned projects on or read seats: tend now.
+    if let Reply::Response(Response::Start(_) | Response::Create(_)) = reply {
+        tending.poke();
+    }
     let mut writer = stream;
     protocol::write_reply(&mut writer, &reply).map_err(Error::Protocol)
 }
