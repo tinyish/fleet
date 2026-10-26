@@ -21,7 +21,7 @@ solve it.
 | --- | --- | --- | --- |
 | Onboarding | Put a fleet on a project | Get from nothing to a fleet running, on this machine and this project, ready for agents | [onboarding](onboarding.md) |
 | Delivery | Hand work to agents and see it land | Give a piece of work to an agent or a person, and have it delivered, reviewed and landed on the trunk | [delivery](delivery.md) |
-| Autonomy | Keep agents working unattended | Leave agents working, have stuck or idle ones noticed and moved on, and have standing duties happen on their own | not written yet |
+| Autonomy | Keep agents working unattended | Leave agents working, have stuck or idle ones noticed and moved on, and have routines run on their own | [autonomy](autonomy.md) |
 | Safety | Keep agents from doing damage | Be sure an agent cannot run a dangerous command, whatever it was asked to do | not written yet |
 | Visibility | See what the fleet is doing | Know at a glance what each agent is doing, and trace any item back through what happened to it | not written yet |
 | Customization | Make the fleet work my way | Choose the roles, workflows and values a fleet runs with, and share them between projects | not written yet |
