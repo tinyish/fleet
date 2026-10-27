@@ -5,8 +5,9 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use fleet_core::agent::Launched;
 use fleet_core::tools::{FileStep, Multiplexer, Pane, ToolError};
@@ -41,13 +42,20 @@ impl Tmux {
         }
     }
 
-    /// Runs tmux with `args`; a failure names the tmux command, `doing`,
-    /// and never the arguments, which hold the agent's environment and
-    /// prompt. tmux runs the same whatever locale the supervisor has: with
-    /// none (as under launchd), tmux writes a list's tabs as `_`, so the
-    /// locale is cleared and `-u` keeps its output as it is.
-    fn run(&self, doing: &str, args: &[OsString]) -> Result<Output, ToolError> {
-        let out = Command::new(&self.program)
+    /// Runs tmux with `args`, writing `input`, when given, to its stdin; a
+    /// failure names the tmux command, `doing`, and never the arguments or
+    /// the input, which hold the agent's environment, prompt and messages.
+    /// tmux runs the same whatever locale the supervisor has: with none (as
+    /// under launchd), tmux writes a list's tabs as `_`, so the locale is
+    /// cleared and `-u` keeps its output as it is.
+    fn run(
+        &self,
+        doing: &str,
+        args: &[OsString],
+        input: Option<&[u8]>,
+    ) -> Result<Output, ToolError> {
+        let mut command = Command::new(&self.program);
+        command
             .env_remove("LC_ALL")
             .env_remove("LC_CTYPE")
             .env_remove("LANG")
@@ -55,12 +63,25 @@ impl Tmux {
             .arg("-S")
             .arg(&self.socket)
             .args(["-f", "/dev/null"])
-            .args(args)
-            .output()
-            .map_err(|error| ToolError::CouldNotRun {
-                program: "tmux".into(),
-                error,
-            })?;
+            .args(args);
+        let out = match input {
+            None => command.output(),
+            Some(bytes) => command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin.write_all(bytes)?;
+                    }
+                    child.wait_with_output()
+                }),
+        }
+        .map_err(|error| ToolError::CouldNotRun {
+            program: "tmux".into(),
+            error,
+        })?;
         if out.status.success() {
             return Ok(out);
         }
@@ -123,7 +144,7 @@ impl Multiplexer for Tmux {
                 limit: LIMIT,
             });
         }
-        let out = self.run("new-session", &args)?;
+        let out = self.run("new-session", &args, None)?;
         pane_id(&out.stdout).ok_or_else(|| ToolError::Failed {
             command: "tmux new-session".into(),
             said: String::new(),
@@ -140,7 +161,7 @@ impl Multiplexer for Tmux {
         .iter()
         .map(OsString::from)
         .collect();
-        match self.run("list-panes", &args) {
+        match self.run("list-panes", &args, None) {
             Ok(out) => Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter_map(pane)
@@ -156,7 +177,7 @@ impl Multiplexer for Tmux {
             .iter()
             .map(OsString::from)
             .collect();
-        match self.run("kill-session", &args) {
+        match self.run("kill-session", &args, None) {
             Ok(_) => Ok(()),
             Err(ToolError::Failed { said, .. })
                 if no_server(&said) || said.contains("can't find session") =>
@@ -165,6 +186,37 @@ impl Multiplexer for Tmux {
             }
             Err(e) => Err(e),
         }
+    }
+
+    fn type_in(&self, pane: &str, text: &str) -> Result<(), ToolError> {
+        // The text goes in on stdin, through a buffer of the pane's own:
+        // never on tmux's command line, so its length limit, `;` and `#`
+        // do not apply.
+        let buffer = format!("fleet-{}", pane.trim_start_matches('%'));
+        let args: Vec<OsString> = [
+            "load-buffer",
+            "-b",
+            &buffer,
+            "-",
+            ";",
+            "paste-buffer",
+            "-p",
+            "-d",
+            "-b",
+            &buffer,
+            "-t",
+            pane,
+            ";",
+            "send-keys",
+            "-t",
+            pane,
+            "Enter",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        self.run("paste-buffer", &args, Some(text.as_bytes()))
+            .map(|_| ())
     }
 }
 
@@ -307,6 +359,31 @@ mod tests {
 
     fn written(path: &std::path::Path) -> bool {
         fs::metadata(path).is_ok_and(|m| m.len() > 0)
+    }
+
+    #[test]
+    fn types_text_in_whole_then_enter() {
+        let Some(s) = server("type") else { return };
+        let out = s.dir.join("typed");
+        let pane = s
+            .tmux
+            .launch("s1", &s.dir, &sh(&format!("cat > '{}'", out.display())))
+            .unwrap_or_default();
+        wait_for("the pane", || {
+            s.tmux
+                .panes()
+                .is_ok_and(|p| p.iter().any(|p| p.id == pane && !p.dead))
+        });
+        let text = "one; two\n#three 'q' \"d\" #{session_name}";
+        let typed = s.tmux.type_in(&pane, text);
+        assert!(typed.is_ok(), "{typed:?}");
+        wait_for("the text", || {
+            fs::read_to_string(&out).is_ok_and(|t| t.lines().count() == 2 && t.ends_with('\n'))
+        });
+        assert_eq!(
+            fs::read_to_string(&out).unwrap_or_default(),
+            format!("{text}\n")
+        );
     }
 
     #[test]

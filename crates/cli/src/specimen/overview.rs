@@ -1,8 +1,9 @@
 //! Samples of what `fleet status` shows, for the specimen. `Overview` is a
 //! struct, so the compiler cannot check these shapes: a fleet on with a seat
 //! in each state (idle, working from an older role, needing you, down with a
-//! reason and without, not running) and an orphan; a fleet off with no
-//! seats; the sessions of no fleet; an adapter that could not read; and
+//! reason and without, not running) and an orphan, with messages waiting
+//! for the working seat; a fleet off with no seats; the sessions of no
+//! fleet, one with a message waiting; an adapter that could not read; and
 //! nothing at all.
 
 use fleet_core::agent::{AdapterFault, Reason, SessionState, Verb};
@@ -26,6 +27,7 @@ fn listed(session: &str, state: SessionState) -> Listed {
         directory: path(APP),
         state,
         launch_time_millis: NOW - 600_000,
+        waiting: 0,
     }
 }
 
@@ -36,6 +38,7 @@ fn seat(name: &str, role: &str, session: Option<Listed>) -> SeatOverview {
         session,
         older_role: false,
         down: None,
+        waiting: 0,
     }
 }
 
@@ -60,6 +63,7 @@ pub(super) fn overviews() -> Vec<Overview> {
             ),
             SeatOverview {
                 older_role: true,
+                waiting: 2,
                 ..seat(
                     "critic",
                     "review",
@@ -114,7 +118,10 @@ pub(super) fn overviews() -> Vec<Overview> {
         },
         Overview {
             fleets: vec![on, off],
-            loose: vec![listed("s3f9a01c2d4", SessionState::Unknown)],
+            loose: vec![Listed {
+                waiting: 1,
+                ..listed("s3f9a01c2d4", SessionState::Unknown)
+            }],
             faults: vec![Fault {
                 adapter: path(CLAUDE),
                 fault: AdapterFault::TimedOut {

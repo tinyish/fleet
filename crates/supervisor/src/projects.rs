@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use fleet_core::fleets::{self, Fleet, conflicts};
+use fleet_core::messages::Dropped;
 use fleet_core::protocol::{Reply, Response, Status, response};
 use fleet_core::seats::{self, Roster, RosterChange};
 use fleet_core::status;
@@ -152,6 +153,7 @@ impl Reread {
             w.record(&Step::FleetForgotten {
                 directory: shown(&fleet.directory),
             })?;
+            crate::messages::fleet_leaves(w, &fleet.directory)?;
         }
         Ok(())
     }
@@ -159,6 +161,7 @@ impl Reread {
 
 /// Keeps `roster` as `fleet`'s roles and seats, recording what `moved`: a
 /// role before the seats that name it, and after the seats that leave it.
+/// The messages held for a seat that leaves are dropped, and recorded.
 pub(crate) fn set_roster(
     w: &mut Write<'_>,
     fleet: &Path,
@@ -206,7 +209,12 @@ pub(crate) fn set_roster(
             role: role.clone(),
         });
     }
-    steps.iter().try_for_each(|step| w.record(step))
+    steps.iter().try_for_each(|step| w.record(step))?;
+    for seat in &moved.removed {
+        let ids = w.drop_for_seat(fleet, seat)?;
+        crate::messages::dropped(w, &ids, Dropped::SeatRemoved)?;
+    }
+    Ok(())
 }
 
 /// Re-reads every fleet's config and turns every project on. A fleet whose

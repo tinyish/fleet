@@ -10,8 +10,10 @@ use fleet_core::seats::{Role, Roster, Seat};
 use fleet_core::tools::ToolError;
 use rusqlite::{Connection, params};
 
+mod messages;
 mod step;
 
+pub use messages::MessageRow;
 pub use step::Step;
 
 /// The schema version this code reads and writes. Until tinyfleet's first
@@ -134,6 +136,20 @@ impl State {
                      name  TEXT NOT NULL,
                      role  TEXT NOT NULL,
                      PRIMARY KEY (fleet, name)
+                 );
+                 CREATE TABLE messages (
+                     id                TEXT    PRIMARY KEY,
+                     fleet             TEXT,
+                     seat              TEXT,
+                     session           TEXT,
+                     sender            TEXT    NOT NULL
+                         CHECK (sender IN ('person', 'script', 'session')),
+                     sender_session    TEXT,
+                     text              TEXT    NOT NULL,
+                     queue_time_millis INTEGER NOT NULL,
+                     CHECK ((fleet IS NOT NULL AND seat IS NOT NULL AND session IS NULL)
+                         OR (fleet IS NULL AND seat IS NULL AND session IS NOT NULL)),
+                     CHECK ((sender = 'session') = (sender_session IS NOT NULL))
                  );
                  PRAGMA user_version = 1;
                  COMMIT;",

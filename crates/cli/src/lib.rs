@@ -20,7 +20,7 @@ use fleet_core::paths::{Os, PathError, state_dir};
 use fleet_core::tools::{Git, Network, NoServiceManager, ServiceManager};
 
 use crate::protocol::{Problem, Request, Status};
-use cmd::{create, doctor, projects, remove, start, status, stop, uninstall};
+use cmd::{create, doctor, message, projects, remove, start, status, stop, uninstall};
 use ui::{output, words};
 
 // The invocation as clap parses it. Its help text is in words.rs.
@@ -94,6 +94,9 @@ where
             project: Some(project),
         } => setup(service).and_then(|(_, dir)| projects::stop(&dir, project)),
         Request::Status => setup(service).and_then(|(_, dir)| status::run(&dir)),
+        Request::Message { to, text } => {
+            setup(service).and_then(|(_, dir)| message::run(&dir, to, text.as_deref()))
+        }
         Request::Uninstall => {
             setup(service).and_then(|(service, dir)| uninstall::run(&dir, service, ask))
         }

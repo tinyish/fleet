@@ -270,6 +270,9 @@ mod tests {
         fn stop(&self, _: &str) -> Result<(), ToolError> {
             Ok(())
         }
+        fn type_in(&self, _: &str, _: &str) -> Result<(), ToolError> {
+            Ok(())
+        }
     }
 
     fn tools(net: FakeNet, speaks: Result<u32, AdapterFault>) -> Tools {

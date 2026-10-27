@@ -1,13 +1,15 @@
 //! The tending loop (core.md § Primitives, Seats): one thread that keeps
 //! every seat of a fleet with a project on filled. It ticks every 2 s, and
-//! at once when start or create pokes it; a tick reads what is wanted from
-//! state, asks tmux what is alive, and launches what is missing, backing a
-//! seat off when it keeps failing. It never ends a session.
+//! at once when start, create or a message pokes it; a tick reads what is
+//! wanted from state, asks tmux what is alive, and launches what is
+//! missing, backing a seat off when it keeps failing; then it delivers the
+//! messages waiting for idle agents. It never ends a session.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use fleet_core::messages::Hold;
 use fleet_core::protocol::Status;
 use fleet_core::seats::{self, Act, Backoff, Held, SeatKey, Tended, Wanted};
 use state::{State, Step};
@@ -40,6 +42,9 @@ pub(crate) struct Tending {
     blind: Mutex<bool>,
     poked: Mutex<bool>,
     bell: Condvar,
+    /// The sessions that took a paste and take no more yet (core.md
+    /// invariant 12); only the loop's own thread changes them.
+    holds: Mutex<BTreeMap<String, Hold>>,
 }
 
 impl Tending {
@@ -60,6 +65,19 @@ impl Tending {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The sessions held after a paste.
+    pub(crate) fn holds(&self) -> BTreeMap<String, Hold> {
+        self.holds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Keeps `holds` as the sessions held after a paste.
+    pub(crate) fn set_holds(&self, holds: BTreeMap<String, Hold>) {
+        *self.holds.lock().unwrap_or_else(PoisonError::into_inner) = holds;
     }
 
     fn set_down(&self, key: &SeatKey, down: Option<Down>) {
@@ -94,9 +112,24 @@ pub(crate) fn run(
     }
 }
 
-/// One tick at `now_millis`: every wanted seat kept, launched or left
-/// waiting.
+/// One tick at `now_millis`: the seats tended, then what waits for an idle
+/// agent delivered, whatever is on or off. Delivery's clock is moved on by
+/// the time tending took, so a hold starts when its paste goes in.
 pub(crate) fn tick(
+    state: &Mutex<State>,
+    tools: &Tools,
+    store: &Store,
+    tending: &Tending,
+    now_millis: i64,
+) {
+    let started = Instant::now();
+    tend_seats(state, tools, store, tending, now_millis);
+    let spent = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    crate::messages::deliver(state, tools, tending, now_millis.saturating_add(spent));
+}
+
+/// Every wanted seat at `now_millis` kept, launched or left waiting.
+fn tend_seats(
     state: &Mutex<State>,
     tools: &Tools,
     store: &Store,

@@ -7,6 +7,7 @@ mod adapter;
 mod doctor;
 mod file;
 mod fleet;
+mod message;
 mod overview;
 mod project;
 mod refusals;

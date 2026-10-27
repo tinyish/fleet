@@ -9,9 +9,10 @@ use std::sync::Mutex;
 
 use fleet_core::agent::SessionState;
 use fleet_core::fleets;
+use fleet_core::messages::Recipient;
 use fleet_core::protocol::{Reply, Response, response};
 use fleet_core::seats::{Roster, SeatKey};
-use state::{FleetRoster, SessionRow, State, now_millis};
+use state::{FleetRoster, MessageRow, SessionRow, State, now_millis};
 
 use crate::tending::{Down, Tending};
 use crate::{Error, Tools, lock};
@@ -25,9 +26,9 @@ pub(crate) fn overview(
     directory: &Path,
 ) -> Result<Reply, Error> {
     let directory = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
-    let (fleets, rosters, rows) = {
+    let (fleets, rosters, rows, held) = {
         let s = lock(state);
-        (s.fleets()?, s.rosters()?, s.sessions()?)
+        (s.fleets()?, s.rosters()?, s.sessions()?, s.held()?)
     };
     let here = fleets::holding(&fleets, &directory).map(|f| f.directory.clone());
     let rosters: Vec<FleetRoster> = rosters
@@ -57,11 +58,15 @@ pub(crate) fn overview(
             .copied()
             .unwrap_or(SessionState::Unknown),
         launch_time_millis: row.launch_time_millis,
+        waiting: held
+            .iter()
+            .filter(|m| matches!(&m.to, Recipient::Session { session } if *session == row.id))
+            .count(),
     };
     let down = tending.down();
     let fleets = rosters
         .iter()
-        .map(|f| fleet_overview(f, &shown, &down, &listed))
+        .map(|f| fleet_overview(f, &shown, &down, &held, &listed))
         .collect();
     let loose = shown
         .iter()
@@ -75,11 +80,13 @@ pub(crate) fn overview(
     })))
 }
 
-/// One fleet's seats, with their sessions among `rows`, and its orphans.
+/// One fleet's seats, with their sessions among `rows` and the messages
+/// `held` for each, and its orphans.
 fn fleet_overview(
     f: &FleetRoster,
     rows: &[SessionRow],
     down: &BTreeMap<SeatKey, Down>,
+    held: &[MessageRow],
     listed: &impl Fn(&SessionRow) -> response::Listed,
 ) -> response::FleetOverview {
     let mine: Vec<&SessionRow> = rows
@@ -100,7 +107,17 @@ fn fleet_overview(
                 .copied()
                 .filter(|r| r.seat.as_deref() == Some(seat.name.as_str()))
                 .collect();
-            seat_overview(&f.roster, seat, &of_seat, down.get(&key), listed)
+            let waiting = held
+                .iter()
+                .filter(|m| {
+                    matches!(&m.to, Recipient::Seat { fleet, seat: s }
+                        if *fleet == f.fleet && *s == seat.name)
+                })
+                .count();
+            response::SeatOverview {
+                waiting,
+                ..seat_overview(&f.roster, seat, &of_seat, down.get(&key), listed)
+            }
         })
         .collect();
     let orphans = mine
@@ -151,6 +168,7 @@ fn seat_overview(
             why: d.why.clone(),
             next_try_millis: d.backoff.next_try_millis,
         }),
+        waiting: 0,
     }
 }
 
@@ -204,6 +222,26 @@ mod tests {
         let tending = Tending::new();
         tending::tick(&state, &t, &store(&root), &tending, 1_000);
         (root, state, mux, t, tending)
+    }
+
+    #[test]
+    fn waiting_messages_are_counted_for_their_seat_and_their_session() {
+        let (root, state, _mux, t, tending) = filled("ov-waiting");
+        let app = crate::testing::code(&root, "app");
+        let id = lock(&state).sessions().unwrap_or_default()[0].id.clone();
+        for (to, text) in [("scribe", "one"), ("scribe", "two"), (id.as_str(), "three")] {
+            let ask = crate::messages::Send {
+                directory: app.clone(),
+                to: to.into(),
+                text: text.into(),
+                sender: fleet_core::messages::Sender::Person,
+            };
+            assert!(crate::messages::send(&state, &t, &ask).is_ok());
+        }
+        let o = answer(&state, &t, &tending, &app);
+        let seat = &o.fleets[0].seats[0];
+        assert_eq!(seat.waiting, 2);
+        assert_eq!(seat.session.as_ref().map(|s| s.waiting), Some(1));
     }
 
     fn debug_session(root: &Path, state: &Mutex<State>, t: &Tools) -> String {

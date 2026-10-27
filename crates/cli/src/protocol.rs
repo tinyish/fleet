@@ -44,6 +44,16 @@ pub(crate) enum Request {
     // `fleet status`.
     #[command(about = crate::ui::words::STATUS_ABOUT)]
     Status,
+    // `fleet message`: text for a seat of the fleet here, or a session by
+    // its id, from the argument or piped in.
+    #[command(about = crate::ui::words::MESSAGE_ABOUT)]
+    Message {
+        #[arg(value_name = "SEAT_OR_SESSION", help = crate::ui::words::MESSAGE_TO_HELP)]
+        to: String,
+        // A message may start with a dash, as a list item does.
+        #[arg(value_name = "TEXT", allow_hyphen_values = true, help = crate::ui::words::MESSAGE_TEXT_HELP)]
+        text: Option<String>,
+    },
     // `fleet uninstall`.
     #[command(about = crate::ui::words::uninstall::ABOUT)]
     Uninstall,
@@ -118,6 +128,8 @@ pub(crate) enum Response {
         /// next try.
         now_millis: i64,
     },
+    /// `fleet message` queued a message.
+    MessageQueued(protocol::response::Message),
 }
 
 /// How a command found the supervisor.
@@ -190,6 +202,10 @@ pub(crate) enum Problem {
     SocketPathTooLong(PathBuf),
     /// The current directory could not be read.
     NoCurrentDir(io::Error),
+    /// `fleet message` was given no text, and nothing is piped in.
+    NoText,
+    /// What was piped in to `fleet message` could not be read.
+    ReadText(io::Error),
     /// A path given on the command line could not be used.
     BadPath {
         /// The path.
@@ -289,6 +305,8 @@ pub(crate) enum During {
     Removing,
     /// Asking what the agents are doing.
     Looking,
+    /// Asking the supervisor to queue a message.
+    Messaging,
 }
 
 #[cfg(test)]

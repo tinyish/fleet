@@ -148,6 +148,24 @@ pub(crate) fn overview(socket: &Path, directory: PathBuf) -> Result<response::Ov
     )
 }
 
+/// `fleet message`'s request.
+pub(crate) fn message(
+    socket: &Path,
+    message: request::Message,
+) -> Result<response::Message, Status> {
+    ask_for(
+        socket,
+        &Request::Message(message),
+        WAIT,
+        During::Messaging,
+        "message",
+        |r| match r {
+            Response::Message(queued) => Some(queued),
+            _ => None,
+        },
+    )
+}
+
 /// `fleet remove`'s request.
 pub(crate) fn remove(socket: &Path, remove: request::Remove) -> Result<response::Remove, Status> {
     ask_for(

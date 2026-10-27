@@ -1,6 +1,7 @@
 //! The steps the record holds, and how one is stored as a row: its name in
 //! AIP-126 spelling in `step`, and its fields as a JSON object in `detail`.
 
+use fleet_core::messages::{Dropped, Recipient, Sender};
 use fleet_core::protocol::response::ConfigFate;
 use fleet_core::status::Status;
 use serde::Serialize;
@@ -181,6 +182,31 @@ pub enum Step {
         /// Why, as the facts the CLI words.
         why: Status,
     },
+    /// A message was queued for a seat or a session.
+    MessageQueued {
+        /// Its id.
+        message: String,
+        /// Who it is for.
+        to: Recipient,
+        /// Who sent it.
+        sender: Sender,
+        /// What it says.
+        text: String,
+    },
+    /// A held message was typed into a session.
+    MessageDelivered {
+        /// Its id.
+        message: String,
+        /// The session it was typed into.
+        session: String,
+    },
+    /// A held message could no longer reach anyone, and was dropped.
+    MessageDropped {
+        /// Its id.
+        message: String,
+        /// Why.
+        why: Dropped,
+    },
 }
 
 impl Step {
@@ -302,6 +328,31 @@ mod tests {
                 }),
             },
         ]
+        .into_iter()
+        .chain(message_steps())
+        .collect()
+    }
+
+    /// One of each message step.
+    fn message_steps() -> Vec<Step> {
+        vec![
+            Step::MessageQueued {
+                message: "m1".into(),
+                to: fleet_core::messages::Recipient::Session {
+                    session: "s1".into(),
+                },
+                sender: fleet_core::messages::Sender::Script,
+                text: "hi".into(),
+            },
+            Step::MessageDelivered {
+                message: "m1".into(),
+                session: "s1".into(),
+            },
+            Step::MessageDropped {
+                message: "m1".into(),
+                why: fleet_core::messages::Dropped::SessionEnded,
+            },
+        ]
     }
 
     #[test]
@@ -335,7 +386,10 @@ mod tests {
                 "ROLE_ADDED",
                 "ROLE_REMOVED",
                 "SESSION_GONE",
-                "SEAT_LAUNCH_FAILED"
+                "SEAT_LAUNCH_FAILED",
+                "MESSAGE_QUEUED",
+                "MESSAGE_DELIVERED",
+                "MESSAGE_DROPPED"
             ]
         );
     }
@@ -353,6 +407,26 @@ mod tests {
         assert_eq!(
             Step::EveryFleetOn.to_row().ok().map(|r| r.1),
             Some("{}".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_queued_message_keeps_what_it_said_and_who_sent_it() {
+        let queued = Step::MessageQueued {
+            message: "m1".into(),
+            to: fleet_core::messages::Recipient::Seat {
+                fleet: "/c/app".into(),
+                seat: "scribe".into(),
+            },
+            sender: fleet_core::messages::Sender::Person,
+            text: "write the notes".into(),
+        };
+        assert_eq!(
+            queued.to_row().ok().map(|r| r.1),
+            Some(
+                r#"{"message":"m1","sender":"person","text":"write the notes","to":{"seat":{"fleet":"/c/app","seat":"scribe"}}}"#
+                    .to_owned()
+            )
         );
     }
 

@@ -132,6 +132,14 @@ pub(crate) struct FakeMux {
     pub(crate) fail_launch: bool,
     /// Like a tmux that is not installed.
     pub(crate) missing: bool,
+    /// Each paste: the pane and the text.
+    pub(crate) typed: Mutex<Vec<(String, String)>>,
+    /// Whether typing in fails.
+    pub(crate) fail_type: bool,
+    /// What each launch ran, in order.
+    pub(crate) launched: Mutex<Vec<Launched>>,
+    /// How long each launch takes.
+    pub(crate) launch_delay: std::time::Duration,
 }
 
 /// What running a tmux that is not installed comes to.
@@ -143,10 +151,15 @@ pub(crate) fn not_installed() -> ToolError {
 }
 
 impl Multiplexer for FakeMux {
-    fn launch(&self, session: &str, _: &Path, _: &Launched) -> Result<String, ToolError> {
+    fn launch(&self, session: &str, _: &Path, program: &Launched) -> Result<String, ToolError> {
         if self.missing {
             return Err(not_installed());
         }
+        self.launched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(program.clone());
+        std::thread::sleep(self.launch_delay);
         if self.fail_launch {
             return Err(ToolError::Failed {
                 command: "tmux new-session".into(),
@@ -180,6 +193,23 @@ impl Multiplexer for FakeMux {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|p| p.session != session);
+        Ok(())
+    }
+
+    fn type_in(&self, pane: &str, text: &str) -> Result<(), ToolError> {
+        if self.missing {
+            return Err(not_installed());
+        }
+        if self.fail_type {
+            return Err(ToolError::Failed {
+                command: "tmux paste-buffer".into(),
+                said: "no".into(),
+            });
+        }
+        self.typed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((pane.into(), text.into()));
         Ok(())
     }
 }
@@ -272,6 +302,9 @@ impl Multiplexer for SharedMux {
     }
     fn stop(&self, s: &str) -> Result<(), ToolError> {
         self.0.stop(s)
+    }
+    fn type_in(&self, p: &str, t: &str) -> Result<(), ToolError> {
+        self.0.type_in(p, t)
     }
 }
 

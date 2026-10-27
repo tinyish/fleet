@@ -3,7 +3,9 @@
 //! no `_` arm, so a new refusal does not compile until it has a sample.
 
 use fleet_core::protocol;
-use fleet_core::status::{AdapterKind, FileKind, FleetKind, ProjectKind, SessionKind, StatusKind};
+use fleet_core::status::{
+    AdapterKind, FileKind, FleetKind, MessageKind, ProjectKind, SessionKind, StatusKind,
+};
 use strum::IntoEnumIterator;
 
 /// Every sample of `kind`, each with its label.
@@ -14,6 +16,7 @@ pub(super) fn refusals(kind: StatusKind) -> Vec<(String, protocol::Status)> {
         StatusKind::File => each(FileKind::iter(), super::file::samples),
         StatusKind::Session => each(SessionKind::iter(), super::session::samples),
         StatusKind::Adapter => each(AdapterKind::iter(), super::adapter::samples),
+        StatusKind::Message => each(MessageKind::iter(), super::message::samples),
         StatusKind::Malformed => vec![(
             "Malformed".into(),
             protocol::Status::Malformed {

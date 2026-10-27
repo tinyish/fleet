@@ -1,13 +1,11 @@
 //! Agents' sessions: launched through an adapter into tmux, listed with
 //! each one's state, and stopped.
 
-use std::fmt::Write as _;
-use std::fs::File;
-use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use fleet_core::agent::{self, Verb};
+use fleet_core::messages::Dropped;
 use fleet_core::protocol::{Reply, Response, Status, response};
 use fleet_core::seats::SeatKey;
 use fleet_core::status;
@@ -107,6 +105,8 @@ pub(crate) fn start_seat(
                     fleet: seat.key.fleet.display().to_string(),
                     seat: seat.key.seat.clone(),
                 })?;
+                let ids = w.drop_for_session(gone)?;
+                crate::messages::dropped(w, &ids, Dropped::SessionEnded)?;
             }
         }
         launch_in(w, tools, &p)?;
@@ -138,15 +138,20 @@ fn prepare(
         model: ask.model.clone(),
         prompt: ask.prompt.clone(),
     };
-    let launched = tools.agents.launch(&program, &request).map_err(|fault| {
+    let mut launched = tools.agents.launch(&program, &request).map_err(|fault| {
         Status::Session(status::Session::AdapterFailed {
             adapter: program.clone(),
             verb: Verb::Launch,
             fault,
         })
     })?;
+    let id = crate::new_id('s');
+    // The agent can name itself as a message's sender.
+    launched
+        .env
+        .insert(fleet_core::messages::SESSION_VAR.to_owned(), id.clone());
     let row = SessionRow {
-        id: new_id(),
+        id,
         adapter: program,
         directory: ask.directory.clone(),
         launch_time_millis: now_millis(),
@@ -200,7 +205,7 @@ fn settle<T>(
 }
 
 /// Stops a session: ends its tmux session and forgets it, recording the
-/// step, or changes nothing.
+/// step and dropping the messages held for it, or changes nothing.
 pub(crate) fn stop(state: &Mutex<State>, tools: &Tools, session: &str) -> Result<Reply, Error> {
     let step = Step::SessionStopped {
         session: session.to_owned(),
@@ -209,6 +214,8 @@ pub(crate) fn stop(state: &Mutex<State>, tools: &Tools, session: &str) -> Result
         let had = w.stop_session(session, || tools.mux.stop(session))?;
         if had {
             w.record(&step)?;
+            let ids = w.drop_for_session(session)?;
+            crate::messages::dropped(w, &ids, Dropped::SessionEnded)?;
         }
         Ok(had)
     });
@@ -248,20 +255,6 @@ pub(crate) fn tool_status(error: ToolError) -> Status {
             said: format!("{other:?}"),
         }),
     }
-}
-
-/// A new session id: `s` and ten lowercase hex digits, safe as a tmux
-/// session's name.
-fn new_id() -> String {
-    let mut bytes = [0u8; 5];
-    let random = File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
-    if random.is_err() {
-        bytes.copy_from_slice(&now_millis().to_le_bytes()[..5]);
-    }
-    bytes.iter().fold(String::from("s"), |mut id, b| {
-        let _ = write!(id, "{b:02x}");
-        id
-    })
 }
 
 #[cfg(test)]
@@ -640,6 +633,31 @@ mod tests {
                 limit: 16_000
             })
         );
+    }
+
+    #[test]
+    fn a_launched_agent_is_told_its_session_id() {
+        let (root, state) = tree("sess-env", &["app"]);
+        let app = root.join("code/app");
+        let mux = std::sync::Arc::new(FakeMux::default());
+        let tools = Tools {
+            mux: Box::new(crate::testing::SharedMux(mux.clone())),
+            agents: Box::new(FakeAgents::default()),
+            net: Box::new(crate::testing::FakeNet::default()),
+        };
+        let reply = launch(&state, &tools, &store(&root), &ask("/a/claude", &app));
+        let id = launched(&reply.unwrap_or(Reply::Status(Status::Malformed {
+            error: String::new(),
+        })));
+        let env = mux
+            .launched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first()
+            .map(|l| l.env.clone())
+            .unwrap_or_default();
+        assert!(id.starts_with('s'), "{id}");
+        assert_eq!(env.get(fleet_core::messages::SESSION_VAR), Some(&id));
     }
 
     /// A launch of `with_seat`'s seat as the tick read it: role `w` as its

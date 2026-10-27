@@ -27,7 +27,7 @@ pub(super) fn lines(o: &Overview, now_millis: i64, ink: Ink) -> String {
                     "  {}  {}  {}",
                     ink.accent(&l.session),
                     state_word(l.state),
-                    ink.path(&l.directory)
+                    with_waiting(ink.path(&l.directory), l.waiting)
                 )
                 .trim_end()
                 .to_owned(),
@@ -75,7 +75,7 @@ fn fleet_lines(fleet: &FleetOverview, now_millis: i64, ink: Ink) -> Vec<String> 
                 "  orphaned  {}  was seat \"{}\"  {}",
                 ink.accent(&o.session.session),
                 o.seat,
-                state_word(o.session.state)
+                with_waiting(state_word(o.session.state), o.session.waiting)
             )
         }))
         .collect()
@@ -100,7 +100,13 @@ fn seat_row(seat: &SeatOverview, now_millis: i64, ink: Ink) -> [String; 4] {
         (None, Some(session)) => (state_word(session.state), session_rest(session, seat, ink)),
         (None, None) => ("not running".to_owned(), String::new()),
     };
-    [ink.accent(&seat.name), seat.role.clone(), state, rest]
+    let waiting = seat.waiting + seat.session.as_ref().map_or(0, |s| s.waiting);
+    [
+        ink.accent(&seat.name),
+        seat.role.clone(),
+        state,
+        with_waiting(rest, waiting),
+    ]
 }
 
 fn session_rest(session: &Listed, seat: &SeatOverview, ink: Ink) -> String {
@@ -109,6 +115,24 @@ fn session_rest(session: &Listed, seat: &SeatOverview, ink: Ink) -> String {
         format!("{id}  launched from an older role")
     } else {
         id
+    }
+}
+
+/// How many messages wait, in words; none for none.
+fn waiting_words(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 message waiting".into()),
+        n => Some(format!("{n} messages waiting")),
+    }
+}
+
+/// `rest`, then the messages waiting, if any, after a `·`.
+fn with_waiting(rest: String, n: usize) -> String {
+    match (waiting_words(n), rest.is_empty()) {
+        (None, _) => rest,
+        (Some(w), true) => w,
+        (Some(w), false) => format!("{rest} · {w}"),
     }
 }
 
@@ -156,6 +180,7 @@ mod tests {
             directory: PathBuf::from("/code/blog"),
             state,
             launch_time_millis: 0,
+            waiting: 0,
         }
     }
 
@@ -166,6 +191,7 @@ mod tests {
             session,
             older_role: false,
             down: None,
+            waiting: 0,
         }
     }
 
@@ -247,6 +273,42 @@ mod tests {
         }
         let seat_lines: Vec<&str> = text.lines().skip(1).collect();
         assert!(seat_lines.iter().all(|l| l.starts_with("  ")), "{text}");
+    }
+
+    #[test]
+    fn messages_waiting_are_counted_on_the_seats_line() {
+        let o = Overview {
+            fleets: vec![FleetOverview {
+                directory: PathBuf::from("/code/blog"),
+                on: true,
+                seats: vec![
+                    SeatOverview {
+                        waiting: 1,
+                        ..seat(
+                            "scribe",
+                            Some(Listed {
+                                waiting: 1,
+                                ..listed("s1", SessionState::Working)
+                            }),
+                        )
+                    },
+                    SeatOverview {
+                        waiting: 1,
+                        ..seat("critic", None)
+                    },
+                ],
+                orphans: vec![],
+            }],
+            loose: vec![Listed {
+                waiting: 3,
+                ..listed("s7", SessionState::Idle)
+            }],
+            faults: vec![],
+        };
+        let text = plain(&o);
+        assert!(text.contains("2 messages waiting"), "{text}");
+        assert!(text.contains("1 message waiting"), "{text}");
+        assert!(text.contains("3 messages waiting"), "{text}");
     }
 
     #[test]

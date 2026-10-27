@@ -96,6 +96,7 @@ fn whole(state: &mut State, fleet: Fleet, choice: ConfigChoice) -> Result<Reply,
             projects: shown(&fleet.projects),
             config,
         })?;
+        crate::messages::fleet_leaves(w, &fleet.directory)?;
         Ok(config)
     });
     let config = match written {

@@ -36,6 +36,8 @@ pub enum Request {
         /// The CLI's current directory, absolute.
         directory: PathBuf,
     },
+    /// For `fleet message`.
+    Message(request::Message),
 }
 
 /// The requests of each command. Always written with the module, as in
@@ -129,6 +131,24 @@ pub mod request {
         },
     }
 
+    /// What `fleet message` asks.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Message {
+        /// Queue `text` for `to`: a seat of the fleet holding `directory`,
+        /// else a session by its id.
+        Send {
+            /// The CLI's current directory, absolute.
+            directory: PathBuf,
+            /// A seat's name or a session's id.
+            to: String,
+            /// What to type in.
+            text: String,
+            /// Who sends it.
+            sender: crate::messages::Sender,
+        },
+    }
+
     /// What to do with a removed fleet's config file.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
@@ -164,6 +184,8 @@ pub enum Response {
     Session(response::Session),
     /// What `fleet status` shows.
     Overview(response::Overview),
+    /// What `fleet message` did.
+    Message(response::Message),
 }
 
 /// The responses of each command. Always written with the module, as in
@@ -171,8 +193,6 @@ pub enum Response {
 pub mod response {
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
-
-    use crate::agent::{AdapterFault, SessionState};
 
     /// The supervisor is there.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,100 +359,20 @@ pub mod response {
         },
     }
 
-    /// One session and its state.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Listed {
-        /// Its id.
-        pub session: String,
-        /// The adapter program that launched it.
-        pub adapter: PathBuf,
-        /// Where its agent works.
-        pub directory: PathBuf,
-        /// Its state now.
-        pub state: SessionState,
-        /// When it was launched.
-        pub launch_time_millis: i64,
-    }
+    mod overview;
+    pub use overview::{Down, Fault, FleetOverview, Listed, Orphan, Overview, SeatOverview};
 
-    /// An adapter that failed to read its sessions.
+    /// What `fleet message` did.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Fault {
-        /// The adapter program.
-        pub adapter: PathBuf,
-        /// How it failed.
-        pub fault: AdapterFault,
-    }
-
-    /// What `fleet status` shows: the fleet holding the directory asked
-    /// about, or, when none holds it, every fleet and the sessions of none.
-    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Overview {
-        /// The fleets, by directory.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pub fleets: Vec<FleetOverview>,
-        /// Sessions of no fleet: `fleet debug`'s, and those of a fleet
-        /// since removed. Only when every fleet is shown.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pub loose: Vec<Listed>,
-        /// The adapters that failed to read their sessions, which are
-        /// unknown.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pub faults: Vec<Fault>,
-    }
-
-    /// One fleet's seats.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct FleetOverview {
-        /// The fleet's directory.
-        pub directory: PathBuf,
-        /// Whether any of its projects is on, so its seats are kept filled.
-        pub on: bool,
-        /// Its seats, by name.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pub seats: Vec<SeatOverview>,
-        /// Sessions of seats its config no longer has.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pub orphans: Vec<Orphan>,
-    }
-
-    /// One seat, and its session.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct SeatOverview {
-        /// The seat's name.
-        pub name: String,
-        /// The label of its role.
-        pub role: String,
-        /// Its session: the live one, else the newest; none before its
-        /// first launch.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub session: Option<Listed>,
-        /// Whether that session was launched from its role as it was
-        /// before an edit.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        pub older_role: bool,
-        /// Whether it is backing off: no session alive, and a wait.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub down: Option<Down>,
-    }
-
-    /// A seat backing off.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Down {
-        /// Why its last launch failed, or why nothing could be launched;
-        /// none when its sessions keep ending.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub why: Option<super::Status>,
-        /// When it is tried next, by the supervisor's clock.
-        pub next_try_millis: i64,
-    }
-
-    /// A session of a seat its fleet's config no longer has: never revived.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Orphan {
-        /// The seat it was launched for.
-        pub seat: String,
-        /// The session.
-        pub session: Listed,
+    #[serde(rename_all = "snake_case")]
+    pub enum Message {
+        /// The message is held; it is typed in once its agent is idle.
+        Queued {
+            /// Its id.
+            message: String,
+            /// Who it is for.
+            to: crate::messages::Recipient,
+        },
     }
 
     /// A fleet whose config did not read, and why.
@@ -592,6 +532,14 @@ mod tests {
             Request::Session(request::Session::Stop {
                 session: "s1".into(),
             }),
+            Request::Message(request::Message::Send {
+                directory: PathBuf::from("/c/app"),
+                to: "scribe".into(),
+                text: "write the notes;\n#now".into(),
+                sender: crate::messages::Sender::Session {
+                    session: "s1".into(),
+                },
+            }),
         ];
         for req in requests {
             let mut buf = Vec::new();
@@ -602,8 +550,25 @@ mod tests {
     }
 
     #[test]
+    fn an_overview_from_before_waiting_still_reads() {
+        let line = r#"{"session":"s1","adapter":"/a","directory":"/c","state":"idle","launch_time_millis":0}"#;
+        let listed: Option<response::Listed> = serde_json::from_str(line).ok();
+        assert_eq!(listed.map(|l| l.waiting), Some(0));
+    }
+
+    #[test]
     fn every_reply_round_trips() {
         let replies = [
+            Reply::Response(Response::Message(response::Message::Queued {
+                message: "m0123456789".into(),
+                to: crate::messages::Recipient::Seat {
+                    fleet: PathBuf::from("/c/app"),
+                    seat: "scribe".into(),
+                },
+            })),
+            Reply::Status(Status::Message(status::Message::SessionGone {
+                session: "s1".into(),
+            })),
             Reply::Response(Response::Hello(response::Hello {
                 version: "0.0.0".into(),
                 schema_version: Some(1),
@@ -782,6 +747,7 @@ mod tests {
             directory: PathBuf::from("/c/app"),
             state,
             launch_time_millis: 5,
+            waiting: 0,
         }
     }
 
@@ -803,6 +769,7 @@ mod tests {
                         )),
                         older_role: true,
                         down: None,
+                        waiting: 0,
                     },
                     response::SeatOverview {
                         name: "reader".into(),
@@ -815,6 +782,7 @@ mod tests {
                             })),
                             next_try_millis: 9,
                         }),
+                        waiting: 0,
                     },
                 ],
                 orphans: vec![response::Orphan {
@@ -847,6 +815,7 @@ mod tests {
             session: None,
             older_role: false,
             down: None,
+            waiting: 0,
         };
         let o = response::Overview {
             fleets: vec![response::FleetOverview {

@@ -16,6 +16,7 @@ mod create;
 mod doctor;
 mod file;
 mod fleet;
+mod message;
 mod overview;
 mod project;
 pub(crate) mod remove;
@@ -61,6 +62,16 @@ pub(crate) const STOP_PROJECT_HELP: &str =
 /// The help for `fleet status`.
 pub(crate) const STATUS_ABOUT: &str = "Show each seat of the fleet here, or of every fleet, \
      and what its agent is doing";
+
+/// The help for `fleet message`.
+pub(crate) const MESSAGE_ABOUT: &str = "Send text to a seat of the fleet here, or to a session \
+     by its id; it is typed in once the agent is idle";
+
+/// The help for `fleet message`'s recipient.
+pub(crate) const MESSAGE_TO_HELP: &str = "A seat of the fleet here, or a session's id";
+
+/// The help for `fleet message`'s text.
+pub(crate) const MESSAGE_TEXT_HELP: &str = "What to send; without it, what is piped in";
 
 /// The question asked at a terminal when the supervisor is not running.
 pub(crate) const START_PROMPT: &str = "The fleet supervisor is not running. Start it?";
@@ -115,6 +126,7 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
             overview,
             now_millis,
         } => overview::lines(overview, *now_millis, ink),
+        Response::MessageQueued(queued) => message::queued(queued, ink),
     }
 }
 
@@ -280,6 +292,7 @@ fn refused_hint(status: &protocol::Status, ink: Ink) -> Option<String> {
         protocol::Status::File(refusal) => file::hint(refusal, ink),
         protocol::Status::Session(refusal) => session::hint(refusal, ink),
         protocol::Status::Adapter(refusal) => adapters::hint(refusal, ink),
+        protocol::Status::Message(refusal) => message::hint(refusal, ink),
         protocol::Status::Malformed { .. } => None,
     }
 }
@@ -302,10 +315,12 @@ fn cannot_hint(problem: &Problem, ink: Ink) -> Option<String> {
                 shell_quoted(&theirs.display().to_string())
             ))
         )),
+        Problem::NoText => Some("give the text after the seat or session, or pipe it in".into()),
         Problem::ServiceManager { .. }
         | Problem::UnsupportedOs
         | Problem::StateDir(_)
         | Problem::NoCurrentDir(_)
+        | Problem::ReadText(_)
         | Problem::BadPath { .. }
         | Problem::NoBinary(_) => None,
     }
@@ -329,6 +344,7 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
         protocol::Status::File(refusal) => file::refused(refusal, ink),
         protocol::Status::Session(refusal) => session::refused(refusal, ink),
         protocol::Status::Adapter(refusal) => adapters::refused(refusal, ink),
+        protocol::Status::Message(refusal) => message::refused(refusal, ink),
         protocol::Status::Malformed { error } => {
             format!("the supervisor could not understand the request: {error}")
         }
@@ -361,6 +377,8 @@ fn cannot(problem: &Problem, ink: Ink) -> String {
             protocol::MAX_SOCKET_PATH
         ),
         Problem::NoCurrentDir(error) => format!("cannot read the current directory: {error}"),
+        Problem::NoText => "there is no message to send".into(),
+        Problem::ReadText(error) => format!("cannot read the message piped in: {error}"),
         Problem::BadPath { path, error } => format!("{}: {error}", ink.path(path)),
         Problem::NoBinary(error) => format!("cannot find this fleet binary: {error}"),
         Problem::Uninstall { path, error } => uninstall::could_not_remove(path, error, ink),
@@ -454,6 +472,7 @@ fn during_words(during: During) -> String {
         During::TurningOff => "turning every project off".into(),
         During::TurningOffProject => "turning the project off".into(),
         During::Looking => "asking the supervisor what its agents are doing".into(),
+        During::Messaging => "asking the supervisor to queue the message".into(),
     }
 }
 

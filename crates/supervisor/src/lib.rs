@@ -3,6 +3,7 @@
 
 mod adapters;
 mod create;
+mod messages;
 mod observe;
 mod overview;
 mod projects;
@@ -15,8 +16,9 @@ mod words;
 
 use fleet_core::protocol;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::{self, File, Permissions};
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read as _, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -235,13 +237,30 @@ fn answer(
         Ok(Request::Session(request::Session::Stop { session })) => {
             sessions::stop(state, tools, &session)?
         }
+        Ok(Request::Message(request::Message::Send {
+            directory,
+            to,
+            text,
+            sender,
+        })) => messages::send(
+            state,
+            tools,
+            &messages::Send {
+                directory,
+                to,
+                text,
+                sender,
+            },
+        )?,
         // The parser's own detail; any other failure means no reply could
         // reach the other side, so it is only logged.
         Err(ProtocolError::Malformed(error)) => Reply::Status(Status::Malformed { error }),
         Err(e) => return Err(Error::Protocol(e)),
     };
-    // Start and create may have turned projects on or read seats: tend now.
-    if let Reply::Response(Response::Start(_) | Response::Create(_)) = reply {
+    // Start and create may have turned projects on or read seats, and a
+    // message may wait for an idle agent: tend now.
+    if let Reply::Response(Response::Start(_) | Response::Create(_) | Response::Message(_)) = reply
+    {
         tending.poke();
     }
     let mut writer = stream;
@@ -250,6 +269,20 @@ fn answer(
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A new id: `prefix` and ten lowercase hex digits, safe as a tmux
+/// session's name: `s` for a session, `m` for a message.
+pub(crate) fn new_id(prefix: char) -> String {
+    let mut bytes = [0u8; 5];
+    let random = File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
+    if random.is_err() {
+        bytes.copy_from_slice(&state::now_millis().to_le_bytes()[..5]);
+    }
+    bytes.iter().fold(String::from(prefix), |mut id, b| {
+        let _ = write!(id, "{b:02x}");
+        id
+    })
 }
 
 /// The root of the git repository containing `path`: the nearest directory

@@ -227,6 +227,14 @@ pub trait Multiplexer {
     ///
     /// When the multiplexer fails.
     fn stop(&self, session: &str) -> Result<(), ToolError>;
+
+    /// Types `text` into the pane `pane` (`%12`) as one paste, bracketed
+    /// when the program asked for it, then presses Enter.
+    ///
+    /// # Errors
+    ///
+    /// When the multiplexer fails, or the pane is not there.
+    fn type_in(&self, pane: &str, text: &str) -> Result<(), ToolError>;
 }
 
 /// What a download found.

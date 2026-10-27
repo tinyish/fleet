@@ -30,7 +30,7 @@ Onboarding is built; Delivery's primitives are drawn ahead of their code.
 | Part | Does | Lives |
 | --- | --- | --- |
 | **fleet CLI** | Turns a command into a request to the supervisor and reports the answer. Writes nothing, except starting the supervisor through the service manager. | one command |
-| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps every seat filled, holds each message until its agent is idle *(directional: arrives with Delivery)*, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
+| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps every seat filled, holds each message until its agent is idle, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
 | **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, each fleet's roles and seats as its config last read, agents' sessions, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
 | **tmux server** | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
@@ -113,7 +113,8 @@ of its own, and adapters, tinyfleet's own included, take it by the tag
 ## Primitives
 
 > **Directional,** drawn for Delivery. Built: roles and seats, kept filled by
-> the supervisor and shown by `fleet status`; a debug build's `fleet debug`
+> the supervisor and shown by `fleet status`; messages, held by the
+> supervisor until their agent is idle; a debug build's `fleet debug`
 > launches and stops a session by hand. Nothing else here is built yet.
 
 tinyfleet gives a person the building blocks of their own metaharness, and
@@ -126,7 +127,7 @@ top of these by users, through the supervisor's socket.
 | role | an entry in a fleet's config saying how to run an agent: its label, which agent adapter, which model, the prompt the agent is woken with, and the directory it works in; tinyfleet ships no roles |
 | seat | a named entry in a fleet's config naming a role: an agent the supervisor keeps one session of running |
 | session | one agent running in tmux, on tinyfleet's socket |
-| message | text for one session, typed in once its agent is idle |
+| message | text for a seat or a session, typed in once its agent is idle |
 | observe | a session's state and its last reply: asked for, waited on, or subscribed to |
 | workspace | a git worktree on its own branch, kept under the state directory |
 | task | an item in the project's own tracker, reached through a task adapter |
@@ -149,14 +150,24 @@ answers with the session's id. tinyfleet never ends a spawned session on its
 own: it ends when it is told to stop, and one that dies is reported gone,
 never revived.
 
-**Messages.** A message goes to a seat by its name or to a spawned
-session by its id, and is one-way: sending answers once the message is
-queued. The supervisor types it in when the adapter reports the agent idle,
-and records it queued, then delivered, with who sent it: a person, a script
-or another agent's session. A message to a seat being revived
-waits for its new session, and one to an agent that needs you waits until
-someone answers it: nothing is ever typed at a prompt. Reading the answer is
-observe's.
+**Messages.** A message goes to a seat by its name or to a session by its
+id: a name is first a seat of the fleet holding the directory it is sent
+from, then any session's id. It is one-way: sending answers, with the
+message's id, once the message is queued. Messages are held in state, so a
+restart keeps them, and the supervisor types them in when the adapter reports
+the agent idle: every message waiting for it, oldest first, as one paste.
+That session then takes no more until it has left idle, or 30 s have passed.
+Each message is recorded queued, then delivered, with what it said and who
+sent it: a person, a script, or another agent's session, which every agent
+can name because it is launched with its session's id in its environment.
+A message to a seat goes to whichever of its sessions is live when its agent
+is next idle, so one sent while it is being revived waits for the new
+session; one to an agent that needs you waits until someone answers it:
+nothing is ever typed at a prompt. A project off stops reviving, not
+delivering. A message that can no longer reach anyone (its session stopped
+or cleared as gone, its seat taken out of the config, its fleet removed) is
+dropped in the same change, and recorded dropped. Status counts the messages
+waiting for each seat and session. Reading the answer is observe's.
 
 **States.** Observe reports one of six states for every session, whatever its
 agent: *starting* (launched, not ready yet), *working* (in a turn), *idle*
@@ -349,8 +360,8 @@ contract's (see Boundaries).
 11. tinyfleet never removes a workspace on its own: only whoever made it
     does, or uninstall, which takes every workspace with it, landed or not
     *(directional: arrives with Delivery)*.
-12. A message is typed into a session only while its agent is idle
-    *(directional: arrives with Delivery)*.
+12. A message is typed into a session only while its agent reads idle, and a
+    session takes no second paste until it has left idle or 30 s have passed.
 13. A seat has at most one live session.
 
 ## Where things are on disk
@@ -453,6 +464,7 @@ debug`.
 | seat | a named agent of a fleet, running as its role says, that the supervisor keeps one session of running, revived fresh when it is gone |
 | session | a tmux session on tinyfleet's socket, running one agent; a spawned session ends only when told to stop |
 | workspace | a git worktree on its own branch, under the state directory |
+| message | text for a seat or a session, held by the supervisor until its agent is idle, then typed in |
 | event | a recorded step, as a subscriber sees it |
 | tool interface / driver | the trait in `core` for one kind of outside tool / the code behind it that runs the real tool |
 | outcome | how a command ended: done, refused, supervisor not running, could not tell |

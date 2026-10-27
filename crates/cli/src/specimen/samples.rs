@@ -146,6 +146,23 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
                 })
             })
             .collect(),
+        ResponseKind::MessageQueued => [
+            fleet_core::messages::Recipient::Seat {
+                fleet: path(APP),
+                seat: "scribe".into(),
+            },
+            fleet_core::messages::Recipient::Session {
+                session: "s1a2b3c4d5e".into(),
+            },
+        ]
+        .into_iter()
+        .map(|to| {
+            Response::MessageQueued(response::Message::Queued {
+                message: "m7c0ffee123".into(),
+                to,
+            })
+        })
+        .collect(),
         ResponseKind::Overview => super::overview::overviews()
             .into_iter()
             .map(|overview| Response::Overview {
@@ -372,6 +389,11 @@ fn problems(kind: ProblemKind) -> Vec<Problem> {
             "/Users/you/a/very/deep/state/directory/that/goes/on/and/on/for/far/too/long/fleet/supervisor.sock",
         ))],
         ProblemKind::NoCurrentDir => vec![Problem::NoCurrentDir(denied())],
+        ProblemKind::NoText => vec![Problem::NoText],
+        ProblemKind::ReadText => vec![Problem::ReadText(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        ))],
         ProblemKind::BadPath => vec![Problem::BadPath {
             path: path(API),
             error: denied(),
@@ -525,6 +547,7 @@ fn durings() -> Vec<During> {
             DuringKind::TurningOffProject => vec![During::TurningOffProject],
             DuringKind::Removing => vec![During::Removing],
             DuringKind::Looking => vec![During::Looking],
+            DuringKind::Messaging => vec![During::Messaging],
         })
         .collect()
 }
@@ -559,14 +582,17 @@ mod tests {
     fn every_refusal_kind_has_a_sample() {
         // An area whose samples are a Vec per arm could give none for a
         // kind and still compile: this catches it.
-        use fleet_core::status::{AdapterKind, FileKind, FleetKind, ProjectKind, SessionKind};
+        use fleet_core::status::{
+            AdapterKind, FileKind, FleetKind, MessageKind, ProjectKind, SessionKind,
+        };
         let labels: HashSet<String> = endings().into_iter().map(|s| s.label).collect();
         let kinds = FleetKind::iter()
             .map(|k| format!("Fleet::{k:?}"))
             .chain(ProjectKind::iter().map(|k| format!("Project::{k:?}")))
             .chain(FileKind::iter().map(|k| format!("File::{k:?}")))
             .chain(SessionKind::iter().map(|k| format!("Session::{k:?}")))
-            .chain(AdapterKind::iter().map(|k| format!("Adapter::{k:?}")));
+            .chain(AdapterKind::iter().map(|k| format!("Adapter::{k:?}")))
+            .chain(MessageKind::iter().map(|k| format!("Message::{k:?}")));
         for kind in kinds {
             assert!(
                 labels.contains(&format!("Status::Refused({kind})")),

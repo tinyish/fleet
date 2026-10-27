@@ -7,6 +7,7 @@ pub mod adapters;
 pub mod agent;
 pub mod config;
 pub mod fleets;
+pub mod messages;
 pub mod paths;
 pub mod protocol;
 pub mod seats;

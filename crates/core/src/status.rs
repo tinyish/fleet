@@ -30,6 +30,8 @@ pub enum Status {
     Session(Session),
     /// Naming and fetching adapters.
     Adapter(Adapter),
+    /// Messages: who one is for, and its text.
+    Message(Message),
     /// The request could not be understood.
     Malformed {
         /// What was wrong with it.
@@ -415,6 +417,39 @@ pub enum Mismatch {
     BuildMissing,
 }
 
+/// Messages: who one is for, and its text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(MessageKind), derive(strum::EnumIter))
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Message {
+    /// No seat of the fleet here, and no session, goes by this name.
+    NoSuchRecipient {
+        /// The name given.
+        to: String,
+        /// The fleet whose seats were searched: the one holding the
+        /// directory sent from, if any.
+        fleet: Option<PathBuf>,
+    },
+    /// The session's pane has ended.
+    SessionGone {
+        /// Its id.
+        session: String,
+    },
+    /// The text is empty, or only blanks.
+    EmptyText,
+    /// The text is longer than a message takes.
+    TooLong {
+        /// How long it is, in bytes.
+        bytes: usize,
+        /// The most a message takes, in bytes.
+        limit: usize,
+    },
+}
+
 impl From<Fleet> for Status {
     fn from(refusal: Fleet) -> Self {
         Status::Fleet(refusal)
@@ -442,6 +477,12 @@ impl From<Session> for Status {
 impl From<Adapter> for Status {
     fn from(refusal: Adapter) -> Self {
         Status::Adapter(refusal)
+    }
+}
+
+impl From<Message> for Status {
+    fn from(refusal: Message) -> Self {
+        Status::Message(refusal)
     }
 }
 
