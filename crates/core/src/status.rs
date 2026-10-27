@@ -287,10 +287,40 @@ pub enum Session {
         /// What it said.
         said: String,
     },
-    /// No session has this id.
-    NoSuchSession {
-        /// The id asked for.
-        session: String,
+    /// No fleet holds the directory a spawn was asked from.
+    NoFleetHere {
+        /// The directory.
+        directory: PathBuf,
+    },
+    /// The fleet has no role with this label.
+    NoSuchRole {
+        /// The label asked for.
+        role: String,
+        /// The fleet's directory.
+        fleet: PathBuf,
+    },
+    /// The directory named for a spawned agent is not one of the fleet's
+    /// projects by its root.
+    NotAProject {
+        /// The directory named.
+        path: PathBuf,
+        /// The fleet's directory.
+        fleet: PathBuf,
+    },
+    /// The seat has no live session to end.
+    SeatNotRunning {
+        /// The seat.
+        seat: String,
+        /// The fleet's directory.
+        fleet: PathBuf,
+    },
+    /// No seat of `fleet`, the fleet holding the directory if any, and no
+    /// session has this name.
+    NoSuchSeatOrSession {
+        /// The name asked for.
+        name: String,
+        /// The fleet searched, if any.
+        fleet: Option<PathBuf>,
     },
     /// Launching the agent would make a tmux command longer than it takes:
     /// its prompt is too long.

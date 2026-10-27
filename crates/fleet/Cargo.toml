@@ -26,9 +26,6 @@ trycmd = "1"
 [features]
 # `fleet specimen`: every line the CLI can print. Never in a release build.
 specimen = ["cli/specimen"]
-# `fleet debug`: agents' sessions by hand, for trying a piece. Never in a
-# release build.
-debug = ["cli/debug"]
 
 [lints]
 workspace = true

@@ -11,9 +11,11 @@ use fleet_core::tools::ToolError;
 use rusqlite::{Connection, params};
 
 mod messages;
+mod sessions;
 mod step;
 
 pub use messages::MessageRow;
+pub use sessions::SessionRow;
 pub use step::Step;
 
 /// The schema version this code reads and writes. Until tinyfleet's first
@@ -40,27 +42,6 @@ pub enum StateError {
     Config(io::Error),
     /// An outside tool failed part way; nothing was written.
     Tool(ToolError),
-}
-
-/// One session tinyfleet launched and has not stopped.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionRow {
-    /// tinyfleet's id for it, also its tmux session's name.
-    pub id: String,
-    /// The adapter program that launched it, and reads it.
-    pub adapter: PathBuf,
-    /// Where its agent works.
-    pub directory: PathBuf,
-    /// When it was launched, by the supervisor's clock.
-    pub launch_time_millis: i64,
-    /// The pane its agent runs in, as tmux names it (`%12`).
-    pub pane: String,
-    /// The fleet of the seat it was launched for; none for `fleet debug`'s.
-    pub fleet: Option<PathBuf>,
-    /// That seat's name.
-    pub seat: Option<String>,
-    /// The digest of the role it was launched from.
-    pub role_digest: Option<String>,
 }
 
 /// A registered fleet's roles and seats, as its config last read, and
@@ -120,7 +101,10 @@ impl State {
                      pane               TEXT    NOT NULL,
                      fleet              TEXT,
                      seat               TEXT,
-                     role_digest        TEXT
+                     role_digest        TEXT,
+                     role               TEXT,
+                     CHECK (seat IS NULL OR (fleet IS NOT NULL AND role IS NOT NULL)),
+                     CHECK (role IS NULL OR fleet IS NOT NULL)
                  );
                  CREATE TABLE roles (
                      fleet     TEXT NOT NULL REFERENCES fleets (directory) ON DELETE CASCADE,
@@ -188,31 +172,6 @@ impl State {
         Ok(fleets)
     }
 
-    /// Every session launched and not stopped, oldest first.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails.
-    pub fn sessions(&self) -> Result<Vec<SessionRow>, StateError> {
-        let mut query = self.conn.prepare(
-            "SELECT id, adapter, directory, launch_time_millis, pane, fleet, seat, role_digest
-             FROM sessions ORDER BY launch_time_millis, id",
-        )?;
-        let rows = query.query_map([], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                adapter: PathBuf::from(row.get::<_, String>(1)?),
-                directory: PathBuf::from(row.get::<_, String>(2)?),
-                launch_time_millis: row.get(3)?,
-                pane: row.get(4)?,
-                fleet: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
-                seat: row.get(6)?,
-                role_digest: row.get(7)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
     /// The roles and seats of the fleet in `fleet`, as its config last read;
     /// none for a fleet not registered.
     ///
@@ -249,6 +208,19 @@ impl State {
     /// When SQLite fails.
     pub fn steps(&self) -> Result<Vec<String>, StateError> {
         let mut query = self.conn.prepare("SELECT step FROM records ORDER BY id")?;
+        let rows = query.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every step's detail, its fields as a JSON object, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails.
+    pub fn step_details(&self) -> Result<Vec<String>, StateError> {
+        let mut query = self
+            .conn
+            .prepare("SELECT detail FROM records ORDER BY id")?;
         let rows = query.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -306,62 +278,6 @@ impl Write<'_> {
             )?;
         }
         write_config().map_err(StateError::Config)
-    }
-
-    /// Records `row`, then runs `launch`, which answers with the pane the
-    /// agent runs in, and keeps it on the row: if `launch` fails, the
-    /// transaction fails with it, so nothing is recorded.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails, a path is not UTF-8, or `launch` fails.
-    pub fn launch_session(
-        &mut self,
-        row: &SessionRow,
-        launch: impl FnOnce() -> Result<String, ToolError>,
-    ) -> Result<(), StateError> {
-        self.tx.execute(
-            "INSERT INTO sessions
-                 (id, adapter, directory, launch_time_millis, pane, fleet, seat, role_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                row.id,
-                utf8(&row.adapter)?,
-                utf8(&row.directory)?,
-                row.launch_time_millis,
-                row.pane,
-                row.fleet.as_deref().map(utf8).transpose()?,
-                row.seat,
-                row.role_digest
-            ],
-        )?;
-        let pane = launch().map_err(StateError::Tool)?;
-        self.tx.execute(
-            "UPDATE sessions SET pane = ?1 WHERE id = ?2",
-            params![pane, row.id],
-        )?;
-        Ok(())
-    }
-
-    /// Forgets session `id`, then runs `stop`: if it fails, the session
-    /// stays. False, running nothing, when there is no such session.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or `stop` fails.
-    pub fn stop_session(
-        &mut self,
-        id: &str,
-        stop: impl FnOnce() -> Result<(), ToolError>,
-    ) -> Result<bool, StateError> {
-        let forgot = self
-            .tx
-            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
-        if forgot == 0 {
-            return Ok(false);
-        }
-        stop().map_err(StateError::Tool)?;
-        Ok(true)
     }
 
     /// Appends one step to the record.
@@ -718,6 +634,7 @@ mod tests {
             pane: String::new(),
             fleet: None,
             seat: None,
+            role: None,
             role_digest: None,
         }
     }
@@ -742,6 +659,7 @@ mod tests {
             prompt: None,
             fleet: None,
             seat: None,
+            role: None,
         }
     }
 
@@ -789,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn stopping_forgets_the_session_and_stopping_again_says_there_was_none() {
+    fn ending_forgets_the_session_and_ending_again_says_there_was_none() {
         let (mut state, dir) = fresh("session-stop");
         assert!(
             state
@@ -801,25 +719,23 @@ mod tests {
             ran.set(ran.get() + 1);
             Ok(())
         };
-        assert_eq!(state.write(|w| w.stop_session("s1", stop)).ok(), Some(true));
+        let first = state.write(|w| w.end_session("s1", stop)).ok();
+        assert_eq!(first.flatten().map(|r| r.id), Some("s1".to_owned()));
         assert_eq!(state.sessions().ok(), Some(vec![]));
-        assert_eq!(
-            state.write(|w| w.stop_session("s1", stop)).ok(),
-            Some(false)
-        );
-        assert_eq!(ran.get(), 1, "stop runs only for a session that was there");
+        assert_eq!(state.write(|w| w.end_session("s1", stop)).ok(), Some(None));
+        assert_eq!(ran.get(), 1, "end runs only for a session that was there");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn a_stop_that_fails_keeps_the_session() {
+    fn an_end_that_fails_keeps_the_session() {
         let (mut state, dir) = fresh("session-stop-fails");
         assert!(
             state
                 .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
                 .is_ok()
         );
-        let failed = state.write(|w| w.stop_session("s1", || Err(tmux_said_no())));
+        let failed = state.write(|w| w.end_session("s1", || Err(tmux_said_no())));
         assert!(matches!(failed, Err(StateError::Tool(_))), "{failed:?}");
         assert_eq!(
             state.sessions().ok(),
@@ -932,6 +848,7 @@ mod tests {
         let seat_row = SessionRow {
             fleet: Some("/c/app".into()),
             seat: Some("scribe".into()),
+            role: Some("w".into()),
             role_digest: Some("ab".into()),
             ..row("s1")
         };
@@ -949,6 +866,77 @@ mod tests {
                 pane: "%1".into(),
                 ..seat_row
             }])
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_spawned_session_keeps_its_fleet_and_role() {
+        let (mut state, dir) = fresh("spawned-row");
+        let spawned = SessionRow {
+            fleet: Some("/f/wing".into()),
+            role: Some("worker".into()),
+            role_digest: Some("ab".into()),
+            ..row("s1")
+        };
+        assert!(
+            state
+                .write(|w| w.launch_session(&spawned, || Ok("%1".into())))
+                .is_ok()
+        );
+        assert_eq!(
+            state.sessions().ok(),
+            Some(vec![SessionRow {
+                pane: "%1".into(),
+                ..spawned
+            }])
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_seat_needs_a_fleet_and_a_role_and_a_role_needs_a_fleet() {
+        let (mut state, dir) = fresh("session-check");
+        let bad = [
+            SessionRow {
+                fleet: Some("/f".into()),
+                seat: Some("scribe".into()),
+                ..row("s1")
+            },
+            SessionRow {
+                seat: Some("scribe".into()),
+                role: Some("w".into()),
+                ..row("s2")
+            },
+            SessionRow {
+                role: Some("w".into()),
+                ..row("s3")
+            },
+        ];
+        for r in &bad {
+            let written = state.write(|w| w.launch_session(r, || Ok("%1".into())));
+            assert!(
+                matches!(written, Err(StateError::Sqlite(_))),
+                "{r:?}: {written:?}"
+            );
+        }
+        assert_eq!(state.sessions().ok(), Some(vec![]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_fleet_is_registered_until_it_is_removed() {
+        let (mut state, dir) = fresh("registered");
+        let f = fleet("/f/a", &["/c/app"]);
+        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
+        assert_eq!(
+            state.write(|w| w.fleet_registered(&f.directory)).ok(),
+            Some(true)
+        );
+        assert!(state.write(|w| w.remove_fleet(&f.directory)).is_ok());
+        assert_eq!(
+            state.write(|w| w.fleet_registered(&f.directory)).ok(),
+            Some(false)
         );
         let _ = std::fs::remove_dir_all(dir);
     }

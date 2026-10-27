@@ -21,6 +21,11 @@ pub(crate) const WAIT: Duration = Duration::from_secs(10);
 /// to read its sessions, and an adapter may take 20 s before it is a fault.
 pub(crate) const LOOK: Duration = Duration::from_secs(30);
 
+/// How long spawn waits for its answer: longer than a first fetch of an
+/// adapter (curl's 60 s, then the adapter's own time), so a slow fetch's or
+/// adapter's fault reaches it.
+pub(crate) const LAUNCH: Duration = Duration::from_secs(90);
+
 /// The supervisor's socket in `state_dir`.
 pub(crate) fn socket(state_dir: &Path) -> Result<PathBuf, Status> {
     protocol::socket_path(state_dir).map_err(|e| Status::Cannot(Problem::SocketPathTooLong(e.0)))
@@ -161,6 +166,36 @@ pub(crate) fn message(
         "message",
         |r| match r {
             Response::Message(queued) => Some(queued),
+            _ => None,
+        },
+    )
+}
+
+/// `fleet spawn`'s request.
+pub(crate) fn spawn(socket: &Path, spawn: request::Spawn) -> Result<response::Spawn, Status> {
+    ask_for(
+        socket,
+        &Request::Spawn(spawn),
+        LAUNCH,
+        During::Spawning,
+        "spawn",
+        |r| match r {
+            Response::Spawn(spawned) => Some(spawned),
+            _ => None,
+        },
+    )
+}
+
+/// `fleet end`'s request.
+pub(crate) fn end(socket: &Path, end: request::End) -> Result<response::End, Status> {
+    ask_for(
+        socket,
+        &Request::End(end),
+        WAIT,
+        During::Ending,
+        "end",
+        |r| match r {
+            Response::End(ended) => Some(ended),
             _ => None,
         },
     )

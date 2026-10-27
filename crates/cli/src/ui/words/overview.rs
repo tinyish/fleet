@@ -1,5 +1,6 @@
 //! What `fleet status` says: each fleet's seats and what their agents are
-//! doing, the sessions of seats a config dropped, and the sessions of none.
+//! doing, its spawned sessions, the sessions of seats a config dropped, and
+//! the sessions of none.
 
 use fleet_core::agent::{Reason, SessionState};
 use fleet_core::protocol::response::{FleetOverview, Listed, Overview, SeatOverview};
@@ -47,9 +48,10 @@ pub(super) fn lines(o: &Overview, now_millis: i64, ink: Ink) -> String {
     out.join("\n")
 }
 
-/// One fleet's seat lines, each indented, in columns; then its orphans.
+/// One fleet's seat lines, each indented, in columns; then its spawned
+/// sessions and its orphans.
 fn fleet_lines(fleet: &FleetOverview, now_millis: i64, ink: Ink) -> Vec<String> {
-    if fleet.seats.is_empty() && fleet.orphans.is_empty() {
+    if fleet.seats.is_empty() && fleet.orphans.is_empty() && fleet.spawned.is_empty() {
         return vec!["  no seats".into()];
     }
     let rows: Vec<[String; 4]> = fleet
@@ -70,6 +72,21 @@ fn fleet_lines(fleet: &FleetOverview, now_millis: i64, ink: Ink) -> Vec<String> 
                 .trim_end()
                 .to_owned()
         })
+        .chain(fleet.spawned.iter().map(|s| {
+            format!(
+                "  spawned  {}  {}  {}",
+                ink.accent(&s.session.session),
+                s.role,
+                with_waiting(
+                    format!(
+                        "{}  {}",
+                        state_word(s.session.state),
+                        ink.path(&s.session.directory)
+                    ),
+                    s.session.waiting
+                )
+            )
+        }))
         .chain(fleet.orphans.iter().map(|o| {
             format!(
                 "  orphaned  {}  was seat \"{}\"  {}",
@@ -170,7 +187,9 @@ mod tests {
     use super::*;
     use crate::ui::output::OUT;
     use fleet_core::agent::{AdapterFault, Reason, SessionState};
-    use fleet_core::protocol::response::{Down, FleetOverview, Listed, Orphan, SeatOverview};
+    use fleet_core::protocol::response::{
+        Down, FleetOverview, Listed, Orphan, SeatOverview, Spawned,
+    };
     use std::path::PathBuf;
 
     fn listed(id: &str, state: SessionState) -> Listed {
@@ -245,6 +264,7 @@ mod tests {
                     seat: "old".into(),
                     session: listed("s0011223344", SessionState::Idle),
                 }],
+                spawned: vec![],
             }],
             ..Overview::default()
         };
@@ -298,6 +318,7 @@ mod tests {
                     },
                 ],
                 orphans: vec![],
+                spawned: vec![],
             }],
             loose: vec![Listed {
                 waiting: 3,
@@ -319,6 +340,7 @@ mod tests {
                 on: false,
                 seats: vec![],
                 orphans: vec![],
+                spawned: vec![],
             }],
             loose: vec![listed("s77", SessionState::Gone)],
             faults: vec![],
@@ -327,5 +349,59 @@ mod tests {
         assert!(text.contains("/code/wing · off"), "{text}");
         assert!(text.contains("not in a fleet"), "{text}");
         assert!(text.contains("s77") && text.contains("gone"), "{text}");
+    }
+
+    fn fleet_with(seats: Vec<SeatOverview>, spawned: Vec<Spawned>) -> Overview {
+        Overview {
+            fleets: vec![FleetOverview {
+                directory: PathBuf::from("/code/blog"),
+                on: true,
+                seats,
+                orphans: vec![],
+                spawned,
+            }],
+            ..Overview::default()
+        }
+    }
+
+    #[test]
+    fn spawned_sessions_follow_the_seats_with_their_role_state_and_directory() {
+        let o = fleet_with(
+            vec![seat("scribe", Some(listed("s1", SessionState::Idle)))],
+            vec![
+                Spawned {
+                    role: "worker".into(),
+                    session: Listed {
+                        waiting: 1,
+                        ..listed("s3fa01c2e9", SessionState::Working)
+                    },
+                },
+                Spawned {
+                    role: "worker".into(),
+                    session: listed("s9b8a7c6d5", SessionState::Gone),
+                },
+            ],
+        );
+        let said = plain(&o);
+        let tail: Vec<&str> = said.lines().skip(2).collect();
+        assert_eq!(
+            tail,
+            [
+                "  spawned  s3fa01c2e9  worker  working  /code/blog · 1 message waiting",
+                "  spawned  s9b8a7c6d5  worker  gone  /code/blog",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fleet_with_only_spawned_sessions_does_not_say_no_seats() {
+        let o = fleet_with(
+            vec![],
+            vec![Spawned {
+                role: "worker".into(),
+                session: listed("s3fa01c2e9", SessionState::Idle),
+            }],
+        );
+        assert!(!plain(&o).contains("no seats"), "{}", plain(&o));
     }
 }

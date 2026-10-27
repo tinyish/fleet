@@ -3,8 +3,6 @@
 
 mod client;
 mod cmd;
-#[cfg(feature = "debug")]
-mod debug;
 mod protocol;
 #[cfg(feature = "specimen")]
 mod specimen;
@@ -20,7 +18,7 @@ use fleet_core::paths::{Os, PathError, state_dir};
 use fleet_core::tools::{Git, Network, NoServiceManager, ServiceManager};
 
 use crate::protocol::{Problem, Request, Status};
-use cmd::{create, doctor, message, projects, remove, start, status, stop, uninstall};
+use cmd::{create, doctor, end, message, projects, remove, spawn, start, status, stop, uninstall};
 use ui::{output, words};
 
 // The invocation as clap parses it. Its help text is in words.rs.
@@ -55,10 +53,6 @@ where
     #[cfg(feature = "specimen")]
     if args.get(1).is_some_and(|a| a == "specimen") {
         return specimen::run();
-    }
-    #[cfg(feature = "debug")]
-    if args.get(1).is_some_and(|a| a == "debug") {
-        return debug::run(&args[1..]);
     }
     let args = match Args::try_parse_from(args) {
         Ok(args) => args,
@@ -97,6 +91,10 @@ where
         Request::Message { to, text } => {
             setup(service).and_then(|(_, dir)| message::run(&dir, to, text.as_deref()))
         }
+        Request::Spawn { role, directory } => {
+            setup(service).and_then(|(_, dir)| spawn::run(&dir, role, directory.as_deref()))
+        }
+        Request::End { name } => setup(service).and_then(|(_, dir)| end::run(&dir, name)),
         Request::Uninstall => {
             setup(service).and_then(|(service, dir)| uninstall::run(&dir, service, ask))
         }
@@ -150,13 +148,13 @@ mod tests {
     }
 }
 
-// Only without the feature: with it, `debug` is caught before clap.
-#[cfg(all(test, not(feature = "debug")))]
-mod release_tests {
+// `fleet debug` went with spawn and end: no build accepts it.
+#[cfg(test)]
+mod no_debug_tests {
     use super::*;
 
     #[test]
-    fn debug_is_not_a_command_in_a_release_build() {
+    fn debug_is_no_command() {
         let err = Args::try_parse_from(["fleet", "debug", "stop", "s0"]).err();
         assert!(
             matches!(&err, Some(e) if e.kind() == clap::error::ErrorKind::InvalidSubcommand),

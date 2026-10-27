@@ -41,8 +41,8 @@ pub struct Overview {
     /// The fleets, by directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fleets: Vec<FleetOverview>,
-    /// Sessions of no fleet: `fleet debug`'s, and those of a fleet
-    /// since removed. Only when every fleet is shown.
+    /// Sessions of a fleet since removed. Only when every fleet is
+    /// shown.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loose: Vec<Listed>,
     /// The adapters that failed to read their sessions, which are
@@ -64,6 +64,9 @@ pub struct FleetOverview {
     /// Sessions of seats its config no longer has.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orphans: Vec<Orphan>,
+    /// Sessions spawned from its roles, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawned: Vec<Spawned>,
 }
 
 /// One seat, and its session.
@@ -98,6 +101,16 @@ pub struct Down {
     pub why: Option<Status>,
     /// When it is tried next, by the supervisor's clock.
     pub next_try_millis: i64,
+}
+
+/// A session spawned from a role of this fleet: never revived, and shown
+/// gone once its agent ends, until it is ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spawned {
+    /// The label of the role it was spawned from.
+    pub role: String,
+    /// The session.
+    pub session: Listed,
 }
 
 /// A session of a seat its fleet's config no longer has: never revived.

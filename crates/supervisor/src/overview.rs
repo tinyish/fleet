@@ -1,6 +1,6 @@
 //! What `fleet status` shows: the fleet holding the directory it ran in,
 //! with each seat's session and state, the sessions of seats its config
-//! dropped, and the seats backing off; or, when no fleet holds it, every
+//! dropped, its spawned sessions, and the seats backing off; or, when no fleet holds it, every
 //! fleet and the sessions of none. States come through observe.
 
 use std::collections::BTreeMap;
@@ -81,7 +81,7 @@ pub(crate) fn overview(
 }
 
 /// One fleet's seats, with their sessions among `rows` and the messages
-/// `held` for each, and its orphans.
+/// `held` for each, its orphans, and its spawned sessions.
 fn fleet_overview(
     f: &FleetRoster,
     rows: &[SessionRow],
@@ -134,11 +134,22 @@ fn fleet_overview(
                 })
         })
         .collect();
+    let spawned = mine
+        .iter()
+        .filter(|r| r.seat.is_none())
+        .filter_map(|r| {
+            Some(response::Spawned {
+                role: r.role.clone()?,
+                session: listed(r),
+            })
+        })
+        .collect();
     response::FleetOverview {
         directory: f.fleet.clone(),
         on: f.on,
         seats,
         orphans,
+        spawned,
     }
 }
 
@@ -183,7 +194,6 @@ mod tests {
     use fleet_core::seats::Roster;
 
     use crate::adapters::Store;
-    use crate::sessions::{self, Ask};
     use crate::tending::{self, Tending};
     use crate::testing::{FakeAgents, FakeMux, FakeNet, Shared, SharedMux, with_seat};
 
@@ -244,28 +254,82 @@ mod tests {
         assert_eq!(seat.session.as_ref().map(|s| s.waiting), Some(1));
     }
 
-    fn debug_session(root: &Path, state: &Mutex<State>, t: &Tools) -> String {
-        let ask = Ask {
-            adapter: "/a/claude".into(),
-            directory: root.join("code/app"),
-            model: None,
-            prompt: None,
-        };
-        match sessions::launch(state, t, &store(root), &ask) {
-            Ok(Reply::Response(Response::Session(response::Session::Launched { session }))) => {
-                session
-            }
-            other => {
-                assert!(matches!(other, Ok(Reply::Response(_))), "{other:?}");
-                String::new()
+    #[test]
+    fn spawned_sessions_list_under_their_fleet_in_launch_order() {
+        let (root, state, mux, t, tending) = filled("ov-spawned");
+        let app = crate::testing::code(&root, "app");
+        crate::testing::put(
+            &state,
+            &*t.mux,
+            &crate::testing::spawned_row("s0000000002", &app, 20),
+        );
+        crate::testing::put(
+            &state,
+            &*t.mux,
+            &crate::testing::spawned_row("s0000000001", &app, 10),
+        );
+        // The later one's agent ends.
+        for p in mux
+            .panes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+        {
+            if p.session == "s0000000002" {
+                p.dead = true;
             }
         }
+        let o = answer(&state, &t, &tending, &app);
+        let spawned: Vec<(String, String, SessionState)> = o.fleets[0]
+            .spawned
+            .iter()
+            .map(|s| (s.role.clone(), s.session.session.clone(), s.session.state))
+            .collect();
+        assert_eq!(
+            spawned,
+            [
+                ("w".into(), "s0000000001".into(), SessionState::Idle),
+                ("w".into(), "s0000000002".into(), SessionState::Gone),
+            ]
+        );
+        assert_eq!(o.fleets[0].seats.len(), 1, "a spawned session is no seat's");
+        assert_eq!(o.fleets[0].orphans, []);
+    }
+
+    #[test]
+    fn a_removed_fleets_spawned_session_is_loose() {
+        let (root, state, _mux, t, tending) = filled("ov-spawned-loose");
+        crate::testing::put(
+            &state,
+            &*t.mux,
+            &crate::testing::spawned_row("s0000000003", Path::new("/gone"), 10),
+        );
+        let o = answer(&state, &t, &tending, &root.join("wing"));
+        assert_eq!(
+            o.loose
+                .iter()
+                .map(|l| l.session.clone())
+                .collect::<Vec<_>>(),
+            ["s0000000003"]
+        );
+        assert!(o.fleets.iter().all(|f| f.spawned.is_empty()));
+    }
+
+    /// A session of a fleet since removed, as `fleet status` lists loose.
+    fn loose_session(state: &Mutex<State>, t: &Tools) -> String {
+        let id = "s00000000aa";
+        crate::testing::put(
+            state,
+            &*t.mux,
+            &crate::testing::spawned_row(id, Path::new("/gone"), 5),
+        );
+        id.to_owned()
     }
 
     #[test]
     fn here_is_one_fleet_with_its_seats_states() {
         let (root, state, _, t, tending) = filled("ov-here");
-        let _ = debug_session(&root, &state, &t);
+        let _ = loose_session(&state, &t);
         let o = answer(&state, &t, &tending, &root.join("code/app/src"));
         assert_eq!(o.fleets.len(), 1);
         let f = &o.fleets[0];
@@ -287,7 +351,7 @@ mod tests {
     #[test]
     fn elsewhere_is_every_fleet_and_the_loose_sessions() {
         let (root, state, _, t, tending) = filled("ov-all");
-        let debug = debug_session(&root, &state, &t);
+        let loose = loose_session(&state, &t);
         let o = answer(&state, &t, &tending, &root.join("wing"));
         assert_eq!(o.fleets.len(), 1);
         assert_eq!(o.fleets[0].seats.len(), 1);
@@ -296,7 +360,7 @@ mod tests {
                 .iter()
                 .map(|l| l.session.clone())
                 .collect::<Vec<_>>(),
-            [debug]
+            [loose]
         );
     }
 
@@ -399,7 +463,7 @@ mod tests {
         let t = tools(Arc::new(FakeMux::default()), agents.clone());
         let tending = Tending::new();
         tending::tick(&state, &t, &store(&root), &tending, 1_000);
-        let _ = debug_session(&root, &state, &t);
+        let _ = loose_session(&state, &t);
         let _ = answer(&state, &t, &tending, &root.join("code/app"));
         let asked: Vec<usize> = agents
             .reads
@@ -408,6 +472,6 @@ mod tests {
             .iter()
             .map(|(_, refs)| refs.len())
             .collect();
-        assert_eq!(asked, [1], "the seat's session, not the debug one");
+        assert_eq!(asked, [1], "the seat's session, not the loose one");
     }
 }

@@ -142,6 +142,7 @@ mod tests {
             pane: pane.into(),
             fleet: None,
             seat: None,
+            role: None,
             role_digest: None,
         }
     }

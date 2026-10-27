@@ -73,6 +73,24 @@ pub(crate) const MESSAGE_TO_HELP: &str = "A seat of the fleet here, or a session
 /// The help for `fleet message`'s text.
 pub(crate) const MESSAGE_TEXT_HELP: &str = "What to send; without it, what is piped in";
 
+/// The help for `fleet spawn`.
+pub(crate) const SPAWN_ABOUT: &str = "Start a session from a role of the fleet here and say its \
+     id; send it its task with fleet message";
+
+/// The help for `fleet spawn`'s role.
+pub(crate) const SPAWN_ROLE_HELP: &str = "The role, by its label in fleet.toml";
+
+/// The help for `fleet spawn --directory`.
+pub(crate) const SPAWN_DIRECTORY_HELP: &str = "Where the agent works: one of the fleet's \
+     projects, by its root; the role's directory without it";
+
+/// The help for `fleet end`.
+pub(crate) const END_ABOUT: &str = "End a seat's session, which comes back fresh, or a session \
+     by its id; messages waiting for that session are dropped";
+
+/// The help for `fleet end`'s name.
+pub(crate) const END_NAME_HELP: &str = "A seat of the fleet here, or a session's id";
+
 /// The question asked at a terminal when the supervisor is not running.
 pub(crate) const START_PROMPT: &str = "The fleet supervisor is not running. Start it?";
 
@@ -93,6 +111,9 @@ pub(crate) const STOPPING: &str = "stopping the supervisor";
 /// The spinner while `fleet stop` waits for a supervisor that is running but
 /// not answering.
 pub(crate) const WAITING: &str = "waiting for the supervisor to answer";
+
+/// The spinner's words while a spawn waits for its agent to launch.
+pub(crate) const SPAWNING: &str = "spawning the agent";
 
 /// What a command did.
 pub(crate) fn response(response: &Response, ink: Ink) -> String {
@@ -127,6 +148,8 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
             now_millis,
         } => overview::lines(overview, *now_millis, ink),
         Response::MessageQueued(queued) => message::queued(queued, ink),
+        Response::Spawned(spawned) => session::spawned(spawned, ink),
+        Response::Ended(ended) => session::ended(ended, ink),
     }
 }
 
@@ -473,6 +496,8 @@ fn during_words(during: During) -> String {
         During::TurningOffProject => "turning the project off".into(),
         During::Looking => "asking the supervisor what its agents are doing".into(),
         During::Messaging => "asking the supervisor to queue the message".into(),
+        During::Spawning => "asking the supervisor to spawn the session".into(),
+        During::Ending => "asking the supervisor to end the session".into(),
     }
 }
 

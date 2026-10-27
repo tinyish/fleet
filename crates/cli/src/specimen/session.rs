@@ -3,10 +3,11 @@
 //! not compile until it has a sample here.
 
 use fleet_core::agent::{AdapterFault, AdapterFaultKind, Verb};
+use fleet_core::protocol::response;
 use fleet_core::status::{Session, SessionKind};
 use strum::IntoEnumIterator;
 
-use super::samples::{not_found, path};
+use super::samples::{APP, WING, not_found, path};
 
 const CLAUDE: &str = "/code/fleet-adapters/target/debug/fleet-claude-code";
 
@@ -23,14 +24,61 @@ pub(super) fn samples(kind: SessionKind) -> Vec<Session> {
             command: "tmux new-session".into(),
             said: "can't use /dev/null".into(),
         }],
-        K::NoSuchSession => vec![S::NoSuchSession {
-            session: "s3f9a01c2d4".into(),
-        }],
         K::LaunchTooLong => vec![S::LaunchTooLong {
             bytes: 20_514,
             limit: 16_000,
         }],
+        K::NoFleetHere => vec![S::NoFleetHere {
+            directory: path("/code/notes"),
+        }],
+        K::NoSuchRole => vec![S::NoSuchRole {
+            role: "reviewer".into(),
+            fleet: path(WING),
+        }],
+        K::NotAProject => vec![S::NotAProject {
+            path: path("/code/app/src"),
+            fleet: path(WING),
+        }],
+        K::SeatNotRunning => vec![S::SeatNotRunning {
+            seat: "scribe".into(),
+            fleet: path(APP),
+        }],
+        K::NoSuchSeatOrSession => vec![
+            S::NoSuchSeatOrSession {
+                name: "scrib".into(),
+                fleet: Some(path(APP)),
+            },
+            S::NoSuchSeatOrSession {
+                name: "s3f9a01c2d4".into(),
+                fleet: None,
+            },
+        ],
     }
+}
+
+/// Every way `fleet spawn` ends done.
+pub(super) fn spawns() -> Vec<crate::protocol::Response> {
+    vec![crate::protocol::Response::Spawned(
+        response::Spawn::Spawned {
+            session: "s3fa01c2e9".into(),
+            fleet: path(WING),
+            role: "worker".into(),
+            directory: path(APP),
+        },
+    )]
+}
+
+/// Every way `fleet end` ends done: a spawned session, and a seat's.
+pub(super) fn ends() -> Vec<crate::protocol::Response> {
+    [None, Some("scribe")]
+        .into_iter()
+        .map(|seat| {
+            crate::protocol::Response::Ended(response::End::Ended {
+                session: "s3fa01c2e9".into(),
+                seat: seat.map(str::to_owned),
+            })
+        })
+        .collect()
 }
 
 /// Every fault under every verb.

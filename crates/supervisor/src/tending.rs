@@ -272,6 +272,7 @@ fn act(
     };
     let seat = ForSeat {
         key: key.clone(),
+        role: role.label.clone(),
         role_digest: role.digest(),
         clear: clear.iter().map(|h| h.session.clone()).collect(),
     };

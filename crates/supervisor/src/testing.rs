@@ -130,6 +130,8 @@ pub(crate) struct FakeMux {
     pub(crate) panes: Mutex<Vec<Pane>>,
     /// Whether a launch fails.
     pub(crate) fail_launch: bool,
+    /// What tmux says when ending a session fails, if it does.
+    pub(crate) stop_fails: Option<&'static str>,
     /// Like a tmux that is not installed.
     pub(crate) missing: bool,
     /// Each paste: the pane and the text.
@@ -189,6 +191,12 @@ impl Multiplexer for FakeMux {
     }
 
     fn stop(&self, session: &str) -> Result<(), ToolError> {
+        if let Some(said) = self.stop_fails {
+            return Err(ToolError::Failed {
+                command: "tmux kill-session".into(),
+                said: said.into(),
+            });
+        }
         self.panes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -340,4 +348,69 @@ pub(crate) fn with_seat(name: &str) -> (PathBuf, Mutex<State>, fleet_core::fleet
         });
     assert!(made.is_ok(), "{made:?}");
     (root, state, fleet)
+}
+
+/// Writes `row` to state with a live pane on `mux`, as a launch would but
+/// with no adapter: for a session a test needs just as it is.
+pub(crate) fn put(state: &Mutex<State>, mux: &dyn Multiplexer, row: &state::SessionRow) {
+    let program = Launched {
+        argv: vec!["/bin/agent".into()],
+        env: BTreeMap::new(),
+    };
+    let written = state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .write(|w| w.launch_session(row, || mux.launch(&row.id, &row.directory, &program)));
+    assert!(written.is_ok(), "{written:?}");
+}
+
+/// A session spawned from role `w` of the fleet in `fleet`, launched at
+/// `launch_time_millis`.
+pub(crate) fn spawned_row(id: &str, fleet: &Path, launch_time_millis: i64) -> state::SessionRow {
+    state::SessionRow {
+        id: id.into(),
+        adapter: "/a/claude".into(),
+        directory: fleet.to_path_buf(),
+        launch_time_millis,
+        pane: String::new(),
+        fleet: Some(fleet.to_path_buf()),
+        seat: None,
+        role: Some("w".into()),
+        role_digest: Some("d".into()),
+    }
+}
+
+/// A wingman fleet in `wing/` serving `code/app` and `code/lib`, with
+/// `roles` as (label, adapter), each running sonnet in `wing/`, woken with
+/// "You take tasks.", and no seats: its root, its state, and `wing/`.
+pub(crate) fn crew(name: &str, roles: &[(&str, &str)]) -> (PathBuf, Mutex<State>, PathBuf) {
+    use fleet_core::seats::{Role, Roster};
+    let (root, state) = tree(name, &["app", "lib"]);
+    let wing = root.join("wing");
+    let fleet = fleet_core::fleets::Fleet {
+        directory: wing.clone(),
+        projects: vec![code(&root, "app"), code(&root, "lib")],
+    };
+    let roster = Roster {
+        roles: roles
+            .iter()
+            .map(|(label, adapter)| Role {
+                label: (*label).into(),
+                adapter: (*adapter).into(),
+                model: Some("sonnet".into()),
+                prompt: Some("You take tasks.".into()),
+                directory: wing.clone(),
+            })
+            .collect(),
+        seats: vec![],
+    };
+    let made = state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .write(|w| {
+            w.create_fleet(&fleet, || Ok(()))?;
+            w.set_roster(&fleet.directory, &roster)
+        });
+    assert!(made.is_ok(), "{made:?}");
+    (root, state, wing)
 }

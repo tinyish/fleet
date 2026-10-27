@@ -2,13 +2,14 @@
 //! struct, so the compiler cannot check these shapes: a fleet on with a seat
 //! in each state (idle, working from an older role, needing you, down with a
 //! reason and without, not running) and an orphan, with messages waiting
-//! for the working seat; a fleet off with no seats; the sessions of no
+//! for the working seat, and two spawned sessions, one working with a
+//! message waiting and one gone; a fleet off with no seats; the sessions of no
 //! fleet, one with a message waiting; an adapter that could not read; and
 //! nothing at all.
 
 use fleet_core::agent::{AdapterFault, Reason, SessionState, Verb};
 use fleet_core::protocol::response::{
-    Down, Fault, FleetOverview, Listed, Orphan, Overview, SeatOverview,
+    Down, Fault, FleetOverview, Listed, Orphan, Overview, SeatOverview, Spawned,
 };
 use fleet_core::status;
 
@@ -40,6 +41,23 @@ fn seat(name: &str, role: &str, session: Option<Listed>) -> SeatOverview {
         down: None,
         waiting: 0,
     }
+}
+
+/// Two spawned sessions: one working with a message waiting, one gone.
+fn spawned() -> Vec<Spawned> {
+    vec![
+        Spawned {
+            role: "worker".into(),
+            session: Listed {
+                waiting: 1,
+                ..listed("s3fa01c2e9", SessionState::Working)
+            },
+        },
+        Spawned {
+            role: "worker".into(),
+            session: listed("s9b8a7c6d5", SessionState::Gone),
+        },
+    ]
 }
 
 /// Every overview the specimen shows.
@@ -104,12 +122,14 @@ pub(super) fn overviews() -> Vec<Overview> {
             seat: "old".into(),
             session: listed("s0011223344", SessionState::Idle),
         }],
+        spawned: spawned(),
     };
     let off = FleetOverview {
         directory: path(WING),
         on: false,
         seats: vec![],
         orphans: vec![],
+        spawned: vec![],
     };
     vec![
         Overview {

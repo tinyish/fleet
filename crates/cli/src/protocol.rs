@@ -54,6 +54,21 @@ pub(crate) enum Request {
         #[arg(value_name = "TEXT", allow_hyphen_values = true, help = crate::ui::words::MESSAGE_TEXT_HELP)]
         text: Option<String>,
     },
+    // `fleet spawn`: a session from a role of the fleet here, in the role's
+    // directory or a project's root.
+    #[command(about = crate::ui::words::SPAWN_ABOUT)]
+    Spawn {
+        #[arg(value_name = "ROLE", help = crate::ui::words::SPAWN_ROLE_HELP)]
+        role: String,
+        #[arg(long, value_name = "PATH", help = crate::ui::words::SPAWN_DIRECTORY_HELP)]
+        directory: Option<PathBuf>,
+    },
+    // `fleet end`: a seat's session, or a session by its id.
+    #[command(about = crate::ui::words::END_ABOUT)]
+    End {
+        #[arg(value_name = "SEAT_OR_SESSION", help = crate::ui::words::END_NAME_HELP)]
+        name: String,
+    },
     // `fleet uninstall`.
     #[command(about = crate::ui::words::uninstall::ABOUT)]
     Uninstall,
@@ -130,6 +145,10 @@ pub(crate) enum Response {
     },
     /// `fleet message` queued a message.
     MessageQueued(protocol::response::Message),
+    /// `fleet spawn` spawned a session.
+    Spawned(protocol::response::Spawn),
+    /// `fleet end` ended a session.
+    Ended(protocol::response::End),
 }
 
 /// How a command found the supervisor.
@@ -307,6 +326,10 @@ pub(crate) enum During {
     Looking,
     /// Asking the supervisor to queue a message.
     Messaging,
+    /// Asking the supervisor to spawn a session.
+    Spawning,
+    /// Asking the supervisor to end a session.
+    Ending,
 }
 
 #[cfg(test)]

@@ -102,17 +102,28 @@ pub enum Step {
         /// What the agent was first told.
         #[serde(skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
-        /// The fleet of the seat it was launched for.
+        /// The fleet it was launched for: its seat's, or the one whose role
+        /// it was spawned from.
         #[serde(skip_serializing_if = "Option::is_none")]
         fleet: Option<String>,
-        /// That seat.
+        /// The seat it was launched for.
         #[serde(skip_serializing_if = "Option::is_none")]
         seat: Option<String>,
+        /// The label of the role it was launched from: its seat's, or the
+        /// one it was spawned from.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
     },
-    /// A session was stopped: its tmux session ended and it is forgotten.
-    SessionStopped {
+    /// A session was ended: its tmux session ended and it is forgotten.
+    SessionEnded {
         /// tinyfleet's id for it.
         session: String,
+        /// The fleet it was launched for.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fleet: Option<String>,
+        /// The seat it was launched for.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seat: Option<String>,
     },
     /// Re-reading a fleet's config gave it a seat.
     SeatAdded {
@@ -232,6 +243,15 @@ mod tests {
     use fleet_core::status;
 
     fn all() -> Vec<Step> {
+        fleet_steps()
+            .into_iter()
+            .chain(session_steps())
+            .chain(message_steps())
+            .collect()
+    }
+
+    /// One of each step of the supervisor, its fleets and projects.
+    fn fleet_steps() -> Vec<Step> {
         vec![
             Step::SupervisorStarted {
                 version: "0.0.0".into(),
@@ -276,6 +296,12 @@ mod tests {
             Step::FleetForgotten {
                 directory: "/f".into(),
             },
+        ]
+    }
+
+    /// One of each step of seats, roles and sessions.
+    fn session_steps() -> Vec<Step> {
+        vec![
             Step::SessionLaunched {
                 session: "s1".into(),
                 adapter: "claude-code@2.1.285".into(),
@@ -285,9 +311,12 @@ mod tests {
                 prompt: None,
                 fleet: Some("/c/app".into()),
                 seat: Some("scribe".into()),
+                role: Some("writer".into()),
             },
-            Step::SessionStopped {
+            Step::SessionEnded {
                 session: "s1".into(),
+                fleet: Some("/c/app".into()),
+                seat: None,
             },
             Step::SeatAdded {
                 fleet: "/c/app".into(),
@@ -328,9 +357,6 @@ mod tests {
                 }),
             },
         ]
-        .into_iter()
-        .chain(message_steps())
-        .collect()
     }
 
     /// One of each message step.
@@ -378,7 +404,7 @@ mod tests {
                 "PROJECTS_TAKEN",
                 "FLEET_FORGOTTEN",
                 "SESSION_LAUNCHED",
-                "SESSION_STOPPED",
+                "SESSION_ENDED",
                 "SEAT_ADDED",
                 "SEAT_REMOVED",
                 "ROLE_CHANGED",
@@ -431,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn a_debug_sessions_launch_names_no_seat() {
+    fn a_spawned_sessions_launch_names_its_fleet_and_role_and_no_seat() {
         let launched = Step::SessionLaunched {
             session: "s1".into(),
             adapter: "/a/claude".into(),
@@ -439,13 +465,14 @@ mod tests {
             directory: "/c/app".into(),
             model: None,
             prompt: None,
-            fleet: None,
+            fleet: Some("/c/wing".into()),
             seat: None,
+            role: Some("worker".into()),
         };
         assert_eq!(
             launched.to_row().ok().map(|r| r.1),
             Some(
-                r#"{"adapter":"/a/claude","directory":"/c/app","program":"/a/claude","session":"s1"}"#
+                r#"{"adapter":"/a/claude","directory":"/c/app","fleet":"/c/wing","program":"/a/claude","role":"worker","session":"s1"}"#
                     .to_owned()
             )
         );

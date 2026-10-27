@@ -88,8 +88,8 @@ in a repository of their own, `tinyish/fleet-adapters`, one directory per
 kind (`agents/`, `trackers/`, `forges/`), each released like fleet as
 prebuilt binaries. They are not installed with fleet: the first time one
 is run, the supervisor fetches the release for this machine, checks it
-against its SHA-256, and keeps it under the state directory. (Named today
-by hand with `fleet debug`, and by a fleet's config for its roles.) This is the one thing tinyfleet reaches
+against its SHA-256, and keeps it under the state directory. (Named by a
+fleet's config, for its roles.) This is the one thing tinyfleet reaches
 the network for. Users can write their own adapters, in any language, for
 other agents, for trackers such as Linear or Jira, and for forges such as
 GitHub or GitLab, and name them by their path.
@@ -114,8 +114,8 @@ of its own, and adapters, tinyfleet's own included, take it by the tag
 
 > **Directional,** drawn for Delivery. Built: roles and seats, kept filled by
 > the supervisor and shown by `fleet status`; messages, held by the
-> supervisor until their agent is idle; a debug build's `fleet debug`
-> launches and stops a session by hand. Nothing else here is built yet.
+> supervisor until their agent is idle; spawn and end, a session made from
+> a role and ended only when told. Nothing else here is built yet.
 
 tinyfleet gives a person the building blocks of their own metaharness, and
 nothing that carries an opinion. Roles, workflows, reactions (such as "CI
@@ -140,15 +140,25 @@ its fleet is on, revives it when it is gone, and adopts it on start. Every
 revival starts fresh, with its role's wake-up prompt; what an agent remembers
 between lives is its user's to arrange. It runs in the directory its role
 names, by default the fleet directory. Off only stops the reviving: nothing
-ends a seat's session but a person or a program telling it to stop. A seat
+ends a seat's session but a person or a program telling it to end, and a
+seat whose session was ended comes back fresh at once while its fleet is
+on. A seat
 taken out of the config leaves its session running, never revived; a role
 changed reaches a seat's session at its next revival. Nobody spawns a seat.
 
-A role is also a template. Spawn makes a new session from it,
-in the directory the caller gives (a project's root or a workspace), and
-answers with the session's id. tinyfleet never ends a spawned session on its
-own: it ends when it is told to stop, and one that dies is reported gone,
-never revived.
+A role is also a template. Spawn makes a new
+session from a role of the fleet holding the directory it is asked from,
+wakes it with the role's prompt, and answers with the session's id; its
+task is a message to that id. It works in the role's directory unless the
+caller names another, which must be one of the fleet's projects by its root
+(or, once workspaces exist, a workspace). A project off does not stop a
+spawn: off only stops the supervisor's own reviving. tinyfleet never ends a
+spawned session on its own: it ends when it is told to end, and one that
+dies is reported gone, under its fleet, until it is ended, never revived.
+End takes a seat of the fleet holding the directory it is asked from, ending
+its live session, or any session by its id; ending a session that is
+already gone clears it. Ending a session drops the messages held for it; a
+seat's messages wait for its next session.
 
 **Messages.** A message goes to a seat by its name or to a session by its
 id: a name is first a seat of the fleet holding the directory it is sent
@@ -164,7 +174,7 @@ A message to a seat goes to whichever of its sessions is live when its agent
 is next idle, so one sent while it is being revived waits for the new
 session; one to an agent that needs you waits until someone answers it:
 nothing is ever typed at a prompt. A project off stops reviving, not
-delivering. A message that can no longer reach anyone (its session stopped
+delivering. A message that can no longer reach anyone (its session ended
 or cleared as gone, its seat taken out of the config, its fleet removed) is
 dropped in the same change, and recorded dropped. Status counts the messages
 waiting for each seat and session. Reading the answer is observe's.
@@ -294,6 +304,20 @@ reads, and the supervisor keeps every seat of a fleet with any project on
 filled, adopting the sessions still running; off, it leaves the sessions
 alone. Only state is read to do it, so a reboot needs no config.
 
+**spawn / end**: spawn sends the directory it
+runs in, the role, and any directory named for the agent; the supervisor
+finds the fleet holding the directory and the role in its roster as last
+read, and refuses a directory that is not one of the fleet's projects by its
+root. It asks the role's adapter how to launch without the state lock, then,
+in one transaction, checks the fleet is still there, runs the agent in tmux,
+writes the session with its fleet and role and records the step; it answers
+with the session's id once the agent runs. End sends the directory and a
+name: a seat of the fleet holding the directory, else a session's id. In one
+transaction the supervisor forgets the session, ends its tmux session, drops
+the messages held for it and records both; a seat's ended session is then
+revived at once, as the tending loop revives any seat with none. Neither
+starts the supervisor.
+
 **remove**: the CLI asks the supervisor to remove the fleet whose directory
 is the current one, or, with `--project`, to take those projects out of a
 wingman fleet. The request says what to do with the fleet's `fleet.toml`:
@@ -343,7 +367,7 @@ contract's (see Boundaries).
 2. No onboarding step commits to a repository.
 3. A directory holds at most one fleet, no fleet directory is inside
    another's, and a repository belongs to at most one fleet.
-4. Stopping a fleet or the supervisor never ends an agent's session *(directional: arrives with the agent adapter)*.
+4. Stopping a fleet or the supervisor never ends an agent's session.
 5. Nothing waits for an answer when there is no terminal.
 6. tinyfleet uses only its own tmux socket.
 7. Only drivers start outside programs.
@@ -425,9 +449,8 @@ squash to `main`. There are four: macOS on arm64 and on x86_64, and Linux on
 arm64 and on x86_64, statically linked against musl. Each is
 `fleet-<target>.tar.gz` with its `.sha256` beside it. The names carry no
 version, so the latest release's download links never change. They are built
-without features, so none has the CLI's specimen or its debug verb: the
-workflow refuses a release whose binary accepts `fleet specimen` or `fleet
-debug`.
+without features, so none has the CLI's specimen: the workflow refuses a
+release whose binary accepts `fleet specimen`.
 
 ## Toolchain
 
@@ -437,8 +460,7 @@ debug`.
   branch's first commit sets it, and the release workflow reads it there.
 - **clippy** with a pinned lint set, warnings denied.
 - clippy and the tests also run with `--all-features`, so the CLI's
-  specimen ([cli-output.md](cli-output.md)) builds and stays complete, and
-  `fleet debug` builds. `tools/try` builds with the `debug` feature.
+  specimen ([cli-output.md](cli-output.md)) builds and stays complete.
 - Visible evals are trycmd transcript cases under `tests/cmd/<verb>/`, run by
   `cargo test`.
 - Fitness tests read the workspace's dependency graph (`cargo metadata`).
@@ -462,7 +484,7 @@ debug`.
 | primitive | a building block tinyfleet gives users for their own metaharness; it carries no opinion |
 | role | an entry in a fleet's config saying how to run an agent: its label, its adapter, its model, its wake-up prompt and its directory |
 | seat | a named agent of a fleet, running as its role says, that the supervisor keeps one session of running, revived fresh when it is gone |
-| session | a tmux session on tinyfleet's socket, running one agent; a spawned session ends only when told to stop |
+| session | a tmux session on tinyfleet's socket, running one agent; a spawned session ends only when told to end |
 | workspace | a git worktree on its own branch, under the state directory |
 | message | text for a seat or a session, held by the supervisor until its agent is idle, then typed in |
 | event | a recorded step, as a subscriber sees it |

@@ -28,8 +28,6 @@ pub enum Request {
     Stop(request::Stop),
     /// For `fleet remove`.
     Remove(request::Remove),
-    /// For agents' sessions: `fleet debug` now.
-    Session(request::Session),
     /// For `fleet status`: the seats of the fleet holding `directory`, or
     /// of every fleet when none holds it.
     Overview {
@@ -38,6 +36,10 @@ pub enum Request {
     },
     /// For `fleet message`.
     Message(request::Message),
+    /// For `fleet spawn`.
+    Spawn(request::Spawn),
+    /// For `fleet end`.
+    End(request::End),
 }
 
 /// The requests of each command. Always written with the module, as in
@@ -104,30 +106,35 @@ pub mod request {
         },
     }
 
-    /// What is asked of agents' sessions.
+    /// What `fleet spawn` asks.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
-    pub enum Session {
-        /// Launch an agent through the adapter `adapter` names, in
+    pub enum Spawn {
+        /// Spawn a session from `role`, a role of the fleet holding
         /// `directory`.
-        Launch {
-            /// The adapter: a program by its absolute path, or
-            /// `<name>@<version>`, a release of fleet-adapters
-            /// (`core::adapters`).
-            adapter: String,
-            /// Where the agent works, absolute.
+        Session {
+            /// The CLI's current directory, absolute.
             directory: PathBuf,
-            /// The model to run; the adapter's default when absent.
+            /// The role's label.
+            role: String,
+            /// Where the agent works, absolute: one of the fleet's projects
+            /// by its root; the role's directory when absent.
             #[serde(default, skip_serializing_if = "Option::is_none")]
-            model: Option<String>,
-            /// The first thing the agent is told.
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            prompt: Option<String>,
+            working_directory: Option<PathBuf>,
         },
-        /// Stop a session: end its tmux session and forget it.
-        Stop {
-            /// The session's id.
-            session: String,
+    }
+
+    /// What `fleet end` asks.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum End {
+        /// End `name`: a seat of the fleet holding `directory`, which ends
+        /// its live session, else a session by its id.
+        Session {
+            /// The CLI's current directory, absolute.
+            directory: PathBuf,
+            /// A seat's name or a session's id.
+            name: String,
         },
     }
 
@@ -180,12 +187,14 @@ pub enum Response {
     Stop(response::Stop),
     /// What `fleet remove` did.
     Remove(response::Remove),
-    /// What was done to agents' sessions.
-    Session(response::Session),
     /// What `fleet status` shows.
     Overview(response::Overview),
     /// What `fleet message` did.
     Message(response::Message),
+    /// What `fleet spawn` did.
+    Spawn(response::Spawn),
+    /// What `fleet end` did.
+    End(response::End),
 }
 
 /// The responses of each command. Always written with the module, as in
@@ -343,24 +352,43 @@ pub mod response {
         Missing,
     }
 
-    /// What was done to agents' sessions.
+    /// What `fleet spawn` did.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
-    pub enum Session {
-        /// A session was launched.
-        Launched {
+    pub enum Spawn {
+        /// A session runs.
+        Spawned {
             /// Its id.
             session: String,
+            /// The fleet whose role it was spawned from.
+            fleet: PathBuf,
+            /// That role's label.
+            role: String,
+            /// Where its agent works.
+            directory: PathBuf,
         },
-        /// A session was stopped.
-        Stopped {
+    }
+
+    /// What `fleet end` did.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum End {
+        /// A session was ended and forgotten.
+        Ended {
             /// Its id.
             session: String,
+            /// The seat whose session it was, when that seat is still in
+            /// its fleet's config, so it comes back fresh while its fleet
+            /// is on; none for any other session, an orphan's included.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            seat: Option<String>,
         },
     }
 
     mod overview;
-    pub use overview::{Down, Fault, FleetOverview, Listed, Orphan, Overview, SeatOverview};
+    pub use overview::{
+        Down, Fault, FleetOverview, Listed, Orphan, Overview, SeatOverview, Spawned,
+    };
 
     /// What `fleet message` did.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,17 +548,22 @@ mod tests {
                 project: PathBuf::from("/c/app"),
             }),
             create,
-            Request::Session(request::Session::Launch {
-                adapter: "claude-code@2.1.285".into(),
-                directory: PathBuf::from("/c/app"),
-                model: Some("sonnet".into()),
-                prompt: Some("hi; there".into()),
+            Request::Spawn(request::Spawn::Session {
+                directory: PathBuf::from("/c/wing"),
+                role: "worker".into(),
+                working_directory: Some(PathBuf::from("/c/app")),
+            }),
+            Request::Spawn(request::Spawn::Session {
+                directory: PathBuf::from("/c/wing"),
+                role: "worker".into(),
+                working_directory: None,
             }),
             Request::Overview {
                 directory: PathBuf::from("/c/app/src"),
             },
-            Request::Session(request::Session::Stop {
-                session: "s1".into(),
+            Request::End(request::End::Session {
+                directory: PathBuf::from("/c/app"),
+                name: "scribe".into(),
             }),
             Request::Message(request::Message::Send {
                 directory: PathBuf::from("/c/app"),
@@ -683,8 +716,9 @@ mod tests {
                 error: "denied".into(),
             }
             .into(),
-            status::Session::NoSuchSession {
-                session: "s0123456789".into(),
+            status::Session::NoSuchSeatOrSession {
+                name: "s0123456789".into(),
+                fleet: None,
             }
             .into(),
             status::Adapter::ReleaseMismatch {
@@ -705,14 +739,34 @@ mod tests {
     }
 
     #[test]
+    fn spawned_sessions_go_on_the_wire_by_role() {
+        let mut buf = Vec::new();
+        write_reply(&mut buf, &Reply::Response(Response::Overview(overview()))).ok();
+        assert!(
+            String::from_utf8_lossy(&buf)
+                .contains(r#""spawned":[{"role":"worker","session":{"session":"s4""#),
+            "{}",
+            String::from_utf8_lossy(&buf)
+        );
+    }
+
+    #[test]
     fn every_session_reply_round_trips() {
         let replies = [
-            Reply::Response(Response::Session(response::Session::Launched {
+            Reply::Response(Response::Spawn(response::Spawn::Spawned {
                 session: "s1".into(),
+                fleet: PathBuf::from("/c/wing"),
+                role: "worker".into(),
+                directory: PathBuf::from("/c/app"),
             })),
             Reply::Response(Response::Overview(overview())),
-            Reply::Response(Response::Session(response::Session::Stopped {
+            Reply::Response(Response::End(response::End::Ended {
                 session: "s1".into(),
+                seat: None,
+            })),
+            Reply::Response(Response::End(response::End::Ended {
+                session: "s1".into(),
+                seat: Some("scribe".into()),
             })),
             Reply::Status(Status::Session(status::Session::AdapterFailed {
                 adapter: PathBuf::from("/a/claude"),
@@ -729,8 +783,28 @@ mod tests {
                 command: "tmux new-session".into(),
                 said: "no".into(),
             })),
-            Reply::Status(Status::Session(status::Session::NoSuchSession {
-                session: "s9".into(),
+            Reply::Status(Status::Session(status::Session::NoFleetHere {
+                directory: "/c/x".into(),
+            })),
+            Reply::Status(Status::Session(status::Session::NoSuchRole {
+                role: "worker".into(),
+                fleet: "/c/wing".into(),
+            })),
+            Reply::Status(Status::Session(status::Session::NotAProject {
+                path: "/c/app/src".into(),
+                fleet: "/c/wing".into(),
+            })),
+            Reply::Status(Status::Session(status::Session::SeatNotRunning {
+                seat: "scribe".into(),
+                fleet: "/c/app".into(),
+            })),
+            Reply::Status(Status::Session(status::Session::NoSuchSeatOrSession {
+                name: "s0".into(),
+                fleet: None,
+            })),
+            Reply::Status(Status::Session(status::Session::NoSuchSeatOrSession {
+                name: "scrib".into(),
+                fleet: Some("/c/app".into()),
             })),
         ];
         for reply in replies {
@@ -777,8 +851,9 @@ mod tests {
                         session: None,
                         older_role: false,
                         down: Some(response::Down {
-                            why: Some(Status::Session(status::Session::NoSuchSession {
-                                session: "s0".into(),
+                            why: Some(Status::Session(status::Session::NoSuchSeatOrSession {
+                                name: "s0".into(),
+                                fleet: None,
                             })),
                             next_try_millis: 9,
                         }),
@@ -788,6 +863,10 @@ mod tests {
                 orphans: vec![response::Orphan {
                     seat: "old".into(),
                     session: listed("s2", SessionState::Idle),
+                }],
+                spawned: vec![response::Spawned {
+                    role: "worker".into(),
+                    session: listed("s4", SessionState::Working),
                 }],
             }],
             loose: vec![listed("s3", SessionState::Gone)],
@@ -823,6 +902,7 @@ mod tests {
                 on: false,
                 seats: vec![seat],
                 orphans: vec![],
+                spawned: vec![],
             }],
             ..response::Overview::default()
         };

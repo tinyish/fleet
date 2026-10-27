@@ -5,8 +5,7 @@
 #   tools/try -c 'commands'   run the commands in the sandbox instead
 #
 # It builds fleet into target/try (never target/debug, which a real
-# supervisor may run from) with the debug feature, for `fleet debug`, makes
-# a temp directory with three git repos and a state directory, runs a
+# supervisor may run from), makes a temp directory with three git repos and a state directory, runs a
 # supervisor on that state by hand, and opens
 # a shell where `fleet` is that build and FLEET_STATE_DIR points at the
 # sandbox. Leaving it stops that supervisor, by its pid, and deletes the
@@ -90,7 +89,7 @@ banner() {
     say "  plain \`fleet stop\`, and \`fleet start\` while this supervisor is down, are refused"
     say "  while your real supervisor is installed. Do not follow that refusal's hint here:"
     say "  it stops your real supervisor."
-    say "  \`fleet status\` shows the seats; \`fleet debug launch|stop\` drives a session by hand;"
+    say "  \`fleet status\` shows the seats; \`fleet spawn <role>\` makes a session and \`fleet end\` ends one;"
     say "  watch one with \`tmux -S state/tmux.sock attach -t <id>\`"
     say "  exit the shell to stop this supervisor and delete the sandbox"
 }
@@ -103,7 +102,7 @@ main() {
     fi
     [ -z "${FLEET_STATE_DIR:-}" ] || fail "FLEET_STATE_DIR is already set; is this a sandbox already?"
 
-    CARGO_TARGET_DIR=$root/target/try cargo build -q -p fleet --features debug \
+    CARGO_TARGET_DIR=$root/target/try cargo build -q -p fleet \
         --manifest-path "$root/Cargo.toml" ||
         fail "the build failed"
 

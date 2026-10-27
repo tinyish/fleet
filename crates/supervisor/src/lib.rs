@@ -215,27 +215,23 @@ fn answer(
             projects,
             config,
         })) => remove::remove(state, &directory, &projects, config)?,
-        Ok(Request::Session(request::Session::Launch {
-            adapter,
+        Ok(Request::Spawn(request::Spawn::Session {
             directory,
-            model,
-            prompt,
-        })) => sessions::launch(
+            role,
+            working_directory,
+        })) => sessions::spawn(
             state,
             tools,
             store,
-            &sessions::Ask {
-                adapter,
-                directory,
-                model,
-                prompt,
-            },
+            &directory,
+            &role,
+            working_directory.as_deref(),
         )?,
         Ok(Request::Overview { directory }) => {
             overview::overview(state, tools, tending, &directory)?
         }
-        Ok(Request::Session(request::Session::Stop { session })) => {
-            sessions::stop(state, tools, &session)?
+        Ok(Request::End(request::End::Session { directory, name })) => {
+            sessions::end(state, tools, &directory, &name)?
         }
         Ok(Request::Message(request::Message::Send {
             directory,
@@ -257,14 +253,27 @@ fn answer(
         Err(ProtocolError::Malformed(error)) => Reply::Status(Status::Malformed { error }),
         Err(e) => return Err(Error::Protocol(e)),
     };
-    // Start and create may have turned projects on or read seats, and a
-    // message may wait for an idle agent: tend now.
-    if let Reply::Response(Response::Start(_) | Response::Create(_) | Response::Message(_)) = reply
-    {
+    if wakes_tending(&reply) {
         tending.poke();
     }
     let mut writer = stream;
     protocol::write_reply(&mut writer, &reply).map_err(Error::Protocol)
+}
+
+/// Whether `reply` may leave work for the tending loop, so it should tend
+/// now: start and create may have turned projects on or read seats, a
+/// message may wait for an idle agent, and a seat whose session was ended
+/// wants a new one.
+fn wakes_tending(reply: &Reply) -> bool {
+    matches!(
+        reply,
+        Reply::Response(
+            Response::Start(_)
+                | Response::Create(_)
+                | Response::Message(_)
+                | Response::End(response::End::Ended { seat: Some(_), .. })
+        )
+    )
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -291,4 +300,21 @@ fn repo_root_of(path: &Path) -> Option<PathBuf> {
     path.ancestors()
         .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_seats_end_wakes_the_tending_loop_and_a_spawned_sessions_does_not() {
+        let ended = |seat: Option<&str>| {
+            Reply::Response(Response::End(response::End::Ended {
+                session: "s1".into(),
+                seat: seat.map(str::to_owned),
+            }))
+        };
+        assert!(wakes_tending(&ended(Some("scribe"))));
+        assert!(!wakes_tending(&ended(None)));
+    }
 }

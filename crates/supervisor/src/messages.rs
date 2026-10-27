@@ -323,6 +323,7 @@ mod tests {
             pane: String::new(),
             fleet: None,
             seat: None,
+            role: None,
             role_digest: None,
         };
         let launched = lock(&state).write(|w| w.launch_session(&row, || Ok("%9".into())));
@@ -603,17 +604,43 @@ mod tests {
     }
 
     #[test]
-    fn stopping_a_session_drops_its_messages() {
+    fn ending_a_session_drops_its_messages() {
         let (root, state, _, mux, id, _) = filled("drop-stop");
         sent_to(&state, &mux, &root, &id);
         let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        assert!(crate::sessions::stop(&state, &t, &id).is_ok());
+        assert!(crate::sessions::end(&state, &t, &root, &id).is_ok());
         assert_eq!(held(&state), []);
         assert!(
-            dropped_after(&state, "SESSION_STOPPED"),
+            dropped_after(&state, "SESSION_ENDED"),
             "{:?}",
             steps(&state)
         );
+    }
+
+    #[test]
+    fn ending_a_seats_session_keeps_the_seats_messages() {
+        let (_root, state, app, mux, id, _) = filled("end-keeps-seat");
+        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
+        assert!(queued(send(&state, &t, &ask(&app, "scribe", "for the seat"))).is_some());
+        assert!(queued(send(&state, &t, &ask(&app, &id, "for the session"))).is_some());
+        assert!(crate::sessions::end(&state, &t, &app, "scribe").is_ok());
+        let left: Vec<String> = held(&state).into_iter().map(|m| m.text).collect();
+        assert_eq!(left, ["for the seat"]);
+    }
+
+    #[test]
+    fn a_seat_wins_over_a_session_of_the_same_name_for_end() {
+        let (_root, state, app, mux, id, _) = filled("end-shadow");
+        let row = state::SessionRow {
+            id: "scribe".into(),
+            ..crate::testing::spawned_row("x", Path::new("/gone"), 1)
+        };
+        crate::testing::put(&state, &SharedMux(mux.clone()), &row);
+        let t = tools(mux, Arc::new(FakeAgents::default()));
+        assert!(matches!(
+            crate::sessions::end(&state, &t, &app, "scribe"),
+            Ok(Reply::Response(Response::End(response::End::Ended { session, seat: Some(_) }))) if session == id
+        ));
     }
 
     #[test]

@@ -163,6 +163,8 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
             })
         })
         .collect(),
+        ResponseKind::Spawned => super::session::spawns(),
+        ResponseKind::Ended => super::session::ends(),
         ResponseKind::Overview => super::overview::overviews()
             .into_iter()
             .map(|overview| Response::Overview {
@@ -548,6 +550,8 @@ fn durings() -> Vec<During> {
             DuringKind::Removing => vec![During::Removing],
             DuringKind::Looking => vec![During::Looking],
             DuringKind::Messaging => vec![During::Messaging],
+            DuringKind::Spawning => vec![During::Spawning],
+            DuringKind::Ending => vec![During::Ending],
         })
         .collect()
 }
