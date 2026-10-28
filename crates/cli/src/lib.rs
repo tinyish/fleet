@@ -18,7 +18,10 @@ use fleet_core::paths::{Os, PathError, state_dir};
 use fleet_core::tools::{Git, Network, NoServiceManager, ServiceManager};
 
 use crate::protocol::{Problem, Request, Status};
-use cmd::{create, doctor, end, message, projects, remove, spawn, start, status, stop, uninstall};
+use cmd::{
+    create, doctor, end, events, message, projects, remove, spawn, start, status, stop, uninstall,
+    wait,
+};
 use ui::{output, words};
 
 // The invocation as clap parses it. Its help text is in words.rs.
@@ -95,6 +98,12 @@ where
             setup(service).and_then(|(_, dir)| spawn::run(&dir, role, directory.as_deref()))
         }
         Request::End { name } => setup(service).and_then(|(_, dir)| end::run(&dir, name)),
+        Request::Events { since } => setup(service).and_then(|(_, dir)| events::run(&dir, *since)),
+        Request::Wait {
+            name,
+            states,
+            timeout,
+        } => setup(service).and_then(|(_, dir)| wait::run(&dir, name, states, timeout.as_deref())),
         Request::Uninstall => {
             setup(service).and_then(|(service, dir)| uninstall::run(&dir, service, ask))
         }
@@ -160,5 +169,35 @@ mod no_debug_tests {
             matches!(&err, Some(e) if e.kind() == clap::error::ErrorKind::InvalidSubcommand),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn events_takes_an_id_to_replay_from() {
+        let args = Args::try_parse_from(["fleet", "events", "--since", "1042"]);
+        assert!(matches!(
+            args.map(|a| a.request),
+            Ok(Request::Events { since: Some(1042) })
+        ));
+        assert!(Args::try_parse_from(["fleet", "events", "--since", "soon"]).is_err());
+    }
+
+    #[test]
+    fn wait_takes_a_name_states_and_a_timeout() {
+        use crate::protocol::WaitState;
+        let args = Args::try_parse_from([
+            "fleet",
+            "wait",
+            "scribe",
+            "idle",
+            "needs-you",
+            "--timeout",
+            "5m",
+        ]);
+        assert!(matches!(
+            args.map(|a| a.request),
+            Ok(Request::Wait { ref name, ref states, timeout: Some(ref t) })
+                if name == "scribe" && states == &[WaitState::Idle, WaitState::NeedsYou] && t == "5m"
+        ));
+        assert!(Args::try_parse_from(["fleet", "wait", "scribe", "asleep"]).is_err());
     }
 }

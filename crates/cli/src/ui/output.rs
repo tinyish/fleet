@@ -46,6 +46,11 @@ impl Ink {
         self.tone(Tone::Accent, text)
     }
 
+    /// What is secondary: an event's id and time.
+    pub(crate) fn muted(self, text: impl Display) -> String {
+        self.tone(Tone::Muted, text)
+    }
+
     /// One path, as something to notice: on a terminal only its last two
     /// directories, so a line stays readable; piped, whole, for a script.
     pub(crate) fn path(self, path: &Path) -> String {
@@ -108,8 +113,7 @@ fn last_two(path: &Path) -> String {
     }
 }
 
-/// What a line is, shown by the symbol it starts with on a terminal. More
-/// marks (info `●`) come with the first line that needs one.
+/// What a line is, shown by the symbol it starts with on a terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mark {
     /// What was done: `◆`, on stdout.
@@ -120,6 +124,8 @@ pub(crate) enum Mark {
     Error,
     /// What to do next, under the line it follows: `>`, on stderr.
     Next,
+    /// What a command is doing while it waits: no symbol, on stderr.
+    Plain,
 }
 
 impl Mark {
@@ -130,18 +136,21 @@ impl Mark {
     /// What starts the line in place of the symbol when it is piped.
     fn piped_prefix(self) -> &'static str {
         match self {
-            Mark::Done => "",
+            Mark::Done | Mark::Plain => "",
             Mark::Warn | Mark::Error => "fleet: ",
             Mark::Next => "hint: ",
         }
     }
 
-    fn symbol(self) -> (&'static str, Tone) {
+    /// The symbol a line starts with on a terminal, and its tone; none for
+    /// a plain line.
+    fn symbol(self) -> Option<(&'static str, Tone)> {
         match self {
-            Mark::Done => (SUCCESS, Tone::Good),
-            Mark::Warn => (WARN, Tone::Warn),
-            Mark::Error => (ERROR, Tone::Bad),
-            Mark::Next => (NEXT, Tone::Accent),
+            Mark::Done => Some((SUCCESS, Tone::Good)),
+            Mark::Warn => Some((WARN, Tone::Warn)),
+            Mark::Error => Some((ERROR, Tone::Bad)),
+            Mark::Next => Some((NEXT, Tone::Accent)),
+            Mark::Plain => None,
         }
     }
 }
@@ -149,10 +158,9 @@ impl Mark {
 /// The line `text` as `mark` shows it on a stream that `terminal` or not:
 /// the coloured symbol on a terminal; piped, `fleet:` before a warning or
 /// error, `hint:` before a hint, nothing before a done line. Lines after the first are
-/// indented under the text on a terminal.
+/// indented under the text on a terminal. A plain line is its text alone.
 fn shown(mark: Mark, text: &str, terminal: bool) -> String {
-    if terminal {
-        let (symbol, tone) = mark.symbol();
+    if terminal && let Some((symbol, tone)) = mark.symbol() {
         let symbol = paint_on(tone, mark.on_stderr()).apply_to(symbol);
         let mut shown = format!("{symbol} ");
         for (i, line) in text.lines().enumerate() {
@@ -199,6 +207,8 @@ pub(crate) fn lines(ending: &Result<Response, Status>) -> Vec<(Mark, String)> {
         .iter()
         .map(|dir| (Mark::Warn, words::remove::forgotten(dir, ERR)));
     let (mut lines, next) = match ending {
+        // Events said everything as it went.
+        Ok(Response::Followed) => return vec![],
         Ok(response) => (
             std::iter::once((Mark::Done, words::response(response, OUT)))
                 .chain(gone)
@@ -217,7 +227,7 @@ pub(crate) fn lines(ending: &Result<Response, Status>) -> Vec<(Mark, String)> {
         }
         Err(status) => {
             let mark = match status {
-                Status::CouldNotTell(_) => Mark::Warn,
+                Status::CouldNotTell(_) | Status::TimedOut { .. } => Mark::Warn,
                 _ => Mark::Error,
             };
             (
@@ -296,8 +306,7 @@ fn doctor_lines(report: &[Found], terminal: bool) -> Vec<String> {
     }
     for next in hints {
         lines.push(if terminal {
-            let (symbol, tone) = Mark::Next.symbol();
-            format!("{} {next}", paint_on(tone, false).apply_to(symbol))
+            format!("{} {next}", paint_on(Tone::Accent, false).apply_to(NEXT))
         } else {
             format!("{}{next}", Mark::Next.piped_prefix())
         });

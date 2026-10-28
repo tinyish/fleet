@@ -11,6 +11,7 @@ use std::time::Duration;
 use clap::Subcommand;
 use fleet_core::protocol;
 
+use fleet_core::agent::{SessionState, StateName};
 use fleet_core::paths::PathError;
 use fleet_core::protocol::ProtocolError;
 use fleet_core::tools::ToolError;
@@ -69,6 +70,24 @@ pub(crate) enum Request {
         #[arg(value_name = "SEAT_OR_SESSION", help = crate::ui::words::END_NAME_HELP)]
         name: String,
     },
+    // `fleet events`: what happens in the fleet here, or every fleet, as it
+    // happens, from now or from a record id.
+    #[command(about = crate::ui::words::EVENTS_ABOUT)]
+    Events {
+        #[arg(long, value_name = "ID", help = crate::ui::words::EVENTS_SINCE_HELP)]
+        since: Option<i64>,
+    },
+    // `fleet wait`: a seat here, a session or a message, until it reaches
+    // one of the states (a message: until it is delivered).
+    #[command(about = crate::ui::words::WAIT_ABOUT)]
+    Wait {
+        #[arg(value_name = "NAME", help = crate::ui::words::WAIT_NAME_HELP)]
+        name: String,
+        #[arg(value_name = "STATE", value_enum, help = crate::ui::words::WAIT_STATES_HELP)]
+        states: Vec<WaitState>,
+        #[arg(long, value_name = "DURATION", help = crate::ui::words::WAIT_TIMEOUT_HELP)]
+        timeout: Option<String>,
+    },
     // `fleet uninstall`.
     #[command(about = crate::ui::words::uninstall::ABOUT)]
     Uninstall,
@@ -78,6 +97,32 @@ pub(crate) enum Request {
         #[arg(long = "project", value_name = "PATH", help = crate::ui::words::remove::PROJECT_HELP)]
         projects: Vec<PathBuf>,
     },
+}
+
+// A state `fleet wait` can wait for, as typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum WaitState {
+    Starting,
+    Working,
+    Idle,
+    #[value(name = "needs-you")]
+    NeedsYou,
+    Gone,
+    Unknown,
+}
+
+impl WaitState {
+    /// The state as the protocol names it.
+    pub(crate) fn name(self) -> StateName {
+        match self {
+            WaitState::Starting => StateName::Starting,
+            WaitState::Working => StateName::Working,
+            WaitState::Idle => StateName::Idle,
+            WaitState::NeedsYou => StateName::NeedsYou,
+            WaitState::Gone => StateName::Gone,
+            WaitState::Unknown => StateName::Unknown,
+        }
+    }
 }
 
 /// What a command did.
@@ -149,6 +194,25 @@ pub(crate) enum Response {
     Spawned(protocol::response::Spawn),
     /// `fleet end` ended a session.
     Ended(protocol::response::End),
+    /// `fleet events` followed until its reader went away; nothing more to
+    /// say.
+    Followed,
+    /// `fleet wait`: a session of what it waited on reads one of the states.
+    Reached {
+        /// What it waited on.
+        on: protocol::Waited,
+        /// The session.
+        session: String,
+        /// Its state.
+        state: SessionState,
+    },
+    /// `fleet wait`: the message was typed in.
+    Delivered {
+        /// The message.
+        message: String,
+        /// The session it was typed into.
+        session: String,
+    },
 }
 
 /// How a command found the supervisor.
@@ -181,6 +245,17 @@ pub(crate) enum Status {
     NeedsAnswer,
     /// Something may or may not have happened.
     CouldNotTell(Doubt),
+    /// `fleet wait` ran out of time.
+    TimedOut {
+        /// What it waited on.
+        on: protocol::Waited,
+        /// Its live session, when it had one.
+        session: Option<String>,
+        /// That session's last recorded state, when it had one.
+        state: Option<SessionState>,
+        /// How long it waited.
+        after: Duration,
+    },
     /// `fleet start` turned projects on, but some fleets' configs did not
     /// read, so those fleets stayed off.
     PartlyOn {
@@ -194,13 +269,14 @@ pub(crate) enum Status {
 impl Status {
     /// The exit code a script reads: 1 refused, cannot, or partly on; 3 it
     /// needed a person and there was none (the supervisor not running, or a
-    /// question with no terminal); 4 could not tell. (A command that finishes
-    /// exits 0.)
+    /// question with no terminal); 4 could not tell; 5 a wait ran out of
+    /// time. (A command that finishes exits 0.)
     pub(crate) fn exit_code(&self) -> u8 {
         match self {
             Status::Refused(_) | Status::Cannot(_) | Status::PartlyOn { .. } => 1,
             Status::NotRunning | Status::NeedsAnswer => 3,
             Status::CouldNotTell(_) => 4,
+            Status::TimedOut { .. } => 5,
         }
     }
 }
@@ -225,6 +301,11 @@ pub(crate) enum Problem {
     NoText,
     /// What was piped in to `fleet message` could not be read.
     ReadText(io::Error),
+    /// `fleet wait --timeout` was given something that is not a duration.
+    BadTimeout {
+        /// What was given.
+        given: String,
+    },
     /// A path given on the command line could not be used.
     BadPath {
         /// The path.
@@ -300,6 +381,11 @@ pub(crate) enum Doubt {
         /// The request it was answering.
         to: &'static str,
     },
+    /// The supervisor stopped answering while `fleet events` followed.
+    Following {
+        /// The record id to follow on from.
+        next: i64,
+    },
 }
 
 /// What the CLI was asking the supervisor for when talking failed.
@@ -330,6 +416,10 @@ pub(crate) enum During {
     Spawning,
     /// Asking the supervisor to end a session.
     Ending,
+    /// Asking the supervisor what happened.
+    Following,
+    /// Asking the supervisor whether what is waited for has come.
+    Waiting,
 }
 
 #[cfg(test)]
@@ -340,5 +430,18 @@ mod tests {
     fn a_command_that_needed_a_person_and_had_none_exits_3() {
         assert_eq!(Status::NeedsAnswer.exit_code(), 3);
         assert_eq!(Status::NotRunning.exit_code(), 3);
+    }
+
+    #[test]
+    fn a_wait_that_ran_out_of_time_exits_5() {
+        let timed_out = Status::TimedOut {
+            on: protocol::Waited::Session {
+                session: "s1".into(),
+            },
+            session: Some("s1".into()),
+            state: Some(fleet_core::agent::SessionState::Working),
+            after: Duration::from_mins(5),
+        };
+        assert_eq!(timed_out.exit_code(), 5);
     }
 }

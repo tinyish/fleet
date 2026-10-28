@@ -5,6 +5,7 @@
 
 mod adapter;
 mod doctor;
+mod events;
 mod file;
 mod fleet;
 mod message;
@@ -13,6 +14,7 @@ mod project;
 mod refusals;
 mod samples;
 mod session;
+mod wait;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -46,6 +48,22 @@ pub(crate) fn run() -> ExitCode {
         heading(&format!("{label} · exit {code}"));
         let _ = output::report(&ending);
         let _ = io::stdout().flush();
+    }
+    // What wait and events say as they start, on stderr.
+    heading("fleet wait · fleet events · starting");
+    for start in wait::starts().into_iter().chain(events::starts()) {
+        output::line(output::Mark::Plain, &start);
+    }
+    // Every step, as `fleet events` prints it, here and across every fleet.
+    for every in [false, true] {
+        heading(&format!("fleet events · every fleet: {every}"));
+        for event in events::events() {
+            let _ = writeln!(
+                io::stdout(),
+                "{}",
+                words::event_line(&event, every, output::OUT)
+            );
+        }
     }
     ExitCode::SUCCESS
 }

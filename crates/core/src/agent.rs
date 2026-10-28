@@ -67,6 +67,39 @@ pub enum SessionState {
     Unknown,
 }
 
+impl SessionState {
+    /// The state's name, without its reason: what a wait asks for.
+    #[must_use]
+    pub fn name(self) -> StateName {
+        match self {
+            SessionState::Starting => StateName::Starting,
+            SessionState::Working => StateName::Working,
+            SessionState::Idle => StateName::Idle,
+            SessionState::NeedsYou { .. } => StateName::NeedsYou,
+            SessionState::Gone => StateName::Gone,
+            SessionState::Unknown => StateName::Unknown,
+        }
+    }
+}
+
+/// A session's state without its reason: what a wait asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateName {
+    /// Launched, not ready yet.
+    Starting,
+    /// In a turn.
+    Working,
+    /// Waiting for a message.
+    Idle,
+    /// Blocked on what only a person can answer.
+    NeedsYou,
+    /// Its pane has ended.
+    Gone,
+    /// tinyfleet could not tell.
+    Unknown,
+}
+
 /// How long a live session may read as starting before it is unknown.
 pub const STARTING_GRACE_MILLIS: i64 = 30_000;
 
@@ -187,6 +220,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&SessionState::Gone).ok().as_deref(),
             Some(r#""gone""#)
+        );
+    }
+
+    #[test]
+    fn a_state_is_named_without_its_reason() {
+        assert_eq!(
+            SessionState::NeedsYou {
+                reason: Some(Reason::Question)
+            }
+            .name(),
+            StateName::NeedsYou
+        );
+        assert_eq!(SessionState::Gone.name(), StateName::Gone);
+        assert_eq!(
+            serde_json::to_string(&StateName::NeedsYou).ok().as_deref(),
+            Some(r#""needs_you""#)
         );
     }
 }

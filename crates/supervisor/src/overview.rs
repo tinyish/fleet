@@ -464,6 +464,12 @@ mod tests {
         let tending = Tending::new();
         tending::tick(&state, &t, &store(&root), &tending, 1_000);
         let _ = loose_session(&state, &t);
+        // The tick reads every session; only status's own reads count here.
+        agents
+            .reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         let _ = answer(&state, &t, &tending, &root.join("code/app"));
         let asked: Vec<usize> = agents
             .reads

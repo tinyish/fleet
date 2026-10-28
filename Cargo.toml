@@ -28,6 +28,7 @@ console = { version = "0.16", default-features = false }
 cliclack = "0.5"
 strum = { version = "0.28", features = ["derive"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+jiff = "0.2"
 supervisor = { path = "crates/supervisor" }
 
 [workspace.lints.rust]

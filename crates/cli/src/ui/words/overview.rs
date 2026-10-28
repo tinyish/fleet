@@ -160,7 +160,7 @@ fn pad(text: &str, width: usize) -> String {
 }
 
 /// A session's state in a word or two.
-fn state_word(state: SessionState) -> String {
+pub(super) fn state_word(state: SessionState) -> String {
     match state {
         SessionState::Starting => "starting".into(),
         SessionState::Working => "working".into(),

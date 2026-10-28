@@ -10,6 +10,8 @@ pub mod fleets;
 pub mod messages;
 pub mod paths;
 pub mod protocol;
+pub mod record;
 pub mod seats;
 pub mod status;
 pub mod tools;
+pub mod waiting;

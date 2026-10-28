@@ -201,6 +201,44 @@ pub(crate) fn end(socket: &Path, end: request::End) -> Result<response::End, Sta
     )
 }
 
+/// One poll of `fleet events`, waiting for as long as the supervisor may
+/// hold it and 10 s more.
+pub(crate) fn events(socket: &Path, follow: request::Events) -> Result<response::Events, Status> {
+    let request::Events::Follow { hold_millis, .. } = &follow;
+    let within = Duration::from_millis(*hold_millis) + Duration::from_secs(10);
+    ask_for(
+        socket,
+        &Request::Events(follow),
+        within,
+        During::Following,
+        "events",
+        |r| match r {
+            Response::Events(steps) => Some(steps),
+            _ => None,
+        },
+    )
+}
+
+/// One poll of `fleet wait`, held by the supervisor at most `hold`; it waits
+/// for the answer 10 s more.
+pub(crate) fn wait(
+    socket: &Path,
+    ask: request::Wait,
+    hold: Duration,
+) -> Result<response::Wait, Status> {
+    ask_for(
+        socket,
+        &Request::Wait(ask),
+        hold + Duration::from_secs(10),
+        During::Waiting,
+        "wait",
+        |r| match r {
+            Response::Wait(waited) => Some(waited),
+            _ => None,
+        },
+    )
+}
+
 /// `fleet remove`'s request.
 pub(crate) fn remove(socket: &Path, remove: request::Remove) -> Result<response::Remove, Status> {
     ask_for(

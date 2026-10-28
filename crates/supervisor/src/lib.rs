@@ -12,6 +12,7 @@ mod sessions;
 mod tending;
 #[cfg(test)]
 mod testing;
+mod watch;
 mod words;
 
 use fleet_core::protocol;
@@ -248,6 +249,12 @@ fn answer(
                 sender,
             },
         )?,
+        Ok(Request::Events(request::Events::Follow {
+            directory,
+            from,
+            hold_millis,
+        })) => watch::events(state, &directory, from, watch::hold(hold_millis))?,
+        Ok(Request::Wait(ask)) => watch::wait(state, &ask)?,
         // The parser's own detail; any other failure means no reply could
         // reach the other side, so it is only logged.
         Err(ProtocolError::Malformed(error)) => Reply::Status(Status::Malformed { error }),

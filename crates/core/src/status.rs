@@ -7,9 +7,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AdapterFault, Verb};
 
+mod wait;
+pub use wait::Wait;
+#[cfg(feature = "specimen")]
+pub use wait::WaitKind;
+
 /// Why the supervisor says no, grouped by what it is about: where a fleet
 /// can go, one project's on or off, a path or a config file, agents'
-/// sessions, or naming and fetching adapters. Facts only: the CLI words them
+/// sessions, naming and fetching adapters, messages, or waits. Facts only: the CLI words them
 /// (core.md invariant 9), one words file and one specimen file per area.
 /// The CLI and the protocol write it as `protocol::Status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +37,8 @@ pub enum Status {
     Adapter(Adapter),
     /// Messages: who one is for, and its text.
     Message(Message),
+    /// Waits: what one names, and why its state can never come.
+    Wait(Wait),
     /// The request could not be understood.
     Malformed {
         /// What was wrong with it.

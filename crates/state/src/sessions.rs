@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use fleet_core::agent::SessionState;
 use fleet_core::tools::ToolError;
 use rusqlite::{OptionalExtension, params};
 
@@ -29,11 +30,13 @@ pub struct SessionRow {
     pub role: Option<String>,
     /// The digest of that role, as it was then.
     pub role_digest: Option<String>,
+    /// Its state as last recorded; none before its first reading.
+    pub state: Option<SessionState>,
 }
 
 /// The columns a row is read from, in `row_of`'s order.
 const COLUMNS: &str =
-    "id, adapter, directory, launch_time_millis, pane, fleet, seat, role, role_digest";
+    "id, adapter, directory, launch_time_millis, pane, fleet, seat, role, role_digest, state";
 
 fn row_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
@@ -46,6 +49,10 @@ fn row_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         seat: row.get(6)?,
         role: row.get(7)?,
         role_digest: row.get(8)?,
+        // A state this code no longer reads is not known.
+        state: row
+            .get::<_, Option<String>>(9)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -79,7 +86,7 @@ impl Write<'_> {
     ) -> Result<(), StateError> {
         self.tx.execute(
             &format!(
-                "INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
             ),
             params![
                 row.id,
@@ -90,7 +97,11 @@ impl Write<'_> {
                 row.fleet.as_deref().map(utf8).transpose()?,
                 row.seat,
                 row.role,
-                row.role_digest
+                row.role_digest,
+                row.state
+                    .map(|s| serde_json::to_string(&s))
+                    .transpose()
+                    .map_err(StateError::Step)?
             ],
         )?;
         let pane = launch().map_err(StateError::Tool)?;
@@ -127,6 +138,28 @@ impl Write<'_> {
             end().map_err(StateError::Tool)?;
         }
         Ok(row)
+    }
+
+    /// Keeps `state` as the last state recorded for session `session`; none
+    /// clears it, so the next reading is recorded whatever it is.
+    ///
+    /// # Errors
+    ///
+    /// When SQLite fails or the state cannot be stored.
+    pub fn set_state(
+        &mut self,
+        session: &str,
+        state: Option<SessionState>,
+    ) -> Result<(), StateError> {
+        let json = state
+            .map(|s| serde_json::to_string(&s))
+            .transpose()
+            .map_err(StateError::Step)?;
+        self.tx.execute(
+            "UPDATE sessions SET state = ?1 WHERE id = ?2",
+            params![json, session],
+        )?;
+        Ok(())
     }
 
     /// Whether a fleet is registered in `directory`, as this transaction

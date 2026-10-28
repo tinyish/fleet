@@ -165,6 +165,9 @@ fn responses(kind: ResponseKind) -> Vec<Response> {
         .collect(),
         ResponseKind::Spawned => super::session::spawns(),
         ResponseKind::Ended => super::session::ends(),
+        ResponseKind::Followed => vec![Response::Followed],
+        ResponseKind::Reached => super::wait::reached(),
+        ResponseKind::Delivered => super::wait::delivered(),
         ResponseKind::Overview => super::overview::overviews()
             .into_iter()
             .map(|overview| Response::Overview {
@@ -370,6 +373,7 @@ fn statuses(kind: StatusKind) -> Vec<(String, Status)> {
                 })
             })
             .collect(),
+        StatusKind::TimedOut => super::wait::timed_out(),
     }
 }
 
@@ -392,6 +396,9 @@ fn problems(kind: ProblemKind) -> Vec<Problem> {
         ))],
         ProblemKind::NoCurrentDir => vec![Problem::NoCurrentDir(denied())],
         ProblemKind::NoText => vec![Problem::NoText],
+        ProblemKind::BadTimeout => vec![Problem::BadTimeout {
+            given: "soon".into(),
+        }],
         ProblemKind::ReadText => vec![Problem::ReadText(io::Error::new(
             io::ErrorKind::InvalidData,
             "stream did not contain valid UTF-8",
@@ -536,6 +543,7 @@ fn doubts(kind: DoubtKind) -> Vec<Doubt> {
             out
         }
         DoubtKind::OddReply => vec![Doubt::OddReply { to: "create" }],
+        DoubtKind::Following => vec![Doubt::Following { next: 1044 }],
     }
 }
 
@@ -552,6 +560,8 @@ fn durings() -> Vec<During> {
             DuringKind::Messaging => vec![During::Messaging],
             DuringKind::Spawning => vec![During::Spawning],
             DuringKind::Ending => vec![During::Ending],
+            DuringKind::Following => vec![During::Following],
+            DuringKind::Waiting => vec![During::Waiting],
         })
         .collect()
 }
@@ -650,6 +660,10 @@ mod tests {
     #[test]
     fn every_sample_has_words() {
         for Sample { label, ending } in endings() {
+            // Events says everything as it goes, and ends with no line.
+            if matches!(ending, Ok(Response::Followed)) {
+                continue;
+            }
             let text = match &ending {
                 Ok(r) => crate::ui::words::response(r, crate::ui::output::OUT),
                 Err(s) => crate::ui::words::status(s, crate::ui::output::ERR),

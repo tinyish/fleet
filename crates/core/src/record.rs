@@ -1,16 +1,24 @@
-//! The steps the record holds, and how one is stored as a row: its name in
-//! AIP-126 spelling in `step`, and its fields as a JSON object in `detail`.
+//! The record (core.md § Primitives): the steps tinyfleet records, and how
+//! one is stored as a row: its name in AIP-126 spelling in `step`, and its
+//! fields as a JSON object in `detail`. A subscriber's events are these
+//! steps; the protocol carries them, so they are core's.
 
-use fleet_core::messages::{Dropped, Recipient, Sender};
-use fleet_core::protocol::response::ConfigFate;
-use fleet_core::status::Status;
-use serde::Serialize;
+use crate::agent::SessionState;
+use crate::messages::{Dropped, Recipient, Sender};
+use crate::protocol::response::ConfigFate;
+use crate::status::Status;
+use serde::{Deserialize, Serialize};
 
 /// One step tinyfleet records. Its variant name, in AIP-126 spelling, is the
 /// row's `step`; its fields are the row's `detail`. No variant may have a
 /// field named `step`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "SCREAMING_SNAKE_CASE")]
+#[cfg_attr(
+    feature = "specimen",
+    derive(strum::EnumDiscriminants),
+    strum_discriminants(name(StepKind), derive(strum::EnumIter))
+)]
 pub enum Step {
     /// A supervisor took the lock and began answering.
     SupervisorStarted {
@@ -36,11 +44,15 @@ pub enum Step {
     ProjectOn {
         /// The project.
         project: String,
+        /// Its fleet's directory.
+        fleet: String,
     },
     /// One project was turned off.
     ProjectOff {
         /// The project.
         project: String,
+        /// Its fleet's directory.
+        fleet: String,
     },
     /// Re-reading a fleet's config added a project to it.
     ProjectAdded {
@@ -97,21 +109,21 @@ pub enum Step {
         /// Where its agent works.
         directory: String,
         /// The model it was asked to run.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         /// What the agent was first told.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
         /// The fleet it was launched for: its seat's, or the one whose role
         /// it was spawned from.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         fleet: Option<String>,
         /// The seat it was launched for.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         seat: Option<String>,
         /// The label of the role it was launched from: its seat's, or the
         /// one it was spawned from.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
     },
     /// A session was ended: its tmux session ended and it is forgotten.
@@ -119,10 +131,10 @@ pub enum Step {
         /// tinyfleet's id for it.
         session: String,
         /// The fleet it was launched for.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         fleet: Option<String>,
         /// The seat it was launched for.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         seat: Option<String>,
     },
     /// Re-reading a fleet's config gave it a seat.
@@ -193,6 +205,20 @@ pub enum Step {
         /// Why, as the facts the CLI words.
         why: Status,
     },
+    /// A session's state, as the tending loop read it, differs from the one
+    /// last recorded.
+    SessionStateChanged {
+        /// tinyfleet's id for it.
+        session: String,
+        /// The fleet it was launched for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fleet: Option<String>,
+        /// The seat it was launched for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seat: Option<String>,
+        /// Its state now.
+        state: SessionState,
+    },
     /// A message was queued for a seat or a session.
     MessageQueued {
         /// Its id.
@@ -203,6 +229,9 @@ pub enum Step {
         sender: Sender,
         /// What it says.
         text: String,
+        /// The fleet of who it is for: its seat's, or its session's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fleet: Option<String>,
     },
     /// A held message was typed into a session.
     MessageDelivered {
@@ -210,6 +239,9 @@ pub enum Step {
         message: String,
         /// The session it was typed into.
         session: String,
+        /// That session's fleet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fleet: Option<String>,
     },
     /// A held message could no longer reach anyone, and was dropped.
     MessageDropped {
@@ -217,6 +249,9 @@ pub enum Step {
         message: String,
         /// Why.
         why: Dropped,
+        /// The fleet of who it was for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fleet: Option<String>,
     },
 }
 
@@ -235,12 +270,59 @@ impl Step {
             .unwrap_or_default();
         Ok((name, value.to_string()))
     }
+
+    /// The step from its row: its name and its fields.
+    ///
+    /// # Errors
+    ///
+    /// When `name` is no step this code knows, or `detail` is not a JSON
+    /// object of its fields.
+    pub fn from_row(name: &str, detail: &str) -> Result<Step, serde_json::Error> {
+        let mut value: serde_json::Value = serde_json::from_str(detail)?;
+        if let Some(fields) = value.as_object_mut() {
+            fields.insert("step".into(), serde_json::Value::String(name.to_owned()));
+        }
+        serde_json::from_value(value)
+    }
+
+    /// The fleet this step is about, by its directory; none for the
+    /// supervisor's own steps.
+    #[must_use]
+    pub fn fleet(&self) -> Option<&str> {
+        match self {
+            Step::SupervisorStarted { .. } | Step::EveryFleetOn | Step::EveryFleetOff => None,
+            Step::FleetCreated { directory, .. }
+            | Step::FleetRemoved { directory, .. }
+            | Step::FleetForgotten { directory } => Some(directory),
+            Step::ProjectOn { fleet, .. }
+            | Step::ProjectOff { fleet, .. }
+            | Step::ProjectAdded { fleet, .. }
+            | Step::ProjectRemoved { fleet, .. }
+            | Step::FleetConfigBroken { fleet, .. }
+            | Step::ProjectsTaken { fleet, .. }
+            | Step::SeatAdded { fleet, .. }
+            | Step::SeatRemoved { fleet, .. }
+            | Step::RoleChanged { fleet, .. }
+            | Step::SeatChanged { fleet, .. }
+            | Step::RoleAdded { fleet, .. }
+            | Step::RoleRemoved { fleet, .. }
+            | Step::SessionGone { fleet, .. }
+            | Step::SeatLaunchFailed { fleet, .. } => Some(fleet),
+            Step::SessionLaunched { fleet, .. }
+            | Step::SessionEnded { fleet, .. }
+            | Step::SessionStateChanged { fleet, .. }
+            | Step::MessageQueued { fleet, .. }
+            | Step::MessageDelivered { fleet, .. }
+            | Step::MessageDropped { fleet, .. } => fleet.as_deref(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_core::status;
+    use crate::agent::{Reason, SessionState};
+    use crate::status;
 
     fn all() -> Vec<Step> {
         fleet_steps()
@@ -266,9 +348,11 @@ mod tests {
             },
             Step::ProjectOn {
                 project: "/c/app".into(),
+                fleet: "/c/app".into(),
             },
             Step::ProjectOff {
                 project: "/c/app".into(),
+                fleet: "/c/app".into(),
             },
             Step::ProjectAdded {
                 fleet: "/f".into(),
@@ -356,6 +440,14 @@ mod tests {
                     path: "/c/app/notes".into(),
                 }),
             },
+            Step::SessionStateChanged {
+                session: "s1".into(),
+                fleet: Some("/c/app".into()),
+                seat: Some("scribe".into()),
+                state: SessionState::NeedsYou {
+                    reason: Some(Reason::Permission),
+                },
+            },
         ]
     }
 
@@ -364,19 +456,22 @@ mod tests {
         vec![
             Step::MessageQueued {
                 message: "m1".into(),
-                to: fleet_core::messages::Recipient::Session {
+                to: crate::messages::Recipient::Session {
                     session: "s1".into(),
                 },
-                sender: fleet_core::messages::Sender::Script,
+                sender: crate::messages::Sender::Script,
                 text: "hi".into(),
+                fleet: Some("/c/app".into()),
             },
             Step::MessageDelivered {
                 message: "m1".into(),
                 session: "s1".into(),
+                fleet: Some("/c/app".into()),
             },
             Step::MessageDropped {
                 message: "m1".into(),
-                why: fleet_core::messages::Dropped::SessionEnded,
+                why: crate::messages::Dropped::SessionEnded,
+                fleet: None,
             },
         ]
     }
@@ -413,6 +508,7 @@ mod tests {
                 "ROLE_REMOVED",
                 "SESSION_GONE",
                 "SEAT_LAUNCH_FAILED",
+                "SESSION_STATE_CHANGED",
                 "MESSAGE_QUEUED",
                 "MESSAGE_DELIVERED",
                 "MESSAGE_DROPPED"
@@ -440,17 +536,18 @@ mod tests {
     fn a_queued_message_keeps_what_it_said_and_who_sent_it() {
         let queued = Step::MessageQueued {
             message: "m1".into(),
-            to: fleet_core::messages::Recipient::Seat {
+            to: crate::messages::Recipient::Seat {
                 fleet: "/c/app".into(),
                 seat: "scribe".into(),
             },
-            sender: fleet_core::messages::Sender::Person,
+            sender: crate::messages::Sender::Person,
             text: "write the notes".into(),
+            fleet: Some("/c/app".into()),
         };
         assert_eq!(
             queued.to_row().ok().map(|r| r.1),
             Some(
-                r#"{"message":"m1","sender":"person","text":"write the notes","to":{"seat":{"fleet":"/c/app","seat":"scribe"}}}"#
+                r#"{"fleet":"/c/app","message":"m1","sender":"person","text":"write the notes","to":{"seat":{"fleet":"/c/app","seat":"scribe"}}}"#
                     .to_owned()
             )
         );
@@ -475,6 +572,56 @@ mod tests {
                 r#"{"adapter":"/a/claude","directory":"/c/app","fleet":"/c/wing","program":"/a/claude","role":"worker","session":"s1"}"#
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn every_step_reads_back_from_its_row() {
+        for step in all() {
+            let (name, detail) = step.to_row().unwrap_or_default();
+            assert_eq!(
+                Step::from_row(&name, &detail).ok(),
+                Some(step.clone()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_of_no_known_step_does_not_read() {
+        assert!(Step::from_row("NO_SUCH_STEP", "{}").is_err());
+        assert!(Step::from_row("PROJECT_ON", "not json").is_err());
+    }
+
+    #[test]
+    fn a_step_names_the_fleet_it_is_about_and_none_for_the_supervisors_own() {
+        let steps = all();
+        let fleets: Vec<Option<&str>> = steps.iter().map(Step::fleet).collect();
+        // The supervisor's own: SUPERVISOR_STARTED, EVERY_FLEET_ON, EVERY_FLEET_OFF.
+        assert_eq!(&fleets[..3], &[None, None, None]);
+        // Past them, only the sample message dropped for a loose session
+        // names no fleet.
+        assert_eq!(
+            fleets.iter().filter(|f| f.is_none()).count(),
+            4,
+            "{fleets:?}"
+        );
+        assert_eq!(
+            Step::FleetCreated {
+                directory: "/f".into(),
+                projects: vec![],
+                adopted: false
+            }
+            .fleet(),
+            Some("/f")
+        );
+        assert_eq!(
+            Step::ProjectOn {
+                project: "/c/a".into(),
+                fleet: "/f".into()
+            }
+            .fleet(),
+            Some("/f")
         );
     }
 }

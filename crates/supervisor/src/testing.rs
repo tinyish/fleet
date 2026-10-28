@@ -377,6 +377,7 @@ pub(crate) fn spawned_row(id: &str, fleet: &Path, launch_time_millis: i64) -> st
         seat: None,
         role: Some("w".into()),
         role_digest: Some("d".into()),
+        state: None,
     }
 }
 

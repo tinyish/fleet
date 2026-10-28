@@ -4,7 +4,7 @@
 
 use fleet_core::protocol;
 use fleet_core::status::{
-    AdapterKind, FileKind, FleetKind, MessageKind, ProjectKind, SessionKind, StatusKind,
+    AdapterKind, FileKind, FleetKind, MessageKind, ProjectKind, SessionKind, StatusKind, WaitKind,
 };
 use strum::IntoEnumIterator;
 
@@ -17,6 +17,7 @@ pub(super) fn refusals(kind: StatusKind) -> Vec<(String, protocol::Status)> {
         StatusKind::Session => each(SessionKind::iter(), super::session::samples),
         StatusKind::Adapter => each(AdapterKind::iter(), super::adapter::samples),
         StatusKind::Message => each(MessageKind::iter(), super::message::samples),
+        StatusKind::Wait => each(WaitKind::iter(), super::wait::samples),
         StatusKind::Malformed => vec![(
             "Malformed".into(),
             protocol::Status::Malformed {

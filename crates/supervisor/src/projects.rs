@@ -212,7 +212,7 @@ pub(crate) fn set_roster(
     steps.iter().try_for_each(|step| w.record(step))?;
     for seat in &moved.removed {
         let ids = w.drop_for_seat(fleet, seat)?;
-        crate::messages::dropped(w, &ids, Dropped::SeatRemoved)?;
+        crate::messages::dropped(w, &ids, Dropped::SeatRemoved, Some(fleet))?;
     }
     Ok(())
 }
@@ -329,8 +329,15 @@ pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, 
             .collect();
         return Ok(Reply::Status(not_served(&all, &project)));
     }
+    let fleet = reread
+        .ok
+        .iter()
+        .find(|f| f.projects.contains(&project))
+        .map(|f| shown(&f.directory))
+        .unwrap_or_default();
     let on = Step::ProjectOn {
         project: shown(&project),
+        fleet,
     };
     state.write(|w| {
         reread.apply(w)?;
@@ -361,6 +368,7 @@ pub(crate) fn project_off(state: &Mutex<State>, project: &Path) -> Result<Reply,
     };
     let off = Step::ProjectOff {
         project: shown(&project),
+        fleet: shown(&fleet.directory),
     };
     state.write(|w| {
         w.set_active(&project, false)?;

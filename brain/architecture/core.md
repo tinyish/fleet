@@ -30,7 +30,7 @@ Onboarding is built; Delivery's primitives are drawn ahead of their code.
 | Part | Does | Lives |
 | --- | --- | --- |
 | **fleet CLI** | Turns a command into a request to the supervisor and reports the answer. Writes nothing, except starting the supervisor through the service manager. | one command |
-| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps every seat filled, holds each message until its agent is idle, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
+| **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps every seat filled, holds each message until its agent is idle, records each session's state as it reads it, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
 | **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, each fleet's roles and seats as its config last read, agents' sessions, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
 | **tmux server** | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
@@ -115,7 +115,9 @@ of its own, and adapters, tinyfleet's own included, take it by the tag
 > **Directional,** drawn for Delivery. Built: roles and seats, kept filled by
 > the supervisor and shown by `fleet status`; messages, held by the
 > supervisor until their agent is idle; spawn and end, a session made from
-> a role and ended only when told. Nothing else here is built yet.
+> a role and ended only when told; every session's state recorded as it
+> changes, and a caller waiting for a state or following a fleet's events.
+> Nothing else here is built yet.
 
 tinyfleet gives a person the building blocks of their own metaharness, and
 nothing that carries an opinion. Roles, workflows, reactions (such as "CI
@@ -194,10 +196,24 @@ through hooks. The supervisor puts the two together, and when they disagree
 the state is unknown. An adapter whose agent keeps no record of itself may
 read the screen instead.
 
-A caller asks for a state now, waits for one with a timeout, or subscribes
-to a fleet's events: states changing, messages queued and delivered,
-sessions spawned and gone, and what changed in a tracker or forge when the
-supervisor last polled its adapter.
+Every tick, the tending loop reads every
+session once, one adapter run per adapter, and records a step when a
+session's state differs from the one last recorded; a session keeps its
+last recorded state, so a restart records nothing that did not change. A
+caller asks for a state now (status), waits for one with a timeout (wait),
+or follows a fleet's events as they happen (events), the last two from the
+record. A wait on a seat follows the seat: whichever of its sessions is
+live, across revivals. A wait on one session ends once it is gone or
+ended. A wait on a message ends once it is delivered or dropped; given
+states, it then waits for its session to reach one of them after taking
+it, its answer. So that idle again is that answer, a paste clears the
+session's recorded state, and an idle reading is not recorded while the
+paste's hold lasts (invariant 12): only once the agent was seen leaving
+idle, or 30 s have passed. A fleet's
+events are every step about it: its projects and config, sessions
+launched, changing state, gone and ended, and messages queued, delivered
+and dropped; *directional, with their adapters:* what changed in a tracker
+or forge when the supervisor last polled it.
 
 **Workspaces.** A workspace is made on a new branch from a base, the trunk
 unless the caller names another. It lives under the state directory, never in
@@ -318,6 +334,23 @@ the messages held for it and records both; a seat's ended session is then
 revived at once, as the tending loop revives any seat with none. Neither
 starts the supervisor.
 
+**wait / events**: both read the record by long-poll,
+keeping one request and one reply per connection. A poll names the record
+id to read from; the supervisor answers at once with what it finds, or
+holds the request up to 25 s, woken when a step commits, and the CLI asks
+again from where the answer ended. events sends the directory and an id,
+or none to start from the next step, and gets the steps about the fleet
+holding the directory, with the supervisor's own steps, or every step
+outside every fleet. wait's first poll sends the directory, a name (a seat
+of the fleet holding the directory, else a session's id, else a message's)
+and the states wanted (none for a message waited on only until delivered);
+the supervisor resolves the name once, answers at once when it is already
+there, and later polls carry what it resolved to: a message, once
+delivered, as the session it was typed into, from the delivery on. A wait ends reached, refused when the state can never
+come (a session gone or ended, a seat taken out of its config, its fleet
+removed, a message dropped), or timed out when the caller's limit passes.
+Neither starts the supervisor.
+
 **remove**: the CLI asks the supervisor to remove the fleet whose directory
 is the current one, or, with `--project`, to take those projects out of a
 wingman fleet. The request says what to do with the fleet's `fleet.toml`:
@@ -353,7 +386,8 @@ even when the state directory cannot be worked out. It exits 1 when anything
 is missing, otherwise 4 when anything could not be told, otherwise 0.
 
 **Every command ends in one outcome:** done, refused (with a reason),
-supervisor not running, or could not tell. A start that turned some projects
+supervisor not running, could not tell, or, for a wait that ran out of time,
+timed out. A start that turned some projects
 on but left a fleet off ends refused, saying both what came on and which
 fleets stayed off and why. How each outcome reaches a script is the CLI
 contract's (see Boundaries).
@@ -487,6 +521,6 @@ release whose binary accepts `fleet specimen`.
 | session | a tmux session on tinyfleet's socket, running one agent; a spawned session ends only when told to end |
 | workspace | a git worktree on its own branch, under the state directory |
 | message | text for a seat or a session, held by the supervisor until its agent is idle, then typed in |
-| event | a recorded step, as a subscriber sees it |
+| event | a recorded step, as wait and events see it |
 | tool interface / driver | the trait in `core` for one kind of outside tool / the code behind it that runs the real tool |
-| outcome | how a command ended: done, refused, supervisor not running, could not tell |
+| outcome | how a command ended: done, refused, supervisor not running, could not tell, timed out |

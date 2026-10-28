@@ -144,6 +144,7 @@ mod tests {
             seat: None,
             role: None,
             role_digest: None,
+            state: None,
         }
     }
 

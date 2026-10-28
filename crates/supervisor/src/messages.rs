@@ -15,6 +15,7 @@ use fleet_core::protocol::{Reply, Response, Status, response};
 use fleet_core::status;
 use state::{MessageRow, SessionRow, State, StateError, Step, Write, now_millis};
 
+use crate::observe::Observed;
 use crate::tending::Tending;
 use crate::{Error, Tools, lock, log, words};
 
@@ -38,8 +39,8 @@ pub(crate) fn send(state: &Mutex<State>, tools: &Tools, ask: &Send) -> Result<Re
         return Ok(Reply::Status(refusal.into()));
     }
     let mut state = lock(state);
-    let to = match recipient(&state, tools, ask)? {
-        Ok(to) => to,
+    let (to, fleet) = match recipient(&state, tools, ask)? {
+        Ok(found) => found,
         Err(status) => return Ok(Reply::Status(status)),
     };
     let row = MessageRow {
@@ -54,6 +55,7 @@ pub(crate) fn send(state: &Mutex<State>, tools: &Tools, ask: &Send) -> Result<Re
         to: to.clone(),
         sender: row.sender.clone(),
         text: row.text.clone(),
+        fleet: fleet.map(|f| f.display().to_string()),
     };
     state.write(|w| {
         w.queue_message(&row)?;
@@ -67,20 +69,27 @@ pub(crate) fn send(state: &Mutex<State>, tools: &Tools, ask: &Send) -> Result<Re
     )))
 }
 
-/// Who `ask.to` is: a seat of the fleet holding `ask.directory` (made
-/// canonical when it can be), else a session with that id whose pane is
-/// alive.
-fn recipient(state: &State, tools: &Tools, ask: &Send) -> Result<Result<Recipient, Status>, Error> {
+/// Who `ask.to` is, and their fleet: a seat of the fleet holding
+/// `ask.directory` (made canonical when it can be), else a session with
+/// that id whose pane is alive.
+fn recipient(
+    state: &State,
+    tools: &Tools,
+    ask: &Send,
+) -> Result<Result<(Recipient, Option<PathBuf>), Status>, Error> {
     let directory = std::fs::canonicalize(&ask.directory).unwrap_or_else(|_| ask.directory.clone());
     let fleets = state.fleets()?;
     let here = fleets::holding(&fleets, &directory).map(|f| f.directory.clone());
     if let Some(fleet) = &here
         && state.roster(fleet)?.seats.iter().any(|s| s.name == ask.to)
     {
-        return Ok(Ok(Recipient::Seat {
-            fleet: fleet.clone(),
-            seat: ask.to.clone(),
-        }));
+        return Ok(Ok((
+            Recipient::Seat {
+                fleet: fleet.clone(),
+                seat: ask.to.clone(),
+            },
+            Some(fleet.clone()),
+        )));
     }
     let Some(row) = state.sessions()?.into_iter().find(|r| r.id == ask.to) else {
         return Ok(Err(status::Message::NoSuchRecipient {
@@ -92,7 +101,7 @@ fn recipient(state: &State, tools: &Tools, ask: &Send) -> Result<Result<Recipien
     Ok(
         match crate::observe::alive(tools, std::slice::from_ref(&row)) {
             Ok(alive) if alive.get(&row.id).copied().unwrap_or(false) => {
-                Ok(Recipient::Session { session: row.id })
+                Ok((Recipient::Session { session: row.id }, row.fleet))
             }
             Ok(_) => Err(status::Message::SessionGone { session: row.id }.into()),
             Err(e) => Err(crate::sessions::tool_status(e)),
@@ -100,17 +109,20 @@ fn recipient(state: &State, tools: &Tools, ask: &Send) -> Result<Result<Recipien
     )
 }
 
-/// Delivers what waits for each idle agent at `now_millis`: one paste per
-/// session, then a hold (core.md invariant 12). Only the sessions with
-/// messages waiting, and those held, are read; nothing is typed when tmux
-/// or the adapter cannot say the agent is idle.
-pub(crate) fn deliver(state: &Mutex<State>, tools: &Tools, tending: &Tending, now_millis: i64) {
-    let read = {
-        let s = lock(state);
-        s.held().and_then(|h| s.sessions().map(|r| (h, r)))
-    };
-    let (held, rows) = match read {
-        Ok(read) => read,
+/// Delivers what waits for each idle agent at `now_millis`, from the
+/// tick's one reading of `rows`: one paste per session, then a hold
+/// (core.md invariant 12). Nothing is typed when tmux or the adapter could
+/// not say the agent is idle.
+pub(crate) fn deliver(
+    state: &Mutex<State>,
+    tools: &Tools,
+    tending: &Tending,
+    rows: &[SessionRow],
+    observed: &Observed,
+    now_millis: i64,
+) {
+    let held = match lock(state).held() {
+        Ok(held) => held,
         Err(e) => return log(&words::tending_failed(&e.into())),
     };
     let mut holds = tending.holds();
@@ -118,13 +130,10 @@ pub(crate) fn deliver(state: &Mutex<State>, tools: &Tools, tending: &Tending, no
     if held.is_empty() && holds.is_empty() {
         return tending.set_holds(holds);
     }
-    let asked: Vec<SessionRow> = rows
-        .into_iter()
+    let asked: Vec<&SessionRow> = rows
+        .iter()
         .filter(|r| holds.contains_key(&r.id) || !waiting_for(&held, r).is_empty())
         .collect();
-    let Ok(observed) = crate::observe::observe(tools, &asked, now_millis) else {
-        return tending.set_holds(holds);
-    };
     for (session, hold) in &mut holds {
         if let Some(seen) = observed.states.get(session) {
             hold.saw(*seen);
@@ -160,10 +169,16 @@ fn waiting_for(held: &[MessageRow], row: &SessionRow) -> Vec<String> {
 fn type_in(state: &Mutex<State>, tools: &Tools, row: &SessionRow, ids: &[String]) -> bool {
     let written = lock(state).write(|w| {
         let delivered = w.deliver(ids, |text| tools.mux.type_in(&row.pane, text))?;
+        // What it reads next is recorded afresh: after a paste, idle again
+        // is the agent's answer.
+        if !delivered.is_empty() {
+            w.set_state(&row.id, None)?;
+        }
         for message in &delivered {
             w.record(&Step::MessageDelivered {
                 message: message.clone(),
                 session: row.id.clone(),
+                fleet: row.fleet.as_ref().map(|f| f.display().to_string()),
             })?;
         }
         Ok(delivered)
@@ -180,12 +195,19 @@ fn type_in(state: &Mutex<State>, tools: &Tools, row: &SessionRow, ids: &[String]
 }
 
 /// Records each of `ids` dropped, for `why`, inside the caller's
-/// transaction: the one whose change dropped them.
-pub(crate) fn dropped(w: &mut Write<'_>, ids: &[String], why: Dropped) -> Result<(), StateError> {
+/// transaction: the one whose change dropped them. `fleet` is the fleet of
+/// who they were for.
+pub(crate) fn dropped(
+    w: &mut Write<'_>,
+    ids: &[String],
+    why: Dropped,
+    fleet: Option<&Path>,
+) -> Result<(), StateError> {
     ids.iter().try_for_each(|message| {
         w.record(&Step::MessageDropped {
             message: message.clone(),
             why,
+            fleet: fleet.map(|f| f.display().to_string()),
         })
     })
 }
@@ -194,13 +216,22 @@ pub(crate) fn dropped(w: &mut Write<'_>, ids: &[String], why: Dropped) -> Result
 /// `fleet`, which is leaving: removed, or forgotten.
 pub(crate) fn fleet_leaves(w: &mut Write<'_>, fleet: &Path) -> Result<(), StateError> {
     let ids = w.drop_for_fleet(fleet)?;
-    dropped(w, &ids, Dropped::FleetRemoved)
+    dropped(w, &ids, Dropped::FleetRemoved, Some(fleet))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, PoisonError};
+
+    /// One delivery, as a tick does it: every session read once, then
+    /// delivered from that reading.
+    fn deliver_now(state: &Mutex<State>, tools: &Tools, tending: &Tending, now: i64) {
+        let rows = lock(state).sessions().unwrap_or_default();
+        if let Ok(observed) = crate::observe::observe(tools, &rows, now) {
+            deliver(state, tools, tending, &rows, &observed, now);
+        }
+    }
 
     use fleet_core::agent::{Activity, Reading};
     use fleet_core::protocol::response;
@@ -325,6 +356,7 @@ mod tests {
             seat: None,
             role: None,
             role_digest: None,
+            state: None,
         };
         let launched = lock(&state).write(|w| w.launch_session(&row, || Ok("%9".into())));
         assert!(launched.is_ok());
@@ -440,7 +472,7 @@ mod tests {
         sent(&state, &mux, &app, "one\n");
         sent(&state, &mux, &app, "two");
         let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver(&state, &t, &Tending::new(), 60_000);
+        deliver_now(&state, &t, &Tending::new(), 60_000);
         assert_eq!(typed(&mux), [(pane, "one\n\ntwo".to_owned())]);
         assert_eq!(held(&state), []);
         let delivered = steps(&state)
@@ -461,13 +493,13 @@ mod tests {
             Activity::Unknown,
         ] {
             let t = tools(mux.clone(), reading(&id, activity));
-            deliver(&state, &t, &Tending::new(), 2_000);
+            deliver_now(&state, &t, &Tending::new(), 2_000);
         }
         let unread = Arc::new(FakeAgents {
             readings: Some(BTreeMap::new()),
             ..FakeAgents::default()
         });
-        deliver(&state, &tools(mux.clone(), unread), &Tending::new(), 2_000);
+        deliver_now(&state, &tools(mux.clone(), unread), &Tending::new(), 2_000);
         assert_eq!(typed(&mux), []);
         assert_eq!(held(&state).len(), 1);
     }
@@ -478,14 +510,14 @@ mod tests {
         let tending = Tending::new();
         let idle = || tools(mux.clone(), reading(&id, Activity::Idle));
         sent(&state, &mux, &app, "first");
-        deliver(&state, &idle(), &tending, 10_000);
+        deliver_now(&state, &idle(), &tending, 10_000);
         sent(&state, &mux, &app, "second");
-        deliver(&state, &idle(), &tending, 12_000);
+        deliver_now(&state, &idle(), &tending, 12_000);
         assert_eq!(typed(&mux).len(), 1, "still idle from before the paste");
         let working = tools(mux.clone(), reading(&id, Activity::Working));
-        deliver(&state, &working, &tending, 14_000);
+        deliver_now(&state, &working, &tending, 14_000);
         assert_eq!(typed(&mux).len(), 1, "working: nothing typed");
-        deliver(&state, &idle(), &tending, 16_000);
+        deliver_now(&state, &idle(), &tending, 16_000);
         assert_eq!(typed(&mux).last().map(|t| t.1.as_str()), Some("second"));
     }
 
@@ -495,16 +527,16 @@ mod tests {
         let tending = Tending::new();
         let idle = || tools(mux.clone(), reading(&id, Activity::Idle));
         sent(&state, &mux, &app, "first");
-        deliver(&state, &idle(), &tending, 10_000);
+        deliver_now(&state, &idle(), &tending, 10_000);
         sent(&state, &mux, &app, "second");
-        deliver(
+        deliver_now(
             &state,
             &idle(),
             &tending,
             10_000 + messages::HOLD_MILLIS - 1,
         );
         assert_eq!(typed(&mux).len(), 1);
-        deliver(&state, &idle(), &tending, 10_000 + messages::HOLD_MILLIS);
+        deliver_now(&state, &idle(), &tending, 10_000 + messages::HOLD_MILLIS);
         assert_eq!(typed(&mux).len(), 2);
     }
 
@@ -514,7 +546,7 @@ mod tests {
         sent(&state, &mux, &app, "hi");
         // A fresh Tending is a restarted supervisor: the same state.
         let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver(&state, &t, &Tending::new(), 5_000);
+        deliver_now(&state, &t, &Tending::new(), 5_000);
         assert_eq!(typed(&mux).len(), 1);
     }
 
@@ -524,7 +556,7 @@ mod tests {
         kill_all(&mux);
         sent(&state, &mux, &app, "hi");
         let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        deliver(&state, &t, &Tending::new(), 2_000);
+        deliver_now(&state, &t, &Tending::new(), 2_000);
         assert_eq!(typed(&mux), [], "no live session: held");
         assert_eq!(held(&state).len(), 1, "not dropped either");
         // The next tick revives the seat, then delivers to the new session.
@@ -557,7 +589,7 @@ mod tests {
         assert!(lock(&state).write(|w| w.set_all_active(false)).is_ok());
         sent(&state, &mux, &app, "hi");
         let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver(&state, &t, &Tending::new(), 2_000);
+        deliver_now(&state, &t, &Tending::new(), 2_000);
         assert_eq!(typed(&mux).len(), 1);
     }
 
@@ -576,7 +608,7 @@ mod tests {
             ..FakeMux::default()
         });
         let tending = Tending::new();
-        deliver(
+        deliver_now(
             &state,
             &tools(failing, reading(&id, Activity::Idle)),
             &tending,
@@ -585,7 +617,7 @@ mod tests {
         assert_eq!(held(&state).len(), 1);
         assert!(!steps(&state).iter().any(|s| s == "MESSAGE_DELIVERED"));
         let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver(&state, &t, &tending, 2_100);
+        deliver_now(&state, &t, &tending, 2_100);
         assert_eq!(typed(&mux).len(), 1, "no hold after a failed paste");
     }
 

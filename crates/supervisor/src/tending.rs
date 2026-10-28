@@ -2,17 +2,22 @@
 //! every seat of a fleet with a project on filled. It ticks every 2 s, and
 //! at once when start, create or a message pokes it; a tick reads what is
 //! wanted from state, asks tmux what is alive, and launches what is
-//! missing, backing a seat off when it keeps failing; then it delivers the
-//! messages waiting for idle agents. It never ends a session.
+//! missing, backing a seat off when it keeps failing; then it reads every
+//! session once, records each state that changed, and delivers the
+//! messages waiting for idle agents from that reading. It never ends a
+//! session.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use fleet_core::agent::SessionState;
 use fleet_core::messages::Hold;
 use fleet_core::protocol::Status;
 use fleet_core::seats::{self, Act, Backoff, Held, SeatKey, Tended, Wanted};
-use state::{State, Step};
+use state::{SessionRow, State, Step};
+
+use crate::observe::Observed;
 
 use crate::adapters::Store;
 use crate::sessions::{self, Ask, ForSeat, Started};
@@ -125,7 +130,56 @@ pub(crate) fn tick(
     let started = Instant::now();
     tend_seats(state, tools, store, tending, now_millis);
     let spent = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    crate::messages::deliver(state, tools, tending, now_millis.saturating_add(spent));
+    let now_millis = now_millis.saturating_add(spent);
+    let rows = match lock(state).sessions() {
+        Ok(rows) => rows,
+        Err(e) => return log(&words::tending_failed(&e.into())),
+    };
+    // tmux unable to list its panes: nothing is known, so nothing is
+    // recorded or typed; tend_seats has said so.
+    let Ok(observed) = crate::observe::observe(tools, &rows, now_millis) else {
+        return;
+    };
+    record_states(state, &rows, &observed, &tending.holds(), now_millis);
+    crate::messages::deliver(state, tools, tending, &rows, &observed, now_millis);
+}
+
+/// Records each session whose state, as `observed`, differs from the one
+/// last recorded on its row: in one write, its row and its step. A session
+/// still idle under the hold of a paste is not recorded yet: its idle is
+/// the answer only once its turn was seen, or the hold has passed.
+fn record_states(
+    state: &Mutex<State>,
+    rows: &[SessionRow],
+    observed: &Observed,
+    holds: &BTreeMap<String, Hold>,
+    now_millis: i64,
+) {
+    let held = |r: &SessionRow| holds.get(&r.id).is_some_and(|h| h.blocks(now_millis));
+    let changed: Vec<(&SessionRow, SessionState)> = rows
+        .iter()
+        .filter_map(|r| observed.states.get(&r.id).map(|s| (r, *s)))
+        .filter(|(r, s)| r.state != Some(*s))
+        .filter(|(r, s)| !(*s == SessionState::Idle && held(r)))
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    let written = lock(state).write(|w| {
+        for (row, now) in &changed {
+            w.set_state(&row.id, Some(*now))?;
+            w.record(&Step::SessionStateChanged {
+                session: row.id.clone(),
+                fleet: row.fleet.as_ref().map(|f| f.display().to_string()),
+                seat: row.seat.clone(),
+                state: *now,
+            })?;
+        }
+        Ok(())
+    });
+    if let Err(e) = written {
+        log(&words::tending_failed(&e.into()));
+    }
 }
 
 /// Every wanted seat at `now_millis` kept, launched or left waiting.
@@ -313,9 +367,11 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, PoisonError};
 
-    use fleet_core::agent::AdapterFault;
+    use fleet_core::agent::{AdapterFault, SessionState};
 
-    use crate::testing::{FakeAgents, FakeMux, FakeNet, Shared, SharedMux, with_seat};
+    use crate::testing::{
+        FakeAgents, FakeMux, FakeNet, Shared, SharedMux, crew, put, spawned_row, with_seat,
+    };
 
     fn tools(mux: Arc<FakeMux>, agents: Arc<FakeAgents>) -> Tools {
         Tools {
@@ -598,5 +654,143 @@ mod tests {
         tending.poke();
         let took = woke.join().unwrap_or(EVERY);
         assert!(took < EVERY, "{took:?}");
+    }
+
+    /// The states recorded, in order, as (session, state).
+    fn recorded(state: &Mutex<State>) -> Vec<(String, SessionState)> {
+        lock(state)
+            .events(1, None, 1 << 20)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| match e.step {
+                Step::SessionStateChanged { session, state, .. } => Some((session, state)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_state_is_recorded_once_when_it_changes() {
+        let (root, state, _) = with_seat("record-once");
+        let mux = Arc::new(FakeMux::default());
+        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
+        let tending = Tending::new();
+        tick(&state, &t, &store(&root), &tending, 1_000);
+        tick(&state, &t, &store(&root), &tending, 2_000);
+        let id = lock(&state).sessions().unwrap_or_default()[0].id.clone();
+        assert_eq!(recorded(&state), vec![(id.clone(), SessionState::Idle)]);
+        kill_all(&mux);
+        tick(&state, &t, &store(&root), &tending, 3_000);
+        // Tending clears the seat's gone session and relaunches it in the
+        // same tick (SESSION_GONE), so no gone state is recorded for it;
+        // the new session's idle is.
+        let after = recorded(&state);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert_ne!(after[1].0, id);
+        assert_eq!(after[1].1, SessionState::Idle);
+    }
+
+    #[test]
+    fn a_restarted_supervisor_records_nothing_that_did_not_change() {
+        let (root, state, _) = with_seat("record-restart");
+        let t = tools(
+            Arc::new(FakeMux::default()),
+            Arc::new(FakeAgents::default()),
+        );
+        tick(&state, &t, &store(&root), &Tending::new(), 1_000);
+        tick(&state, &t, &store(&root), &Tending::new(), 2_000);
+        assert_eq!(recorded(&state).len(), 1);
+    }
+
+    #[test]
+    fn a_spawned_session_going_gone_is_recorded() {
+        let (root, state, wing) = crew("record-spawned", &[("w", "/a/claude")]);
+        let mux = Arc::new(FakeMux::default());
+        put(&state, mux.as_ref(), &spawned_row("s1", &wing, 0));
+        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
+        tick(&state, &t, &store(&root), &Tending::new(), 60_000);
+        kill_all(&mux);
+        tick(&state, &t, &store(&root), &Tending::new(), 62_000);
+        assert_eq!(
+            recorded(&state),
+            vec![
+                ("s1".into(), SessionState::Idle),
+                ("s1".into(), SessionState::Gone)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tmux_that_cannot_list_records_no_state() {
+        let (root, state, _) = with_seat("record-blind");
+        let mux = Arc::new(FakeMux {
+            missing: true,
+            ..FakeMux::default()
+        });
+        let t = tools(mux, Arc::new(FakeAgents::default()));
+        tick(&state, &t, &store(&root), &Tending::new(), 1_000);
+        assert_eq!(recorded(&state), []);
+    }
+
+    #[test]
+    fn each_adapter_is_read_once_a_tick_for_every_live_session() {
+        let (root, state, _) = with_seat("read-once");
+        let agents = Arc::new(FakeAgents::default());
+        let t = tools(Arc::new(FakeMux::default()), agents.clone());
+        tick(&state, &t, &store(&root), &Tending::new(), 1_000);
+        let reads = agents
+            .reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn a_paste_is_not_recorded_idle_until_the_turn_is_seen_or_the_hold_passes() {
+        let (root, state, fleet) = with_seat("record-after-paste");
+        let t = tools(
+            Arc::new(FakeMux::default()),
+            Arc::new(FakeAgents::default()),
+        );
+        let tending = Tending::new();
+        tick(&state, &t, &store(&root), &tending, 1_000);
+        tick(&state, &t, &store(&root), &tending, 2_000);
+        let sent = crate::messages::send(
+            &state,
+            &t,
+            &crate::messages::Send {
+                directory: fleet.directory.clone(),
+                to: "scribe".into(),
+                text: "hi".into(),
+                sender: fleet_core::messages::Sender::Script,
+            },
+        );
+        assert!(sent.is_ok(), "{sent:?}");
+        // This tick types it in; the fake agent reads idle throughout.
+        tick(&state, &t, &store(&root), &tending, 3_000);
+        let after_paste = || {
+            let steps = steps(&state);
+            let at = steps.iter().rposition(|s| s == "MESSAGE_DELIVERED");
+            at.map(|at| steps[at + 1..].to_vec())
+        };
+        assert_eq!(after_paste(), Some(vec![]));
+        tick(&state, &t, &store(&root), &tending, 5_000);
+        assert_eq!(
+            after_paste(),
+            Some(vec![]),
+            "idle under the hold is not the answer"
+        );
+        tick(
+            &state,
+            &t,
+            &store(&root),
+            &tending,
+            3_000 + fleet_core::messages::HOLD_MILLIS + 1,
+        );
+        assert_eq!(
+            after_paste(),
+            Some(vec!["SESSION_STATE_CHANGED".to_owned()])
+        );
     }
 }

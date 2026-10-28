@@ -3,6 +3,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fleet_core::fleets::{Change, Fleet};
@@ -11,12 +12,13 @@ use fleet_core::tools::ToolError;
 use rusqlite::{Connection, params};
 
 mod messages;
+mod records;
 mod sessions;
-mod step;
 
+pub use fleet_core::record::Step;
 pub use messages::MessageRow;
+pub use records::Bell;
 pub use sessions::SessionRow;
-pub use step::Step;
 
 /// The schema version this code reads and writes. Until tinyfleet's first
 /// release every schema change goes into version 1 (see core.md § Boundaries).
@@ -25,6 +27,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// The open state file.
 pub struct State {
     conn: Connection,
+    bell: Arc<Bell>,
 }
 
 /// The state file could not be opened, migrated or written.
@@ -82,8 +85,10 @@ impl State {
                      id                INTEGER PRIMARY KEY,
                      occur_time_millis INTEGER NOT NULL,
                      step              TEXT    NOT NULL,
-                     detail            TEXT    NOT NULL
+                     detail            TEXT    NOT NULL,
+                     fleet             TEXT
                  );
+                 CREATE INDEX records_fleet ON records (fleet, id);
                  CREATE TABLE fleets (
                      directory          TEXT    PRIMARY KEY,
                      create_time_millis INTEGER NOT NULL
@@ -103,6 +108,7 @@ impl State {
                      seat               TEXT,
                      role_digest        TEXT,
                      role               TEXT,
+                     state              TEXT,
                      CHECK (seat IS NULL OR (fleet IS NOT NULL AND role IS NOT NULL)),
                      CHECK (role IS NULL OR fleet IS NOT NULL)
                  );
@@ -140,7 +146,10 @@ impl State {
             )?;
         }
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        Ok(State { conn })
+        Ok(State {
+            conn,
+            bell: Arc::default(),
+        })
     }
 
     /// Every registered fleet, by directory, with its projects sorted.
@@ -200,30 +209,6 @@ impl State {
         }
         Ok(all)
     }
-
-    /// Every step's name, oldest first.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails.
-    pub fn steps(&self) -> Result<Vec<String>, StateError> {
-        let mut query = self.conn.prepare("SELECT step FROM records ORDER BY id")?;
-        let rows = query.query_map([], |row| row.get(0))?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    /// Every step's detail, its fields as a JSON object, oldest first.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails.
-    pub fn step_details(&self) -> Result<Vec<String>, StateError> {
-        let mut query = self
-            .conn
-            .prepare("SELECT detail FROM records ORDER BY id")?;
-        let rows = query.query_map([], |row| row.get(0))?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
 }
 
 impl State {
@@ -245,6 +230,7 @@ impl State {
         };
         let done = change(&mut write)?;
         write.tx.commit()?;
+        self.bell.ring();
         Ok(done)
     }
 }
@@ -278,20 +264,6 @@ impl Write<'_> {
             )?;
         }
         write_config().map_err(StateError::Config)
-    }
-
-    /// Appends one step to the record.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the step cannot be stored.
-    pub fn record(&mut self, step: &Step) -> Result<(), StateError> {
-        let (name, detail) = step.to_row().map_err(StateError::Step)?;
-        self.tx.execute(
-            "INSERT INTO records (occur_time_millis, step, detail) VALUES (?1, ?2, ?3)",
-            params![now_millis(), name, detail],
-        )?;
-        Ok(())
     }
 
     /// Whether seat `seat` of the fleet in `fleet` is still wanted as this
@@ -506,8 +478,12 @@ pub fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_core::agent::SessionState;
+    use fleet_core::messages::{Recipient, Sender};
     use fleet_core::seats::{Role, Seat};
     use fleet_core::tools::ToolError;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     /// A state file in a fresh directory of its own.
     fn fresh(name: &str) -> (State, PathBuf) {
@@ -636,6 +612,7 @@ mod tests {
             seat: None,
             role: None,
             role_digest: None,
+            state: None,
         }
     }
 
@@ -939,5 +916,138 @@ mod tests {
             Some(false)
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sessions_state_is_kept_on_its_row() {
+        let (mut state, dir) = fresh("row-state");
+        assert!(
+            state
+                .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
+                .is_ok()
+        );
+        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(None));
+        let idle = SessionState::Idle;
+        assert!(state.write(|w| w.set_state("s1", Some(idle))).is_ok());
+        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(Some(idle)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn events_are_read_from_an_id_for_one_fleet_with_the_supervisors_own() {
+        let (mut state, dir) = fresh("events");
+        let on = |p: &str, f: &str| Step::ProjectOn {
+            project: p.into(),
+            fleet: f.into(),
+        };
+        let first = state.next_id().unwrap_or_default();
+        assert!(
+            state
+                .write(|w| {
+                    w.record(&Step::EveryFleetOn)?;
+                    w.record(&on("/c/a", "/c/a"))?;
+                    w.record(&on("/c/b", "/c/b"))
+                })
+                .is_ok()
+        );
+        let ids = |fleet: Option<&str>, from: i64| {
+            state
+                .events(from, fleet.map(Path::new), 1 << 20)
+                .ok()
+                .map(|e| e.iter().map(|e| e.id - first).collect::<Vec<_>>())
+        };
+        assert_eq!(ids(None, first), Some(vec![0, 1, 2]));
+        assert_eq!(ids(Some("/c/a"), first), Some(vec![0, 1]));
+        assert_eq!(ids(Some("/c/b"), first + 1), Some(vec![2]));
+        assert_eq!(state.next_id().ok(), Some(first + 3));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_batch_stops_at_its_budget_but_holds_at_least_one_step() {
+        let (mut state, dir) = fresh("budget");
+        let from = state.next_id().unwrap_or_default();
+        let long = |m: &str| Step::MessageQueued {
+            message: m.into(),
+            to: Recipient::Session {
+                session: "s1".into(),
+            },
+            sender: Sender::Script,
+            text: "x".repeat(1000),
+            fleet: None,
+        };
+        assert!(
+            state
+                .write(|w| {
+                    w.record(&long("m1"))?;
+                    w.record(&long("m2"))
+                })
+                .is_ok()
+        );
+        assert_eq!(state.events(from, None, 10).ok().map(|e| e.len()), Some(1));
+        assert_eq!(
+            state.events(from, None, 1 << 20).ok().map(|e| e.len()),
+            Some(2)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn steps_are_found_by_the_session_or_message_they_name() {
+        let (mut state, dir) = fresh("steps-with");
+        assert!(
+            state
+                .write(|w| {
+                    w.record(&Step::MessageDelivered {
+                        message: "m1".into(),
+                        session: "s1".into(),
+                        fleet: None,
+                    })?;
+                    w.record(&Step::SessionEnded {
+                        session: "s2".into(),
+                        fleet: None,
+                        seat: None,
+                    })
+                })
+                .is_ok()
+        );
+        let count = |e: Result<Vec<_>, _>| e.ok().map(|e| e.len());
+        assert_eq!(count(state.steps_with_message("m1")), Some(1));
+        assert_eq!(count(state.steps_with_session("s1")), Some(1));
+        assert_eq!(count(state.steps_with_session("s2")), Some(1));
+        assert_eq!(count(state.steps_with_message("m9")), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_bell_rings_on_a_commit_and_not_on_a_failed_write() {
+        let (mut state, dir) = fresh("bell");
+        let bell = state.bell();
+        let before = bell.rung();
+        assert!(state.write(|w| w.record(&Step::EveryFleetOn)).is_ok());
+        assert_eq!(bell.rung(), before + 1);
+        let failed: Result<(), StateError> = state.write(|w| {
+            w.record(&Step::EveryFleetOff)?;
+            Err(StateError::Newer(9))
+        });
+        assert!(failed.is_err());
+        assert_eq!(bell.rung(), before + 1);
+        let woke = std::thread::scope(|s| {
+            let waiting = Arc::clone(&bell);
+            let waiter = s.spawn(move || waiting.wait_past(before + 1, Duration::from_secs(5)));
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = state.write(|w| w.record(&Step::EveryFleetOn));
+            waiter.join().ok()
+        });
+        assert_eq!(woke, Some(before + 2));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_bell_not_rung_returns_at_its_time() {
+        let bell = Bell::default();
+        let started = std::time::Instant::now();
+        assert_eq!(bell.wait_past(0, Duration::from_millis(50)), 0);
+        assert!(started.elapsed() >= Duration::from_millis(50));
     }
 }

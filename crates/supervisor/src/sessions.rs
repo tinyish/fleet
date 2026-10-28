@@ -103,7 +103,7 @@ pub(crate) fn start_seat(
                     seat: seat.key.seat.clone(),
                 })?;
                 let ids = w.drop_for_session(gone)?;
-                crate::messages::dropped(w, &ids, Dropped::SessionEnded)?;
+                crate::messages::dropped(w, &ids, Dropped::SessionEnded, Some(&seat.key.fleet))?;
             }
         }
         launch_in(w, tools, &p)?;
@@ -269,6 +269,7 @@ fn prepare(
         seat: seat.cloned(),
         role: Some(role.clone()),
         role_digest: Some(digest.clone()),
+        state: None,
     };
     let step = Step::SessionLaunched {
         session: row.id.clone(),
@@ -348,7 +349,7 @@ pub(crate) fn end(
         {
             w.record(&step)?;
             let ids = w.drop_for_session(&row.id)?;
-            crate::messages::dropped(w, &ids, Dropped::SessionEnded)?;
+            crate::messages::dropped(w, &ids, Dropped::SessionEnded, row.fleet.as_deref())?;
         }
         Ok(())
     });

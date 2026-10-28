@@ -14,6 +14,7 @@ use crate::ui::output::Ink;
 mod adapters;
 mod create;
 mod doctor;
+mod events;
 mod file;
 mod fleet;
 mod message;
@@ -22,8 +23,11 @@ mod project;
 pub(crate) mod remove;
 mod session;
 pub(crate) mod uninstall;
+mod wait;
 use create::created;
 pub(crate) use doctor::{HEALTHY, checked, found, found_next, verdict};
+pub(crate) use events::{line as event_line, listening};
+pub(crate) use wait::waiting;
 
 /// What `fleet --help` says tinyfleet is.
 pub(crate) const ABOUT: &str = "tinyfleet runs AI coding agents on your projects";
@@ -91,6 +95,29 @@ pub(crate) const END_ABOUT: &str = "End a seat's session, which comes back fresh
 /// The help for `fleet end`'s name.
 pub(crate) const END_NAME_HELP: &str = "A seat of the fleet here, or a session's id";
 
+/// `fleet events --help`.
+pub(crate) const EVENTS_ABOUT: &str =
+    "Follow what happens in the fleet here, or every fleet, as it happens";
+
+/// The help for events' `--since`.
+pub(crate) const EVENTS_SINCE_HELP: &str = "Replay from this record id, then follow";
+
+/// `fleet wait --help`.
+pub(crate) const WAIT_ABOUT: &str =
+    "Wait for an agent to reach a state, or a message to be delivered";
+
+/// The help for wait's name.
+pub(crate) const WAIT_NAME_HELP: &str =
+    "A seat of the fleet here, a session's id, or a message's id";
+
+/// The help for wait's states.
+pub(crate) const WAIT_STATES_HELP: &str = "The states to wait for; for a message, the states its \
+     agent reaches after taking it, or none to wait only until it is delivered";
+
+/// The help for wait's `--timeout`.
+pub(crate) const WAIT_TIMEOUT_HELP: &str =
+    "How long to wait at most, such as 30s, 5m or 1h30m; no limit when absent";
+
 /// The question asked at a terminal when the supervisor is not running.
 pub(crate) const START_PROMPT: &str = "The fleet supervisor is not running. Start it?";
 
@@ -150,6 +177,9 @@ pub(crate) fn response(response: &Response, ink: Ink) -> String {
         Response::MessageQueued(queued) => message::queued(queued, ink),
         Response::Spawned(spawned) => session::spawned(spawned, ink),
         Response::Ended(ended) => session::ended(ended, ink),
+        Response::Followed => String::new(),
+        Response::Reached { on, session, state } => wait::reached(on, session, *state, ink),
+        Response::Delivered { message, session } => wait::delivered(message, session, ink),
     }
 }
 
@@ -161,6 +191,12 @@ pub(crate) fn status(status: &Status, ink: Ink) -> String {
         Status::NotRunning => "the supervisor is not running".into(),
         Status::NeedsAnswer => uninstall::NEEDS_ANSWER.into(),
         Status::CouldNotTell(doubt) => unsure(doubt),
+        Status::TimedOut {
+            on,
+            session,
+            state,
+            after,
+        } => wait::timed_out(on, session.as_deref(), *state, *after, ink),
         // `output` prints these as a done line and one line per fleet that
         // stayed off; this is the same in one line.
         Status::PartlyOn { response, .. } => response
@@ -293,6 +329,7 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
         Status::Cannot(problem) => cannot_hint(problem, ink),
         Status::NotRunning => Some(format!("run {} to start it", ink.accent("fleet start"))),
         Status::NeedsAnswer => Some(uninstall::add_flag(ink)),
+        Status::TimedOut { .. } => None,
         Status::PartlyOn { .. } => Some(format!(
             "fix each {} named above, then run {}",
             ink.accent("fleet.toml"),
@@ -302,6 +339,10 @@ pub(crate) fn next(status: &Status, ink: Ink) -> Option<String> {
             Doubt::NoAnswer { log, .. } | Doubt::StoppedUnanswered { log, .. } => {
                 Some(format!("check its log: {}", ink.accent(log)))
             }
+            Doubt::Following { next } => Some(format!(
+                "run {} to go on where it stopped",
+                ink.accent(format!("fleet events --since {next}"))
+            )),
             Doubt::StillAnswers { .. } | Doubt::Socket { .. } | Doubt::OddReply { .. } => None,
         },
     }
@@ -316,6 +357,7 @@ fn refused_hint(status: &protocol::Status, ink: Ink) -> Option<String> {
         protocol::Status::Session(refusal) => session::hint(refusal, ink),
         protocol::Status::Adapter(refusal) => adapters::hint(refusal, ink),
         protocol::Status::Message(refusal) => message::hint(refusal, ink),
+        protocol::Status::Wait(refusal) => wait::hint(refusal, ink),
         protocol::Status::Malformed { .. } => None,
     }
 }
@@ -339,6 +381,12 @@ fn cannot_hint(problem: &Problem, ink: Ink) -> Option<String> {
             ))
         )),
         Problem::NoText => Some("give the text after the seat or session, or pipe it in".into()),
+        Problem::BadTimeout { .. } => Some(format!(
+            "write it as {}, {} or {}",
+            ink.accent("30s"),
+            ink.accent("5m"),
+            ink.accent("1h30m")
+        )),
         Problem::ServiceManager { .. }
         | Problem::UnsupportedOs
         | Problem::StateDir(_)
@@ -360,7 +408,7 @@ fn shell_quoted(s: &str) -> String {
 }
 
 /// Why the supervisor said no, in its area's words.
-fn refused(status: &protocol::Status, ink: Ink) -> String {
+pub(super) fn refused(status: &protocol::Status, ink: Ink) -> String {
     match status {
         protocol::Status::Fleet(refusal) => fleet::refused(refusal, ink),
         protocol::Status::Project(refusal) => project::refused(refusal, ink),
@@ -368,6 +416,7 @@ fn refused(status: &protocol::Status, ink: Ink) -> String {
         protocol::Status::Session(refusal) => session::refused(refusal, ink),
         protocol::Status::Adapter(refusal) => adapters::refused(refusal, ink),
         protocol::Status::Message(refusal) => message::refused(refusal, ink),
+        protocol::Status::Wait(refusal) => wait::refused(refusal, ink),
         protocol::Status::Malformed { error } => {
             format!("the supervisor could not understand the request: {error}")
         }
@@ -402,6 +451,7 @@ fn cannot(problem: &Problem, ink: Ink) -> String {
         Problem::NoCurrentDir(error) => format!("cannot read the current directory: {error}"),
         Problem::NoText => "there is no message to send".into(),
         Problem::ReadText(error) => format!("cannot read the message piped in: {error}"),
+        Problem::BadTimeout { given } => format!("{} is not a duration", ink.accent(given)),
         Problem::BadPath { path, error } => format!("{}: {error}", ink.path(path)),
         Problem::NoBinary(error) => format!("cannot find this fleet binary: {error}"),
         Problem::Uninstall { path, error } => uninstall::could_not_remove(path, error, ink),
@@ -479,6 +529,7 @@ fn unsure(doubt: &Doubt) -> String {
             format!("{}: {}", during_words(*during), socket(error))
         }
         Doubt::OddReply { to } => format!("the supervisor gave an unexpected answer to {to}"),
+        Doubt::Following { .. } => "the supervisor stopped answering".into(),
     }
 }
 
@@ -498,6 +549,8 @@ fn during_words(during: During) -> String {
         During::Messaging => "asking the supervisor to queue the message".into(),
         During::Spawning => "asking the supervisor to spawn the session".into(),
         During::Ending => "asking the supervisor to end the session".into(),
+        During::Following => "asking the supervisor what happened".into(),
+        During::Waiting => "asking the supervisor whether it has come".into(),
     }
 }
 

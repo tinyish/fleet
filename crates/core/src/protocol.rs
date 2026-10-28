@@ -5,6 +5,9 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub use crate::status::Status;
+
+mod observe;
+pub use observe::{BATCH_BYTES, Event, MAX_HOLD_MILLIS, Waited};
 use serde::{Deserialize, Serialize};
 
 /// The longest line either side reads, in bytes.
@@ -40,6 +43,10 @@ pub enum Request {
     Spawn(request::Spawn),
     /// For `fleet end`.
     End(request::End),
+    /// For `fleet events`: one poll.
+    Events(request::Events),
+    /// For `fleet wait`: one poll.
+    Wait(request::Wait),
 }
 
 /// The requests of each command. Always written with the module, as in
@@ -47,6 +54,8 @@ pub enum Request {
 pub mod request {
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
+
+    pub use super::observe::request::{Events, Wait};
 
     /// What `fleet create` asks.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +204,10 @@ pub enum Response {
     Spawn(response::Spawn),
     /// What `fleet end` did.
     End(response::End),
+    /// What one poll of `fleet events` found.
+    Events(response::Events),
+    /// What one poll of `fleet wait` came to.
+    Wait(response::Wait),
 }
 
 /// The responses of each command. Always written with the module, as in
@@ -202,6 +215,8 @@ pub enum Response {
 pub mod response {
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
+
+    pub use super::observe::response::{Events, Wait};
 
     /// The supervisor is there.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,7 +542,9 @@ pub fn read_reply(r: &mut impl BufRead) -> Result<Reply, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AdapterFault, Reason, SessionState, Verb};
+    use crate::agent::{AdapterFault, Reason, SessionState, StateName, Verb};
+    use crate::messages::Dropped;
+    use crate::record::Step;
     use crate::status;
     use std::io::Cursor;
 
@@ -572,6 +589,39 @@ mod tests {
                 sender: crate::messages::Sender::Session {
                     session: "s1".into(),
                 },
+            }),
+            Request::Events(request::Events::Follow {
+                directory: PathBuf::from("/c/app"),
+                from: Some(1042),
+                hold_millis: 25_000,
+            }),
+            Request::Events(request::Events::Follow {
+                directory: PathBuf::from("/c/app"),
+                from: None,
+                hold_millis: 0,
+            }),
+            Request::Wait(request::Wait::For {
+                directory: PathBuf::from("/c/app"),
+                name: "scribe".into(),
+                states: vec![StateName::Idle, StateName::NeedsYou],
+                hold_millis: 25_000,
+            }),
+            Request::Wait(request::Wait::On {
+                on: Waited::Seat {
+                    fleet: PathBuf::from("/c/app"),
+                    seat: "scribe".into(),
+                },
+                states: vec![StateName::Gone],
+                from: 7,
+                hold_millis: 3_000,
+            }),
+            Request::Wait(request::Wait::On {
+                on: Waited::Message {
+                    message: "m1".into(),
+                },
+                states: vec![],
+                from: 7,
+                hold_millis: 3_000,
             }),
         ];
         for req in requests {
@@ -666,6 +716,95 @@ mod tests {
             write_reply(&mut buf, &reply).ok();
             assert_eq!(read_reply(&mut Cursor::new(buf)).ok(), Some(reply));
         }
+    }
+
+    #[test]
+    fn every_watching_reply_round_trips() {
+        let mut replies = vec![
+            Reply::Response(Response::Events(response::Events::Steps {
+                fleet: Some(PathBuf::from("/c/app")),
+                events: vec![Event {
+                    id: 1043,
+                    occur_time_millis: 1_761_586_867_000,
+                    step: Step::SessionStateChanged {
+                        session: "s1".into(),
+                        fleet: Some("/c/app".into()),
+                        seat: Some("scribe".into()),
+                        state: SessionState::Working,
+                    },
+                }],
+                next: 1044,
+            })),
+            Reply::Response(Response::Events(response::Events::Steps {
+                fleet: None,
+                events: vec![],
+                next: 9,
+            })),
+            Reply::Response(Response::Wait(response::Wait::Reached {
+                on: Waited::Session {
+                    session: "s1".into(),
+                },
+                session: "s1".into(),
+                state: SessionState::Idle,
+            })),
+            Reply::Response(Response::Wait(response::Wait::Delivered {
+                message: "m1".into(),
+                session: "s1".into(),
+            })),
+            Reply::Response(Response::Wait(response::Wait::Waiting {
+                on: Waited::Message {
+                    message: "m1".into(),
+                },
+                next: 9,
+                session: None,
+                state: None,
+            })),
+        ];
+        let refusals = [
+            status::Wait::NoSuchName {
+                name: "critic".into(),
+                fleet: Some(PathBuf::from("/c/app")),
+            },
+            status::Wait::NoStates {
+                name: "scribe".into(),
+            },
+            status::Wait::Gone {
+                session: "s1".into(),
+            },
+            status::Wait::Ended {
+                session: "s1".into(),
+            },
+            status::Wait::SeatRemoved {
+                fleet: PathBuf::from("/c/app"),
+                seat: "scribe".into(),
+            },
+            status::Wait::FleetRemoved {
+                fleet: PathBuf::from("/c/app"),
+            },
+            status::Wait::Dropped {
+                message: "m1".into(),
+                why: Dropped::SessionEnded,
+            },
+        ];
+        replies.extend(refusals.map(|r| Reply::Status(r.into())));
+        for reply in replies {
+            let mut buf = Vec::new();
+            write_reply(&mut buf, &reply).ok();
+            assert_eq!(read_reply(&mut Cursor::new(buf)).ok(), Some(reply));
+        }
+    }
+
+    #[test]
+    fn an_events_fields_sit_beside_its_id_on_the_wire() {
+        let event = Event {
+            id: 3,
+            occur_time_millis: 5,
+            step: Step::EveryFleetOn,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).ok().as_deref(),
+            Some(r#"{"id":3,"occur_time_millis":5,"step":"EVERY_FLEET_ON"}"#)
+        );
     }
 
     #[test]

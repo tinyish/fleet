@@ -34,8 +34,8 @@ the same way and in one place. What the operating system or a parser says
 
 | Layer | Holds | File |
 | --- | --- | --- |
-| **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`, `Message(response::Message)`, `Spawn(response::Spawn)`, `End(response::End)`, …); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, `request::Spawn::Session { .. }`, …); `Status` is why not, grouped by what it is about: `Fleet` (where a fleet can go: `Fleet(DirectoryNotRepoRoot { path, root })`, …), `Project` (one project on or off), `File` (a path or a config file: `File(Missing { path })`, …), `Session` (agents' sessions: an adapter or tmux failing, and which fleet, role, seat or session a spawn or an end names), `Adapter`, `Message` (who a message is for, and its text), and `Malformed`. On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"file":{"missing":{…}}}}`. | `crates/core/src/protocol.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
-| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`, `MessageQueued(response)`, `Spawned(response)`, `Ended(response)`, …); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)`, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`, `Doctor`, `Spawn`, `End`, …) goes in. Doctor is the one command that does not end this way: its report is a list of findings (`doctor::Found`, each with its check and verdict) that `output::doctor` prints, and its exit code comes from the findings. | `crates/cli/src/protocol.rs` (all of them, `Request` included) |
+| **The supervisor's reply** | `protocol::Reply`: a `Response` or a `Status`. `Response` is what it did, grouped by the command that asked (`Hello(response::Hello)`, `Create(response::Create)`, `Start(response::Start)`, `Stop(response::Stop)`, `Message(response::Message)`, `Spawn(response::Spawn)`, `End(response::End)`, `Wait(response::Wait)`, `Events(response::Events)` carrying recorded steps as `Event`s, …); the CLI's `Request`s are grouped the same way (`request::Create::Fleet { .. }`, `request::Start::All`, `request::Spawn::Session { .. }`, …); `Status` is why not, grouped by what it is about: `Fleet` (where a fleet can go: `Fleet(DirectoryNotRepoRoot { path, root })`, …), `Project` (one project on or off), `File` (a path or a config file: `File(Missing { path })`, …), `Session` (agents' sessions: an adapter or tmux failing, and which fleet, role, seat or session a spawn or an end names), `Adapter`, `Message` (who a message is for, and its text), `Wait` (what a wait names, and why its state can never come), and `Malformed`. On the wire: `{"response":{"create":{"directory":…,"projects":[…],"created":true}}}` or `{"status":{"file":{"missing":{…}}}}`. | `crates/core/src/protocol.rs`; `Status` is defined in `crates/core/src/status.rs`, so the rules return it, and re-exported by the protocol |
+| **How a command ends** | `Result<cli::Response, cli::Status>`. `Response` is what the command did (`Created { response, startup }`, `Started { response, startup }`, `ProjectOn { response, startup }`, `ProjectOff(response)`, `SupervisorStopped`, `SupervisorWasNotRunning`, `MessageQueued(response)`, `Spawned(response)`, `Ended(response)`, `Reached { on, session, state }` and `Delivered { message, session }` for a wait, `Followed` for an events whose reader went away (it prints nothing), …); `Status` is why not, with its exit code: `Refused(protocol::Status)`, `Cannot(Problem)`, `NotRunning`, `CouldNotTell(Doubt)` (`Following { next }` for an events whose supervisor stopped answering, its hint naming `--since`), `TimedOut { .. }` (exit 5) for a wait that ran out of time, and `PartlyOn { response, startup }` for a start that left some fleets off. Each variant holds exactly the reply it can get, never a case that cannot happen. The person's `cli::Request` (`Create`, `Start`, `Stop`, `Doctor`, `Spawn`, `End`, `Wait`, `Events`, …) goes in. Doctor is the one command that does not end this way: its report is a list of findings (`doctor::Found`, each with its check and verdict) that `output::doctor` prints, and its exit code comes from the findings. | `crates/cli/src/protocol.rs` (all of them, `Request` included) |
 | **Words** | Every sentence: `response(&Response, ink)`, `status(&Status, ink)`, `next(&Status, ink)`, the CLI's own lines (the prompt and its answers, the spinner text), the help text clap shows, doctor's report (`found`, `found_next`, `checked`, `verdict`, in its own submodule), and one submodule per area of `protocol::Status` holding that area's refusals and their hints, each matched with no `_` arm | `crates/cli/src/ui/words/mod.rs`, `crates/cli/src/ui/words/doctor.rs`, `crates/cli/src/ui/words/{fleet,project,file,session,adapters,message}.rs` |
 | **Output** | Where a line goes and how it starts: `Mark`, `line`, `lines` (every line an ending prints, with its mark), `report`, `doctor` (doctor's report), and `Ink` for colouring the parts of a sentence | `crates/cli/src/ui/output.rs` |
 | **Theme** | The symbols, the palette (`Tone`, `paint_on`), and the cliclack `Theme` that draws prompts and spinners | `crates/cli/src/ui/theme.rs` |
@@ -52,6 +52,9 @@ only when its stream is a terminal**.
 | Done line (stdout) | `◆ created a fleet in /code/app -- welcome aboard` | `created a fleet in /code/app -- welcome aboard` |
 | Refusal (stderr) | `■ /code/app/src is inside the repository at /code/app` | `fleet: /code/app/src is inside the repository at /code/app` |
 | Could not tell (stderr) | `▲ the supervisor did not answer within 10s` | `fleet: the supervisor did not answer within 10s` |
+| Starting (stderr), once wait or events is waiting: a plain line, no symbol | `14:02:11 waiting for scribe (s1a2b3c4d5) to be idle`, `14:02:11 listening for events in code/app`, the time muted | the same, paths whole |
+| Timed out (stderr) | `▲ s1a2b3c4d5 is still working after 5m` | `fleet: s1a2b3c4d5 is still working after 5m` |
+| Event line (stdout), one per step as `fleet events` follows | `1043 10:41:07 scribe (s1a2b3c4d5) is idle`, the id and time muted, names and paths accented; `Oct 26 18:02:11` for a step not from today | the same, plain, paths whole |
 | Hint (stderr), under the line it follows | `> run fleet create in /code/app` | `hint: run fleet create in /code/app` |
 | Partly done (stdout, then stderr) | `◆ the supervisor was already running; /code/app is on`<br>`■ the fleet in /code/wing stayed off: …`<br>`> fix each fleet.toml named above, then run fleet start` | the same lines, `fleet:` before the `■` line and `hint:` before the last |
 | Paths | the last two directories (`code/app` for `/Users/you/code/app`); one with two levels or fewer as it is; a path a hint asks you to type, whole | whole |
@@ -78,7 +81,7 @@ pointer for what is active, gray once a step is done.
 | --- | --- | --- |
 | `◆` | done | the start of a done line |
 | `■` | refused or failed | the start of an error line; a cancelled prompt |
-| `▲` | warning, or could not tell | the start of a warning line; a prompt's validation error |
+| `▲` | warning, could not tell, or timed out | the start of a warning line; a prompt's validation error |
 | `>` | active, or what to do next | the current prompt; the chosen option; the start of a hint line |
 | `◇` | answered | a prompt once answered |
 | `●` | information | cliclack's info log (no `Mark` uses it yet) |
@@ -140,7 +143,7 @@ Err(status)  => {
 }
 ```
 
-The mark is `◆` for done, `■` for refused or cannot, and `▲` for could not tell.
+The mark is `◆` for done, `■` for refused or cannot, and `▲` for could not tell or timed out.
 An ending is usually one line; `output::lines` gives every line an ending
 prints with its mark, so a start that left some fleets off prints a `◆` line
 for what came on and a `■` line for each fleet that stayed off. Its exit code
@@ -177,7 +180,7 @@ and word it in `words::tool`. A driver never formats a sentence.
 `protocol::response::…` enum (or a new command's enum, plus its `Request` and
 `Response` variants and a `client` helper) for something it did, or a
 variant of its area's enum in `crates/core/src/status.rs` (`Fleet`, `Project`,
-`File`, `Session`, `Adapter`, `Message`; a new area is a new variant of `Status` with an
+`File`, `Session`, `Adapter`, `Message`, `Wait`; a new area is a new variant of `Status` with an
 enum of its own) for a reason it says no. Field names follow the AIPs
 (core.md § Naming). Then:
 - the supervisor returns the variant;
