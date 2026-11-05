@@ -12,22 +12,21 @@ projects, on their own macOS or Linux machine with the subscriptions they
 already pay for, and wants those agents to work while nobody watches without
 losing track of what each one did.
 
-## Capabilities
+## What it does
 
-Each capability is a problem the person has. Its PRD holds the journeys that
-solve it.
-
-| Title | Description | User need | PRD |
-| --- | --- | --- | --- |
-| Onboarding | Put a fleet on a project | Get from nothing to a fleet running, on this machine and this project, ready for agents | [onboarding](onboarding.md) |
-| Delivery | Hand work to agents and see it land | Give a piece of work to an agent or a person, and have it delivered, reviewed and landed on the trunk | [delivery](delivery.md) |
-| Autonomy | Keep agents working unattended | Leave agents working, have stuck or idle ones noticed and moved on, and have routines run on their own | [autonomy](autonomy.md) |
-| Safety | Keep agents from doing damage | Be sure an agent cannot run a dangerous command, whatever it was asked to do | not written yet |
-| Visibility | See what the fleet is doing | Know at a glance what each agent is doing, and trace any item back through what happened to it | not written yet |
-| Customization | Make the fleet work my way | Choose the roles, workflows and values a fleet runs with, and share them between projects | not written yet |
-| Integrations | Bring my own tracker and agent | Keep the work tracker and the agent I already use | not written yet |
-
-A capability's title is its PRD's heading and file name.
+- Puts a fleet on a project in moments, on this machine, ready for agents,
+  and takes it off again without a trace.
+- Hands work to agents or people, and sees it delivered, reviewed and
+  landed on the trunk.
+- Keeps agents working unattended: stuck or idle ones are noticed and
+  moved on, and routines run on their own.
+- Keeps agents from doing damage: a dangerous command is refused, whatever
+  an agent was asked to do.
+- Shows at a glance what each agent is doing, and traces any item back
+  through what happened to it.
+- Lets a person choose the roles, workflows and values a fleet runs with,
+  share them between projects, and keep the tracker and agent they
+  already use.
 
 ## Principles
 

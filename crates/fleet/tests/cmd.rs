@@ -1,6 +1,6 @@
 //! The visible evals: every transcript case under `tests/cmd/`, run against
 //! the built binary through `tests/cmd/bin/fleet`, which makes each case
-//! hermetic (CONTRIBUTING § Evals, `tests/cmd/README.md`).
+//! hermetic (`brain/architecture/testing.md`, `tests/cmd/README.md`).
 
 use std::fs;
 use std::path::{Path, PathBuf};

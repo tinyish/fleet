@@ -2,16 +2,15 @@
 .DS_Store
 target/
 
-# Beads / Dolt files (added by bd init)
+# Beads: the board lives on the Dolt server on alberto-linux. Nothing under
+# .beads/ is committed, its config included, so nothing from beads reaches
+# a remote.
+.beads/
+.beads-credential-key
 .dolt/
 *.db
-.beads-credential-key
-.beads/proxieddb/
 # bd's concurrency gate: flock files beside .beads, never deleted
 *.gate.lock*
-# The board lives on the Dolt server on alberto-linux; these are local dumps of it
-.beads/issues.jsonl
-.beads/interactions.jsonl
 
 # Claude Code: builder worktrees and per-machine settings
 .claude/worktrees/

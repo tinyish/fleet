@@ -1,4 +1,4 @@
-# The release workflow (CONTRIBUTING.md § Releasing, step 5).
+# The release workflow (AGENTS.md § Branches, commits and releases).
 #
 # Runs on every push to main and does nothing unless the commit is a release
 # squash, `release: v<x.y.z>` (GitHub's ` (#N)` suffix is allowed). Then it
@@ -149,4 +149,4 @@ jobs:
           SHA: ${{ needs.check.outputs.sha }}
         run: gh release create "v$VERSION" --target "$SHA" --title "v$VERSION" --notes-file notes.md dist/*
       # Publishing docs/ for this version comes here once its renderer is
-      # chosen (CONTRIBUTING.md § Releasing).
+      # chosen (AGENTS.md § Branches, commits and releases).

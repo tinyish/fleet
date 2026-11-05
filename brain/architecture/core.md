@@ -1,8 +1,14 @@
 # tinyfleet core architecture
 
-The backbone every capability stands on: what runs, where state lives, how
+The backbone every feature stands on: what runs, where state lives, how
 tinyfleet reaches the tools it runs on, and the rules the code keeps.
 Onboarding is built; Delivery's primitives are drawn ahead of their code.
+What tinyfleet must do is in `prd/`; how it's built and written is in
+[conventions.md](conventions.md), and how it's tested in
+[testing.md](testing.md).
+
+It is a mirror of the code, kept in sync the way `AGENTS.md` says; where
+the two disagree, the code wins.
 
 > **Directional marks.** A part not built yet carries a *directional* mark;
 > the commit that makes it real drops the mark.

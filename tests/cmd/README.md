@@ -2,7 +2,8 @@
 
 Each `<verb>/<case>.md` is one eval: a transcript of commands and what a
 script sees, checked by `trycmd` on every `cargo test`
-(`crates/fleet/tests/cmd.rs`). CONTRIBUTING § Evals says what earns a case.
+(`crates/fleet/tests/cmd.rs`). `brain/architecture/testing.md` says what
+earns a case.
 
 A case is a Markdown file with one or more ```` ```console ```` blocks:
 

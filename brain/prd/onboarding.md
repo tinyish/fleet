@@ -3,93 +3,144 @@
 Put a fleet on a project: get from nothing to a fleet running, on this
 machine and this project, ready for agents.
 
-## The problem
+## Problem
 
-A user wants to try tinyfleet and get it running on their machine. The whole
-process should take a couple of minutes at most. They run the install command
-that is in the docs, then run one command that creates a config file to start
-using tinyfleet. Everything else is taken care of, and no step commits
-anything to their projects.
+A person who wants to try tinyfleet wants it running on their machine and
+one of their projects in a couple of minutes, not an afternoon. Tools like
+it usually ask for a pile of setup first: a service to configure, tools
+found missing one at a time as each step fails, and files committed into
+the project before anyone has decided to keep using it.
 
-## Journeys
+The same setup is also run by things with nobody at the keyboard: a
+dotfiles script, a provisioning step, another tool built on tinyfleet. A
+setup that stops to ask a question hangs them, and one whose result can't
+be read leaves them guessing whether it worked.
 
-### First time, at a terminal
+And people change their minds. They take a fleet off a project, or
+tinyfleet off the machine, and expect nothing left behind; or they run
+setup again by habit and expect it not to make a mess of what's there.
 
-- **Trying to:** go from tinyfleet not installed to a fleet running on a
-  project.
-- **Success:** the whole path, install included, takes a couple of minutes at
-  most. Before anything starts, the person knows what is missing on the
-  machine and how to fix it. Anything written in the project is left
-  uncommitted, for the person to commit or not.
-- **Passes through:** install, doctor, create, start.
+## Goals
 
-### A script or installer, with no terminal
+- A person goes from tinyfleet not installed to a fleet running on a
+  project in a couple of minutes at most.
+- Anything a person does at a terminal, a script can do with nobody there,
+  and tell what happened.
+- No onboarding step changes what the person didn't ask it to: nothing
+  committed, nothing overwritten, nothing left behind on the way out.
 
-- **Trying to:** set up a fleet unattended, from a dotfiles script, a
-  provisioning step or another tool built on tinyfleet.
-- **Success:** nothing ever waits for an answer. The script can always tell a
-  fleet that was set up from one that was refused, and both from a result
-  tinyfleet could not confirm.
-- **Passes through:** create, start.
+We believe that saying what's missing on the machine before anything
+starts will get most people to a running fleet on their first try, which
+we'll see in how rarely a first setup is followed by a second within the
+hour.
 
-### Without a trace in the project
+We believe that if a script can always tell a fleet that was set up from
+one that was refused, and both from one tinyfleet couldn't confirm, people
+will build tinyfleet into their own setup scripts, which we'll see in
+setups run with no terminal.
 
-- **Trying to:** use tinyfleet on a repository without anyone else seeing it,
-  for example before the team has agreed to it, or run one fleet across
-  several repositories.
-- **Success:** the repository is unchanged: nothing to commit, ignore or
-  explain. One fleet serves every project it was given.
-- **Passes through:** create.
+## Use cases
 
-### Running it again where a fleet already exists
+### Inés, 34, freelance developer
 
-- **Trying to:** run setup again, by habit, by a script that always runs it,
-  or after an upgrade.
-- **Success:** it never makes a second fleet or one nested inside another,
-  never overwrites what is there, and says what it found. A config file
-  already there that no fleet owns, left by a removed fleet or written by
-  hand, is taken up as it is.
-- **Passes through:** create, start.
+Inés has read about tinyfleet and has ten minutes before a call. She runs
+the install command from the docs, then asks tinyfleet to check her
+machine: it tells her one tool it runs on is missing, and how to get it.
+She installs it, creates a fleet on the project she's working on, and the
+fleet is running before her call starts. The config file it wrote sits
+uncommitted in her project, for her to commit or not. A week later, after
+upgrading her agent, she asks tinyfleet to check the machine again: one
+look tells her everything is still in order, and looking changed nothing.
 
-### Taking a fleet off a project
+### Tomás, 45, keeps his machines in a dotfiles repo
 
-- **Trying to:** stop using tinyfleet on a project, or undo a fleet made by
-  mistake or in the wrong place, including one whose directory has since been
-  moved or deleted.
-- **Success:** the fleet is gone from tinyfleet, and starting the fleets that
-  remain no longer mentions it. Its config file is deleted only when the
-  person says so; with nobody there to ask, it stays. Nothing else in the
-  project changes. Removing a fleet that is not there says so and changes
-  nothing.
-- **Passes through:** remove, start.
+Tomás sets up every new laptop with one script. He adds tinyfleet to it:
+install, then create a fleet on each of his three projects. The script runs
+with nobody watching and never waits for an answer. On the second run,
+after an upgrade, it finds the fleets already there, says so, and changes
+nothing. When one project's setup is refused, the script can tell, and
+prints why.
 
-### Taking tinyfleet off the machine
+### Leah, 29, on a team that hasn't agreed to agents yet
 
-- **Trying to:** stop using tinyfleet altogether, and leave the machine as it
-  was before the install.
-- **Success:** nothing of tinyfleet runs, or comes back after a reboot, and
-  nothing it keeps in its own places is left: what it remembered, its log,
-  and the program itself. The config files in the person's projects stay
-  theirs. Nothing is removed by accident, and a script that says so can
-  uninstall with nobody there.
-- **Passes through:** uninstall.
+Leah wants to try tinyfleet on her team's repositories without anyone else
+seeing it. She creates one fleet that serves two of them, and the
+repositories are unchanged: nothing to commit, ignore or explain. A month
+later the trial is over. She takes the fleet off, keeping its config file,
+then takes tinyfleet off her machine: nothing of it runs or comes back
+after a reboot, and nothing it kept is left.
 
-### Checking the machine after a change
+## Requirements
 
-- **Trying to:** know whether what tinyfleet runs on is still in order after
-  upgrading a tool, an agent or a pack.
-- **Success:** one look says what is fine, what is missing and what tinyfleet
-  could not tell, and looking changes nothing.
-- **Passes through:** doctor.
+### 1. Installing and checking the machine
 
-### Restarting after a change
+1.1 A person shall be able to install tinyfleet with one command from its
+    docs. (P0)
+1.2 From install to a fleet running on a project shall take a couple of
+    minutes at most, for a person whose machine has what tinyfleet runs
+    on. (P0)
+1.3 Before anything starts, a person shall be able to learn what tinyfleet
+    needs that the machine is missing, and how to fix each. (P0)
+1.4 A check of the machine shall say what is fine, what is missing, and
+    what tinyfleet could not tell, in one look. (P0)
+1.5 Checking the machine shall change nothing. (P0)
 
-- **Trying to:** change the fleet's config and have the fleet pick it up, or
-  turn the fleet off for a while.
-- **Success:** each step confirms what happened or says it could not tell.
-- **Passes through:** stop, start.
+### 2. Creating a fleet
 
-## What success looks like
+2.1 A person shall be able to put a fleet on a project with one command
+    that writes its config file and starts it. (P0)
+2.2 No onboarding step shall commit anything to a repository; anything
+    written in a project is left uncommitted. (P0)
+2.3 A person shall be able to create a fleet that leaves the repository
+    unchanged, with nothing to commit, ignore or explain. (P1)
+2.4 One fleet shall be able to serve several projects. (P1)
+2.5 Setup run where a fleet already exists shall never make a second
+    fleet, nor one nested inside another, never overwrite what is there,
+    and say what it found. (P0)
+2.6 A config file that no fleet owns, left by a removed fleet or written by
+    hand, shall be taken up as it is. (P1)
+
+### 3. With no terminal
+
+3.1 No onboarding step shall wait for an answer when there is no terminal.
+    (P0)
+3.2 A script shall be able to tell a step that succeeded from one that was
+    refused, and both from one whose result tinyfleet could not confirm.
+    (P0)
+3.3 Everything a person can do in onboarding at a terminal, a script shall
+    be able to do with nobody there. (P0)
+
+### 4. Stopping and starting
+
+4.1 A person shall be able to turn a fleet off for a while and on again, and
+    have a changed config picked up when it starts. (P0)
+4.2 Each stop and start shall confirm what happened, or say it could not
+    tell. (P0)
+
+### 5. Taking it off
+
+5.1 A person shall be able to take a fleet off a project, including one
+    whose directory has since been moved or deleted. (P0)
+5.2 Once a fleet is removed, starting the fleets that remain shall no
+    longer mention it. (P0)
+5.3 Removing a fleet shall delete its config file only when the person says
+    so; with nobody there to ask, the file stays. Nothing else in the
+    project shall change. (P0)
+5.4 Removing a fleet that isn't there shall say so and change nothing. (P1)
+5.5 A person shall be able to take tinyfleet off the machine, after which
+    nothing of it runs or comes back after a reboot, and nothing it keeps in
+    its own places is left: what it remembered, its log, and the program
+    itself. (P0)
+5.6 Uninstalling shall leave the config files in the person's projects
+    alone. (P0)
+5.7 Uninstalling shall never happen by accident; a script that says so
+    shall be able to uninstall with nobody there. (P0)
+
+## Open questions
+
+None.
+
+## Success criteria
 
 - From install to a running fleet takes a couple of minutes at most.
 - Anything a person does at a terminal, a script can do with nobody there.
@@ -97,7 +148,7 @@ anything to their projects.
 
 ## Non-goals
 
-- Installing the tools tinyfleet runs on. Onboarding checks them and says what
-  is missing; installing them is the person's.
+- Installing the tools tinyfleet runs on. Onboarding checks them and says
+  what is missing; installing them is the person's.
 - Setting up the project's work tracker. Onboarding uses the one the project
   already has and never changes it.
