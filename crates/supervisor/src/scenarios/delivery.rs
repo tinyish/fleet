@@ -1,15 +1,16 @@
 //! What is typed in, and when: messages sent, held and delivered through
 //! the paste hold, and dropped with what ends their session or seat.
 
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use fleet_core::agent::{Activity, SessionState, StateName};
-use fleet_core::messages::{Dropped, HOLD_MILLIS};
-use fleet_core::protocol::{Reply, Request, Response, Waited, request, response};
+use fleet_core::messages::{Dropped, HOLD_MILLIS, MAX_TEXT_BYTES, Recipient, Sender};
+use fleet_core::protocol::{Reply, Request, Response, Status, Waited, request, response};
 use fleet_core::status;
 
-use super::{next_of, reached, refused, rig, rig_on, waiting_on};
+use super::{Fakes, Rig, next_of, reached, refused, rig, rig_with, waiting_on};
 use crate::testing::{FakeMux, held, kill_all, steps, typed};
 
 #[test]
@@ -26,7 +27,7 @@ fn a_message_is_typed_in_at_the_next_idle_tick_and_its_wait_ends_delivered() {
     r.tick(2_000);
     let s = r.seated();
     assert_eq!(typed(&r.mux), [(s.pane.clone(), "one\n\ntwo".to_owned())]);
-    assert_eq!(held(&r.sup.state), []);
+    assert_eq!(held(&r.sup), []);
     for m in [one, two] {
         assert_eq!(
             r.wait(&m, &[]),
@@ -98,11 +99,14 @@ fn an_agent_still_idle_after_a_paste_answers_once_the_hold_has_passed() {
 #[test]
 fn a_hold_starts_when_the_paste_goes_in_not_when_the_tick_began() {
     // The tick's revival takes 300 ms before delivery runs.
-    let r = rig_on(
+    let r = rig_with(
         "sc-late",
-        FakeMux {
-            launch_delay: Duration::from_millis(300),
-            ..FakeMux::default()
+        Fakes {
+            mux: FakeMux {
+                launch_delay: Duration::from_millis(300),
+                ..FakeMux::default()
+            },
+            ..Fakes::default()
         },
     );
     r.tick(1_000);
@@ -135,7 +139,7 @@ fn nothing_is_typed_while_the_agent_reads_anything_but_idle() {
         r.tick(now);
     }
     assert_eq!(typed(&r.mux), []);
-    assert_eq!(held(&r.sup.state).len(), 1);
+    assert_eq!(held(&r.sup).len(), 1);
 }
 
 #[test]
@@ -145,8 +149,8 @@ fn a_paste_that_fails_is_typed_at_the_next_tick_with_no_hold() {
     let _ = r.send("scribe", "hi");
     r.mux.fail_type.store(true, Ordering::Relaxed);
     r.tick(2_000);
-    assert_eq!(held(&r.sup.state).len(), 1);
-    assert!(!steps(&r.sup.state).iter().any(|s| s == "MESSAGE_DELIVERED"));
+    assert_eq!(held(&r.sup).len(), 1);
+    assert!(!steps(&r.sup).iter().any(|s| s == "MESSAGE_DELIVERED"));
     r.mux.fail_type.store(false, Ordering::Relaxed);
     r.tick(2_100);
     assert_eq!(typed(&r.mux).len(), 1);
@@ -175,8 +179,8 @@ fn a_seat_message_stays_held_while_its_seat_backs_off() {
     r.tick(3_000);
     assert!(!r.sup.tending.down().is_empty());
     assert_eq!(typed(&r.mux), []);
-    assert_eq!(held(&r.sup.state).len(), 1, "held, not dropped");
-    assert!(!steps(&r.sup.state).iter().any(|s| s == "MESSAGE_DROPPED"));
+    assert_eq!(held(&r.sup).len(), 1, "held, not dropped");
+    assert!(!steps(&r.sup).iter().any(|s| s == "MESSAGE_DROPPED"));
     assert!(waiting_on(&r.wait(&m, &[])).is_some());
     r.tick(8_000);
     let new = r.seated();
@@ -212,7 +216,7 @@ fn a_gone_seat_sessions_messages_drop_at_its_revival() {
     let m = r.send(&id, "hi");
     kill_all(&r.mux);
     r.tick(3_000);
-    assert_eq!(held(&r.sup.state), []);
+    assert_eq!(held(&r.sup), []);
     assert_eq!(
         typed(&r.mux),
         [],
@@ -236,14 +240,14 @@ fn ending_a_seat_revives_it_fresh_and_keeps_the_seats_messages() {
         let _ = r.send("scribe", "for the seat");
         let _ = r.send(&first, "for the session");
         assert_eq!(
-            r.end("scribe"),
+            r.end(&r.app, "scribe"),
             Reply::Response(Response::End(response::End::Ended {
                 session: first.clone(),
                 seat: Some("scribe".into()),
             })),
             "end {n}"
         );
-        let left: Vec<String> = held(&r.sup.state).into_iter().map(|m| m.text).collect();
+        let left: Vec<String> = held(&r.sup).into_iter().map(|m| m.text).collect();
         assert_eq!(left, ["for the seat"], "end {n}");
         r.tick(now);
         let new = r.seated();
@@ -254,4 +258,95 @@ fn ending_a_seat_revives_it_fresh_and_keeps_the_seats_messages() {
             Some(&(new.pane, "for the seat".to_owned()))
         );
     }
+}
+
+/// What a person sending `text` to `to` from `from` is answered.
+fn sent(r: &Rig, from: &Path, to: &str, text: &str) -> Reply {
+    r.ask(Request::Message(request::Message::Send {
+        directory: from.to_path_buf(),
+        to: to.into(),
+        text: text.into(),
+        sender: Sender::Person,
+    }))
+}
+
+/// Who a send's reply says the message was queued for.
+fn queued(reply: &Reply) -> Option<&Recipient> {
+    match reply {
+        Reply::Response(Response::Message(response::Message::Queued { message, to })) => {
+            assert!(message.starts_with('m') && message.len() == 11, "{message}");
+            Some(to)
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn a_seat_here_is_queued_for_and_recorded() {
+    let r = rig("msg-seat");
+    let src = r.app.join("src");
+    assert!(std::fs::create_dir_all(&src).is_ok());
+    let reply = sent(&r, &src, "scribe", "hi");
+    assert_eq!(
+        queued(&reply),
+        Some(&Recipient::Seat {
+            fleet: r.app.clone(),
+            seat: "scribe".into()
+        })
+    );
+    let held = held(&r.sup);
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].text, "hi");
+    assert_eq!(held[0].sender, Sender::Person);
+    assert_eq!(
+        steps(&r.sup).last().map(String::as_str),
+        Some("MESSAGE_QUEUED")
+    );
+}
+
+#[test]
+fn an_id_reaches_a_session_from_outside_every_fleet() {
+    let r = rig("msg-id");
+    r.tick(1_000);
+    let id = r.seated().id;
+    let reply = sent(&r, &r.root.join("wing"), &id, "hi");
+    assert_eq!(queued(&reply), Some(&Recipient::Session { session: id }));
+}
+
+#[test]
+fn a_tmux_that_cannot_list_refuses_a_session_message() {
+    let r = rig("msg-notmux");
+    r.tick(1_000);
+    let id = r.seated().id;
+    r.mux.missing.store(true, Ordering::Relaxed);
+    let reply = r.send_reply(&id, "hi");
+    assert!(
+        matches!(
+            reply,
+            Reply::Status(Status::Session(
+                status::Session::MultiplexerCouldNotRun { .. }
+            ))
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(held(&r.sup), []);
+}
+
+#[test]
+fn text_that_breaks_the_rules_queues_nothing() {
+    let r = rig("msg-text");
+    assert_eq!(
+        r.send_reply("scribe", " \n"),
+        Reply::Status(status::Message::EmptyText.into())
+    );
+    let long = "a".repeat(MAX_TEXT_BYTES + 1);
+    let reply = r.send_reply("scribe", &long);
+    assert!(
+        matches!(
+            reply,
+            Reply::Status(Status::Message(status::Message::TooLong { .. }))
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(held(&r.sup), []);
 }

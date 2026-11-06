@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use fleet_core::fleets::{self, Fleet, conflicts};
 use fleet_core::messages::Dropped;
@@ -12,7 +11,7 @@ use fleet_core::seats::{self, Roster, RosterChange};
 use fleet_core::status;
 use state::{State, StateError, Step, Write};
 
-use crate::{Error, canonical, lock, repo_root_of};
+use crate::{Error, Supervisor, canonical, repo_root_of};
 
 fn shown(path: &Path) -> String {
     path.display().to_string()
@@ -220,8 +219,8 @@ pub(crate) fn set_roster(
 /// Re-reads every fleet's config and turns every project on. A fleet whose
 /// config does not read, or claims another fleet's project, stays off and is
 /// named in the answer.
-pub(crate) fn all_on(state: &Mutex<State>) -> Result<Reply, Error> {
-    let mut state = lock(state);
+pub(crate) fn all_on(sup: &Supervisor) -> Result<Reply, Error> {
+    let mut state = sup.lock();
     let reread = reread_all(&state)?;
     state.write(|w| {
         reread.apply(w)?;
@@ -258,8 +257,8 @@ pub(crate) fn all_on(state: &Mutex<State>) -> Result<Reply, Error> {
 }
 
 /// Turns every project off.
-pub(crate) fn all_off(state: &Mutex<State>) -> Result<Reply, Error> {
-    let mut state = lock(state);
+pub(crate) fn all_off(sup: &Supervisor) -> Result<Reply, Error> {
+    let mut state = sup.lock();
     state.write(|w| {
         w.set_all_active(false)?;
         w.record(&Step::EveryFleetOff)
@@ -288,12 +287,12 @@ fn not_served(fleets: &[Fleet], path: &Path) -> Status {
 /// just added to one is found. No other project's on or off changes, even
 /// when its fleet's config does not read. A refusal changes nothing: the
 /// re-read is applied only when the project comes on.
-pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, Error> {
+pub(crate) fn project_on(sup: &Supervisor, project: &Path) -> Result<Reply, Error> {
     let project = match fs::canonicalize(project) {
         Ok(p) => p,
         Err(e) => return Ok(Reply::Status(Status::unusable(project, &e))),
     };
-    let mut state = lock(state);
+    let mut state = sup.lock();
     let reread = reread_all(&state)?;
     if let Some((fleet, why)) = reread
         .broken
@@ -355,9 +354,9 @@ pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, 
 
 /// Turns one project off; the rest of its fleet keeps its own on or off. A
 /// project whose repository is gone is still found by the path given.
-pub(crate) fn project_off(state: &Mutex<State>, project: &Path) -> Result<Reply, Error> {
+pub(crate) fn project_off(sup: &Supervisor, project: &Path) -> Result<Reply, Error> {
     let project = canonical(project);
-    let mut state = lock(state);
+    let mut state = sup.lock();
     let registered = state.fleets()?;
     let Some(fleet) = registered
         .iter()
@@ -383,201 +382,4 @@ pub(crate) fn project_off(state: &Mutex<State>, project: &Path) -> Result<Reply,
     Ok(Reply::Response(Response::Stop(response::Stop::ProjectOff(
         response::ProjectOff { project, others },
     ))))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::testing::{steps, tree};
-
-    fn wingman(root: &Path, state: &Mutex<State>, projects: &[&str]) -> Fleet {
-        let fleet = Fleet {
-            directory: root.join("wing"),
-            projects: projects.iter().map(|p| root.join("code").join(p)).collect(),
-        };
-        let _ = fs::create_dir_all(&fleet.directory);
-        assert!(
-            lock(state)
-                .write(|w| w.create_fleet(&fleet, || Ok(())))
-                .is_ok()
-        );
-        fleet
-    }
-
-    fn write_config(root: &Path, projects: &[&str]) {
-        let list: Vec<String> = projects
-            .iter()
-            .map(|p| format!("{:?}", root.join("code").join(p).display().to_string()))
-            .collect();
-        let _ = fs::write(
-            root.join("wing").join("fleet.toml"),
-            format!("projects = [{}]\n", list.join(", ")),
-        );
-    }
-
-    #[test]
-    fn a_refused_start_project_changes_nothing() {
-        let (root, state) = tree("refused", &["app", "web", "blog"]);
-        let before = wingman(&root, &state, &["app"]);
-        write_config(&root, &["app", "web"]);
-        let reply = project_on(&state, &root.join("code").join("blog")).ok();
-        assert!(
-            matches!(
-                reply,
-                Some(Reply::Status(Status::Project(
-                    status::Project::NotServed { .. }
-                )))
-            ),
-            "{reply:?}"
-        );
-        assert_eq!(lock(&state).fleets().ok(), Some(vec![before]));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    fn registered(state: &Mutex<State>, directory: &Path, projects: &[PathBuf]) {
-        let fleet = Fleet {
-            directory: directory.to_path_buf(),
-            projects: projects.to_vec(),
-        };
-        assert!(
-            lock(state)
-                .write(|w| w.create_fleet(&fleet, || Ok(())))
-                .is_ok()
-        );
-    }
-
-    fn all_on_reply(state: &Mutex<State>) -> Option<response::AllOn> {
-        match all_on(state) {
-            Ok(Reply::Response(Response::Start(response::Start::AllOn(all)))) => Some(all),
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn a_fleet_whose_directory_is_gone_is_forgotten_by_start() {
-        let (root, state) = tree("gone", &["app", "api"]);
-        let app = root.join("code").join("app");
-        let _ = fs::write(app.join("fleet.toml"), "");
-        registered(&state, &app, std::slice::from_ref(&app));
-        let wing = wingman(&root, &state, &["api"]);
-        write_config(&root, &["api"]);
-        let _ = fs::remove_dir_all(&wing.directory);
-        let all = all_on_reply(&state);
-        assert_eq!(
-            all.as_ref().map(|a| a.forgotten.clone()),
-            Some(vec![wing.directory.clone()])
-        );
-        assert_eq!(all.map(|a| a.stayed_off.len()), Some(0));
-        let left = lock(&state).fleets().ok();
-        assert_eq!(
-            left.map(|f| f.into_iter().map(|f| f.directory).collect::<Vec<_>>()),
-            Some(vec![app])
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_directory_that_cannot_be_looked_at_is_not_forgotten() {
-        use std::os::unix::fs::PermissionsExt;
-        if std::env::var("USER").is_ok_and(|u| u == "root") {
-            return;
-        }
-        let (root, state) = tree("locked", &["api"]);
-        let locked = root.join("locked");
-        let fleet = locked.join("wing");
-        let _ = fs::create_dir_all(&fleet);
-        registered(&state, &fleet, &[root.join("code").join("api")]);
-        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o000));
-        let all = all_on_reply(&state);
-        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o755));
-        assert_eq!(all.as_ref().map(|a| a.forgotten.len()), Some(0), "{all:?}");
-        assert_eq!(all.map(|a| a.stayed_off.len()), Some(1));
-        assert_eq!(lock(&state).fleets().map(|f| f.len()).ok(), Some(1));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    fn write_config_with(root: &Path, projects: &[&str], extra: &str) {
-        write_config(root, projects);
-        let path = root.join("wing").join("fleet.toml");
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        let _ = fs::write(path, format!("{text}{extra}"));
-    }
-
-    const SEAT: &str = "[roles.w]\nadapter = \"/a/claude\"\n[seats.scribe]\nrole = \"w\"\n";
-
-    fn seats_of(state: &Mutex<State>, fleet: &Path) -> Vec<String> {
-        let roster = lock(state).roster(fleet).unwrap_or_default();
-        roster.seats.into_iter().map(|s| s.name).collect()
-    }
-
-    #[test]
-    fn start_keeps_each_fleets_roster_and_records_what_moved() {
-        let (root, state) = tree("roster-start", &["api"]);
-        let fleet = wingman(&root, &state, &["api"]);
-        write_config_with(&root, &["api"], SEAT);
-        assert!(all_on(&state).is_ok());
-        assert_eq!(seats_of(&state, &fleet.directory), ["scribe"]);
-        assert!(steps(&state).contains(&"SEAT_ADDED".to_owned()));
-        write_config_with(
-            &root,
-            &["api"],
-            "[roles.w]\nadapter = \"/a/other\"\n[seats.critic]\nrole = \"w\"\n",
-        );
-        assert!(all_on(&state).is_ok());
-        assert_eq!(seats_of(&state, &fleet.directory), ["critic"]);
-        let seen = steps(&state);
-        for want in ["SEAT_REMOVED", "ROLE_CHANGED"] {
-            assert!(seen.iter().any(|s| s == want), "{want}: {seen:?}");
-        }
-        assert_eq!(seen.iter().filter(|s| *s == "SEAT_ADDED").count(), 2);
-        write_config_with(
-            &root,
-            &["api"],
-            "[roles.k]\nadapter = \"/a/other\"\n[seats.critic]\nrole = \"k\"\n",
-        );
-        assert!(all_on(&state).is_ok());
-        let seen = steps(&state);
-        for want in ["SEAT_CHANGED", "ROLE_ADDED", "ROLE_REMOVED"] {
-            assert!(seen.iter().any(|s| s == want), "{want}: {seen:?}");
-        }
-        // Read again unchanged, nothing moved.
-        let before = seen.len();
-        assert!(all_on(&state).is_ok());
-        let after = steps(&state);
-        assert!(
-            after[before..]
-                .iter()
-                .all(|s| !s.starts_with("SEAT_") && s != "ROLE_CHANGED"),
-            "{after:?}"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_broken_config_keeps_the_last_roster() {
-        let (root, state) = tree("roster-broken", &["api"]);
-        let fleet = wingman(&root, &state, &["api"]);
-        write_config_with(&root, &["api"], SEAT);
-        assert!(all_on(&state).is_ok());
-        write_config_with(&root, &["api"], "[seats.scribe]\nrole = \"nobody\"\n");
-        let all = all_on_reply(&state);
-        assert_eq!(all.map(|a| a.stayed_off.len()), Some(1));
-        assert_eq!(
-            seats_of(&state, &fleet.directory),
-            ["scribe"],
-            "the snapshot stays as it was"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn start_project_keeps_the_roster_too() {
-        let (root, state) = tree("roster-project", &["api"]);
-        let fleet = wingman(&root, &state, &["api"]);
-        write_config_with(&root, &["api"], SEAT);
-        assert!(project_on(&state, &root.join("code").join("api")).is_ok());
-        assert_eq!(seats_of(&state, &fleet.directory), ["scribe"]);
-        let _ = fs::remove_dir_all(root);
-    }
 }

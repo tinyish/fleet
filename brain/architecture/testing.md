@@ -15,11 +15,16 @@ code can be thrown away, the evals are kept.
   such as a message sent, typed in at a tick and waited on until delivered.
   One supervisor value holds the state, the tools and the tending loop's
   memory; a test asks it protocol requests and runs each tick at a time of
-  its own, with tmux and the agents faked, so the step one module records is
-  the one another judges. They live in the supervisor's `scenarios` module,
-  and a scenario covered there is not tested again module by module. Like
-  unit tests, they test this implementation; Delivery's CLI evals still come
-  once its milestone is built.
+  its own, with tmux, the agents and the network faked, so the step one
+  module records is the one another judges. They live in the supervisor's
+  `scenarios` module, in a file per area; every supervisor test that needs
+  state or tools is one, and a scenario covered there is not tested again
+  module by module. A scenario reaches its situation only as a person
+  could: requests, `fleet.toml` files and directories on disk, the fakes,
+  the clock and a restart, never a write to state; a situation only a write
+  to state could make is not tested. Like unit tests, they test this
+  implementation; Delivery's CLI evals still come once its milestone is
+  built.
 - **Fitness tests:** check `core.md`'s dependency rules and invariant 7
   (only drivers start outside programs), the size budgets and unused
   dependencies (`conventions.md#size-budgets`), and that every crate takes

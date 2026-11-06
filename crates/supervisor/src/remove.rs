@@ -3,32 +3,31 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use fleet_core::config;
 use fleet_core::fleets::{Fleet, RemoveDecision, decide_remove};
 use fleet_core::paths::CONFIG_FILE;
-use fleet_core::protocol::request::ConfigChoice;
+use fleet_core::protocol::request::{self, ConfigChoice};
 use fleet_core::protocol::response::{self, ConfigFate};
 use fleet_core::protocol::{Reply, Response, Status};
 use fleet_core::status;
 use state::{State, StateError, Step};
 
-use crate::{Error, canonical, lock};
+use crate::{Error, Supervisor, canonical};
 
 /// Removes the fleet in `directory`, or takes `projects` out of it, under
 /// the state lock so it never races a create or a start. A path that no
 /// longer exists is taken as given, as `stop --project` does, so a fleet can
 /// be removed after its repositories are gone.
-pub(crate) fn remove(
-    state: &Mutex<State>,
-    directory: &Path,
-    projects: &[PathBuf],
-    config: ConfigChoice,
-) -> Result<Reply, Error> {
-    let directory = canonical(directory);
+pub(crate) fn remove(sup: &Supervisor, ask: request::Remove) -> Result<Reply, Error> {
+    let request::Remove::Fleet {
+        directory,
+        projects,
+        config,
+    } = ask;
+    let directory = canonical(&directory);
     let named: Vec<PathBuf> = projects.iter().map(|p| canonical(p)).collect();
-    let mut state = lock(state);
+    let mut state = sup.lock();
     let registered = state.fleets()?;
     match decide_remove(&registered, &directory, &named) {
         RemoveDecision::NothingHere => Ok(answer(response::Remove::NothingHere { directory })),
@@ -155,286 +154,4 @@ fn cannot_write(path: PathBuf, error: &io::Error) -> Reply {
         path,
         error: error.to_string(),
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    use crate::create::create;
-    use crate::testing::{code, tree};
-
-    fn created(state: &Mutex<State>, directory: &Path, projects: &[PathBuf]) {
-        let reply = create(state, directory, projects).ok();
-        assert!(
-            matches!(reply, Some(Reply::Response(Response::Create(_)))),
-            "{reply:?}"
-        );
-    }
-
-    fn removed(
-        state: &Mutex<State>,
-        directory: &Path,
-        projects: &[PathBuf],
-        delete: bool,
-    ) -> Option<Reply> {
-        let config = if delete {
-            ConfigChoice::Delete
-        } else {
-            ConfigChoice::Keep
-        };
-        remove(state, directory, projects, config).ok()
-    }
-
-    fn fleets(state: &Mutex<State>) -> usize {
-        lock(state).fleets().map_or(usize::MAX, |f| f.len())
-    }
-
-    #[test]
-    fn a_whole_remove_keeps_or_deletes_fleet_toml() {
-        let (root, state) = tree("whole", &["app"]);
-        let app = code(&root, "app");
-        let config = app.join("fleet.toml");
-        created(&state, &app, &[]);
-        let reply = removed(&state, &app, &[], false);
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::Removed {
-                        config: response::ConfigFate::Kept,
-                        ..
-                    }
-                )))
-            ),
-            "{reply:?}"
-        );
-        assert!(config.exists());
-        assert_eq!(fleets(&state), 0);
-        let _ = fs::remove_file(&config);
-        created(&state, &app, &[]);
-        let reply = removed(&state, &app, &[], true);
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::Removed {
-                        config: response::ConfigFate::Deleted,
-                        ..
-                    }
-                )))
-            ),
-            "{reply:?}"
-        );
-        assert!(!config.exists());
-        assert_eq!(fleets(&state), 0);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn removing_twice_is_nothing_here() {
-        let (root, state) = tree("twice", &["app"]);
-        let app = code(&root, "app");
-        created(&state, &app, &[]);
-        let _ = removed(&state, &app, &[], false);
-        let reply = removed(&state, &app, &[], true);
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::NothingHere { .. }
-                )))
-            ),
-            "{reply:?}"
-        );
-        assert!(app.join("fleet.toml").exists());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_take_edits_fleet_toml_and_keeps_the_fleet() {
-        let (root, state) = tree("take", &["api", "blog"]);
-        let wing = root.join("wing");
-        let (api, blog) = (code(&root, "api"), code(&root, "blog"));
-        created(&state, &wing, &[api.clone(), blog.clone()]);
-        let reply = removed(&state, &wing, std::slice::from_ref(&blog), true);
-        assert_eq!(
-            reply,
-            Some(Reply::Response(Response::Remove(
-                response::Remove::ProjectsTaken {
-                    directory: wing.clone(),
-                    taken: vec![blog.clone()],
-                    remaining: vec![api.clone()],
-                }
-            )))
-        );
-        let text = fs::read_to_string(wing.join("fleet.toml")).unwrap_or_default();
-        assert!(!text.contains("blog") && text.contains("api"), "{text}");
-        let left = lock(&state).fleets().ok();
-        assert_eq!(
-            left.map(|f| f.iter().map(|f| f.projects.clone()).collect::<Vec<_>>()),
-            Some(vec![vec![api]])
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn taking_the_last_project_removes_the_fleet() {
-        let (root, state) = tree("last", &["api"]);
-        let wing = root.join("wing");
-        let api = code(&root, "api");
-        created(&state, &wing, std::slice::from_ref(&api));
-        let reply = removed(&state, &wing, &[api], false);
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::Removed {
-                        config: response::ConfigFate::Kept,
-                        ..
-                    }
-                )))
-            ),
-            "{reply:?}"
-        );
-        assert_eq!(fleets(&state), 0);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn inside_a_fleet_is_refused_and_changes_nothing() {
-        let (root, state) = tree("inside", &["app"]);
-        let app = code(&root, "app");
-        let src = app.join("src");
-        let _ = fs::create_dir_all(&src);
-        created(&state, &app, &[]);
-        let reply = removed(&state, &src, &[], true);
-        assert_eq!(
-            reply,
-            Some(Reply::Status(Status::Fleet(
-                status::Fleet::NotFleetDirectory {
-                    directory: src,
-                    fleet: app.clone()
-                }
-            )))
-        );
-        assert_eq!(fleets(&state), 1);
-        assert!(app.join("fleet.toml").exists());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_failed_delete_keeps_the_fleet_registered() {
-        let (root, state) = tree("failed", &["app"]);
-        let app = code(&root, "app");
-        created(&state, &app, &[]);
-        let _ = fs::set_permissions(&app, fs::Permissions::from_mode(0o500));
-        let reply = removed(&state, &app, &[], true);
-        let _ = fs::set_permissions(&app, fs::Permissions::from_mode(0o755));
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Status(Status::File(
-                    status::File::CannotWrite { .. }
-                )))
-            ),
-            "{reply:?}"
-        );
-        assert_eq!(fleets(&state), 1);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_fleet_toml_already_gone_is_missing() {
-        let (root, state) = tree("missing", &["app"]);
-        let app = code(&root, "app");
-        created(&state, &app, &[]);
-        let _ = fs::remove_file(app.join("fleet.toml"));
-        let reply = removed(&state, &app, &[], true);
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::Removed {
-                        config: response::ConfigFate::Missing,
-                        ..
-                    }
-                )))
-            ),
-            "{reply:?}"
-        );
-        assert_eq!(fleets(&state), 0);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn asked_first_a_whole_remove_with_fleet_toml_changes_nothing_and_asks() {
-        let (root, state) = tree("ask", &["app", "api"]);
-        let app = code(&root, "app");
-        created(&state, &app, &[]);
-        let reply = remove(&state, &app, &[], ConfigChoice::Ask).ok();
-        assert_eq!(
-            reply,
-            Some(answer(response::Remove::Ask {
-                directory: app.clone()
-            }))
-        );
-        assert_eq!(fleets(&state), 1);
-        assert!(app.join("fleet.toml").exists());
-        let _ = fs::remove_file(app.join("fleet.toml"));
-        let reply = remove(&state, &app, &[], ConfigChoice::Ask).ok();
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::Removed {
-                        config: response::ConfigFate::Missing,
-                        ..
-                    }
-                )))
-            ),
-            "{reply:?}"
-        );
-        let wing = root.join("wing");
-        created(&state, &wing, &[code(&root, "api"), app.clone()]);
-        let reply = remove(&state, &wing, std::slice::from_ref(&app), ConfigChoice::Ask).ok();
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::ProjectsTaken { .. }
-                )))
-            ),
-            "{reply:?}"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_deleted_repository_written_relative_is_taken_from_file_and_registry() {
-        let (root, state) = tree("relative", &["api", "blog"]);
-        let wing = root.join("wing");
-        created(&state, &wing, &[code(&root, "api"), code(&root, "blog")]);
-        let _ = fs::write(
-            wing.join("fleet.toml"),
-            "projects = [\n  \"../code/api\",\n  \"../code/blog\", # gone soon\n]\n",
-        );
-        let _ = fs::remove_dir_all(code(&root, "blog"));
-        // What the CLI sends for `--project ../code/blog` run in wing/.
-        let asked = wing.join("..").join("code").join("blog");
-        let reply = removed(&state, &wing, &[asked], false);
-        assert!(
-            matches!(
-                &reply,
-                Some(Reply::Response(Response::Remove(
-                    response::Remove::ProjectsTaken { .. }
-                )))
-            ),
-            "{reply:?}"
-        );
-        let text = fs::read_to_string(wing.join("fleet.toml")).unwrap_or_default();
-        assert_eq!(text, "projects = [\n  \"../code/api\",\n]\n");
-        let _ = fs::remove_dir_all(root);
-    }
 }

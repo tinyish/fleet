@@ -10,7 +10,7 @@ use fleet_core::protocol::request::ConfigChoice;
 use fleet_core::protocol::{Reply, Request, Response, Waited, request, response};
 use fleet_core::status;
 
-use super::{CONFIG, Rig, next_of, reached, refused, rig};
+use super::{Rig, next_of, reached, refused, rig, roles_only};
 use crate::testing::{code, held, kill_all};
 
 #[test]
@@ -21,7 +21,7 @@ fn ending_a_session_while_waited_on_refuses_the_wait_and_drops_its_messages() {
     let w = r.wait(&id, &[StateName::Working]);
     let m = r.send(&id, "hi");
     assert_eq!(
-        r.end(&id),
+        r.end(&r.app, &id),
         Reply::Response(Response::End(response::End::Ended {
             session: id.clone(),
             seat: None
@@ -50,7 +50,7 @@ fn ending_a_session_while_waited_on_refuses_the_wait_and_drops_its_messages() {
         r.send_reply(&id, "again"),
         Reply::Status(status::Message::SessionEnded { session: id }.into())
     );
-    assert_eq!(held(&r.sup.state), []);
+    assert_eq!(held(&r.sup), []);
 }
 
 #[test]
@@ -59,8 +59,7 @@ fn a_seat_taken_out_while_waited_on_refuses_the_wait_and_drops_its_messages() {
     r.tick(1_000);
     let m = r.send("scribe", "hi");
     let w = r.wait("scribe", &[StateName::Working]);
-    let roles_only = CONFIG.split("\n\n[seats").next().unwrap_or_default();
-    assert!(std::fs::write(r.app.join("fleet.toml"), roles_only).is_ok());
+    assert!(std::fs::write(r.app.join("fleet.toml"), roles_only()).is_ok());
     let started = r.ask(Request::Start(request::Start::All));
     assert!(
         matches!(started, Reply::Response(Response::Start(_))),
@@ -80,7 +79,7 @@ fn a_seat_taken_out_while_waited_on_refuses_the_wait_and_drops_its_messages() {
             why: Dropped::SeatRemoved
         })
     );
-    assert_eq!(held(&r.sup.state), []);
+    assert_eq!(held(&r.sup), []);
 }
 
 /// A request, or a change and a request, the rig is put through.
@@ -122,8 +121,22 @@ fn a_fleet_removed_or_forgotten_refuses_a_seat_wait_and_drops_its_messages() {
             }),
             "{what}"
         );
-        assert_eq!(held(&r.sup.state), [], "{what}");
+        assert_eq!(held(&r.sup), [], "{what}");
     }
+}
+
+#[test]
+fn a_wait_on_a_seat_or_session_needs_a_state() {
+    let r = rig("sc-no-states");
+    assert_eq!(
+        r.wait("scribe", &[]),
+        Reply::Status(
+            status::Wait::NoStates {
+                name: "scribe".into()
+            }
+            .into()
+        )
+    );
 }
 
 #[test]
@@ -137,7 +150,7 @@ fn a_wait_on_a_seat_answers_at_once_when_already_there_else_says_where_to_ask_fr
     );
     r.agents.read_as(Activity::Working);
     r.tick(2_000);
-    let next = crate::lock(&r.sup.state).next_id().unwrap_or_default();
+    let next = r.sup.lock().next_id().unwrap_or_default();
     let w = r.wait("scribe", &[StateName::Idle]);
     assert_eq!(
         w,
@@ -213,7 +226,9 @@ fn a_spawned_session_gone_is_never_revived_and_refuses_a_wait_and_a_message() {
     kill_all(&r.mux);
     r.tick(62_000);
     r.restarted().tick(63_000);
-    let spawned: Vec<(String, Option<SessionState>)> = crate::lock(&r.sup.state)
+    let spawned: Vec<(String, Option<SessionState>)> = r
+        .sup
+        .lock()
         .sessions()
         .unwrap_or_default()
         .into_iter()
@@ -257,7 +272,7 @@ fn events(r: &Rig, directory: &std::path::Path, from: Option<i64>, hold_millis: 
 fn events_in_a_fleet_are_its_steps_with_the_supervisors_own() {
     let r = rig("sc-events");
     let api = code(&r.root, "api");
-    assert!(matches!(r.create(&api), Reply::Response(_)));
+    assert!(matches!(r.create(&api, &[]), Reply::Response(_)));
     let now = events(&r, &r.app, None, 0);
     assert_eq!(kinds(&now), Vec::<String>::new(), "nothing new: empty");
     let from = match now {

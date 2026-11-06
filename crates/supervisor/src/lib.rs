@@ -223,68 +223,27 @@ impl Supervisor {
     /// The reply to `request`. A reply that may leave work for the tending
     /// loop wakes it.
     fn ask(&self, request: Request) -> Result<Reply, Error> {
-        let (state, tools) = (&self.state, &self.tools);
         let reply = match request {
             Request::Hello => Reply::Response(Response::Hello(response::Hello {
                 version: VERSION.to_owned(),
                 schema_version: Some(state::SCHEMA_VERSION),
             })),
-            Request::Start(request::Start::All) => projects::all_on(state)?,
+            Request::Start(request::Start::All) => projects::all_on(self)?,
             Request::Start(request::Start::Project { project }) => {
-                projects::project_on(state, &project)?
+                projects::project_on(self, &project)?
             }
-            Request::Stop(request::Stop::All) => projects::all_off(state)?,
+            Request::Stop(request::Stop::All) => projects::all_off(self)?,
             Request::Stop(request::Stop::Project { project }) => {
-                projects::project_off(state, &project)?
+                projects::project_off(self, &project)?
             }
-            Request::Create(request::Create::Fleet {
-                directory,
-                projects,
-            }) => create::create(state, &directory, &projects)?,
-            Request::Remove(request::Remove::Fleet {
-                directory,
-                projects,
-                config,
-            }) => remove::remove(state, &directory, &projects, config)?,
-            Request::Spawn(request::Spawn::Session {
-                directory,
-                role,
-                working_directory,
-            }) => sessions::spawn(
-                state,
-                tools,
-                &self.store,
-                &directory,
-                &role,
-                working_directory.as_deref(),
-            )?,
-            Request::Overview { directory } => {
-                overview::overview(state, tools, &self.tending, &directory)?
-            }
-            Request::End(request::End::Session { directory, name }) => {
-                sessions::end(state, tools, &directory, &name)?
-            }
-            Request::Message(request::Message::Send {
-                directory,
-                to,
-                text,
-                sender,
-            }) => messages::send(
-                state,
-                tools,
-                &messages::Send {
-                    directory,
-                    to,
-                    text,
-                    sender,
-                },
-            )?,
-            Request::Events(request::Events::Follow {
-                directory,
-                from,
-                hold_millis,
-            }) => watch::events(state, &directory, from, watch::hold(hold_millis))?,
-            Request::Wait(ask) => watch::wait(state, &ask)?,
+            Request::Create(ask) => create::create(self, ask)?,
+            Request::Remove(ask) => remove::remove(self, ask)?,
+            Request::Spawn(ask) => sessions::spawn(self, ask)?,
+            Request::Overview { directory } => overview::overview(self, &directory)?,
+            Request::End(ask) => sessions::end(self, ask)?,
+            Request::Message(ask) => messages::send(self, ask)?,
+            Request::Events(ask) => watch::events(self, ask)?,
+            Request::Wait(ask) => watch::wait(self, &ask)?,
         };
         if wakes_tending(&reply) {
             self.tending.poke();
@@ -294,13 +253,12 @@ impl Supervisor {
 
     /// One tick of the tending loop at `now_millis`.
     fn tick(&self, now_millis: i64) {
-        tending::tick(
-            &self.state,
-            &self.tools,
-            &self.store,
-            &self.tending,
-            now_millis,
-        );
+        tending::tick(self, now_millis);
+    }
+
+    /// The state, locked.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -318,10 +276,6 @@ fn wakes_tending(reply: &Reply) -> bool {
                 | Response::End(response::End::Ended { seat: Some(_), .. })
         )
     )
-}
-
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A new id: `prefix` and ten lowercase hex digits, safe as a tmux

@@ -16,7 +16,7 @@ use fleet_core::protocol::Status;
 use fleet_core::status::{self, Mismatch};
 use fleet_core::tools::{Fetched, ToolError};
 
-use crate::Tools;
+use crate::{Supervisor, Tools};
 
 /// Where fetched adapters are kept, and where they are fetched from.
 pub(crate) struct Store {
@@ -44,13 +44,13 @@ impl Store {
 /// The program `reference` names, ready to run: a path once it says it
 /// speaks this fleet's protocol; a release's kept copy, fetched first if
 /// it is not kept yet.
-pub(crate) fn resolve(store: &Store, tools: &Tools, reference: &str) -> Result<PathBuf, Status> {
+pub(crate) fn resolve(sup: &Supervisor, reference: &str) -> Result<PathBuf, Status> {
     match adapters::parse_ref(reference) {
-        Ok(AdapterRef::Path(path)) => speaks(tools, &path, reference).map(|_| path),
-        Ok(AdapterRef::Named(named)) => kept(store, tools, &named),
+        Ok(AdapterRef::Path(path)) => speaks(&sup.tools, &path, reference).map(|_| path),
+        Ok(AdapterRef::Named(named)) => kept(sup, &named),
         Err(Status::Adapter(status::Adapter::AdapterUnpinned { name, .. })) => {
             Err(Status::Adapter(status::Adapter::AdapterUnpinned {
-                latest: latest(store, tools, &name),
+                latest: latest(sup, &name),
                 name,
             }))
         }
@@ -79,7 +79,8 @@ fn speaks_as(tools: &Tools, program: &Path, shown: &Path, adapter: &str) -> Resu
 }
 
 /// `named`'s kept copy, fetched and checked first if there is none.
-fn kept(store: &Store, tools: &Tools, named: &Named) -> Result<PathBuf, Status> {
+fn kept(sup: &Supervisor, named: &Named) -> Result<PathBuf, Status> {
+    let (store, tools) = (&sup.store, &sup.tools);
     let kept = named.kept(&store.dir);
     if kept.is_file() {
         return Ok(kept);
@@ -111,7 +112,7 @@ fn kept(store: &Store, tools: &Tools, named: &Named) -> Result<PathBuf, Status> 
             })
         })?;
     let sha = adapters::check_manifest(named, &read, &url, target)?;
-    let binary = fetch_binary(store, tools, named, target, dir, &sha)?;
+    let binary = fetch_binary(sup, named, target, dir, &sha)?;
     let build = speaks_as(tools, &binary.0, &kept, &named.to_string())?;
     if build != read.protocol {
         return Err(Status::Adapter(status::Adapter::ReleaseMismatch {
@@ -129,16 +130,15 @@ fn kept(store: &Store, tools: &Tools, named: &Named) -> Result<PathBuf, Status> 
 /// `named`'s build for `target`, downloaded beside its place in `dir`,
 /// checked against `sha` and made executable.
 fn fetch_binary(
-    store: &Store,
-    tools: &Tools,
+    sup: &Supervisor,
     named: &Named,
     target: &str,
     dir: &Path,
     sha: &str,
 ) -> Result<Temp, Status> {
-    let url = named.binary_url(store.releases(), target);
+    let url = named.binary_url(sup.store.releases(), target);
     let binary = Temp::new(dir, &named.program());
-    if download(tools, &url, &binary.0)? == Fetched::NotFound {
+    if download(&sup.tools, &url, &binary.0)? == Fetched::NotFound {
         return Err(Status::Adapter(status::Adapter::ReleaseMismatch {
             url,
             what: Mismatch::BuildMissing,
@@ -180,13 +180,19 @@ fn download(tools: &Tools, url: &str, to: &Path) -> Result<Fetched, Status> {
 
 /// The latest release of `name`, from fleet-adapters' list of releases;
 /// none with a base of the store's own, or when the list cannot be read.
-fn latest(store: &Store, tools: &Tools, name: &str) -> Option<String> {
+fn latest(sup: &Supervisor, name: &str) -> Option<String> {
+    let store = &sup.store;
     if store.base.is_some() {
         return None;
     }
     fs::create_dir_all(&store.dir).ok()?;
     let list = Temp::new(&store.dir, "releases.json");
-    match tools.net.download(adapters::RELEASE_LIST, &list.0).ok()? {
+    match sup
+        .tools
+        .net
+        .download(adapters::RELEASE_LIST, &list.0)
+        .ok()?
+    {
         Fetched::Saved => adapters::latest(name, &fs::read_to_string(&list.0).ok()?),
         Fetched::NotFound => None,
     }
@@ -216,446 +222,5 @@ impl Temp {
 impl Drop for Temp {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use fleet_core::adapters::{self, RELEASE_LIST};
-    use fleet_core::agent::{AdapterFault, Verb};
-    use fleet_core::protocol::Status;
-
-    use crate::Tools;
-    use crate::testing::{BINARY, FakeAgents, FakeNet, SharedNet, store, tools};
-
-    const BASE: &str = "https://r";
-
-    /// The shared tools, fetching through `net`, with adapters that all
-    /// speak `speaks`.
-    fn fetching(
-        net: impl fleet_core::tools::Network + Send + Sync + 'static,
-        speaks: Result<u32, AdapterFault>,
-    ) -> Tools {
-        let agents = FakeAgents {
-            speaks: Some(speaks),
-            ..FakeAgents::default()
-        };
-        Tools {
-            net: Box::new(net),
-            ..tools(Arc::default(), Arc::new(agents))
-        }
-    }
-
-    fn release(protocol: u32, hash: &str) -> BTreeMap<String, Vec<u8>> {
-        crate::testing::release(BASE, protocol, hash)
-    }
-
-    fn good() -> BTreeMap<String, Vec<u8>> {
-        crate::testing::good_release(BASE)
-    }
-
-    /// A state directory of the test's own, deleted at the end.
-    struct Dir(std::path::PathBuf);
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn state_dir(name: &str) -> Dir {
-        let d =
-            std::env::temp_dir().join(format!("fleet-sup-adapters-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        let _ = fs::create_dir_all(&d);
-        Dir(d)
-    }
-
-    fn kept(dir: &Dir) -> std::path::PathBuf {
-        dir.0
-            .join("st/adapters/claude-code/2.1.285/fleet-claude-code")
-    }
-
-    /// Files whose names start with `.`, left anywhere under the adapters.
-    fn leftovers(dir: &Dir) -> Vec<String> {
-        fn walk(p: &Path, out: &mut Vec<String>) {
-            for e in fs::read_dir(p).into_iter().flatten().flatten() {
-                let path = e.path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if e.file_name().to_string_lossy().starts_with('.') {
-                    out.push(path.display().to_string());
-                }
-            }
-        }
-        let mut out = vec![];
-        walk(&dir.0.join("st/adapters"), &mut out);
-        out
-    }
-
-    #[test]
-    fn a_named_adapter_is_fetched_once_then_kept() {
-        let d = state_dir("once");
-        let net = Arc::new(FakeNet {
-            files: good(),
-            ..FakeNet::default()
-        });
-        let t = fetching(SharedNet(Arc::clone(&net)), Ok(1));
-        assert_eq!(
-            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
-            Ok(kept(&d))
-        );
-        assert_eq!(fs::read(kept(&d)).ok().as_deref(), Some(BINARY));
-        let mode = fs::metadata(kept(&d))
-            .map(|m| m.permissions().mode() & 0o777)
-            .ok();
-        assert_eq!(mode, Some(0o755));
-        assert_eq!(net.count(), 2);
-        assert_eq!(
-            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
-            Ok(kept(&d))
-        );
-        assert_eq!(net.count(), 2, "a kept adapter is not fetched again");
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_missing_release_is_no_such_release() {
-        let d = state_dir("missing");
-        assert_eq!(
-            resolve(
-                &store(&d.0),
-                &fetching(FakeNet::default(), Ok(1)),
-                "claude-code@2.1.285"
-            ),
-            Err(Status::Adapter(status::Adapter::NoSuchRelease {
-                name: "claude-code".into(),
-                version: "2.1.285".into()
-            }))
-        );
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_manifest_for_another_release_is_bad_and_nothing_else_downloads() {
-        let d = state_dir("other");
-        let mut files = good();
-        let url = format!("{BASE}/claude-code-v2.1.285/manifest.json");
-        files.insert(
-            url,
-            br#"{"name":"codex","version":"2.1.285","protocol":1,"targets":{}}"#.to_vec(),
-        );
-        let net = Arc::new(FakeNet {
-            files,
-            ..FakeNet::default()
-        });
-        let t = fetching(SharedNet(Arc::clone(&net)), Ok(1));
-        assert!(matches!(
-            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
-            Err(Status::Adapter(status::Adapter::ReleaseMismatch {
-                what: fleet_core::status::Mismatch::OtherRelease { .. },
-                ..
-            }))
-        ));
-        assert_eq!(net.count(), 1);
-        assert!(!kept(&d).exists());
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_manifest_that_does_not_read_is_bad() {
-        let d = state_dir("garbage");
-        let mut files = good();
-        files.insert(
-            format!("{BASE}/claude-code-v2.1.285/manifest.json"),
-            b"<html>".to_vec(),
-        );
-        assert!(matches!(
-            resolve(
-                &store(&d.0),
-                &fetching(
-                    FakeNet {
-                        files,
-                        ..FakeNet::default()
-                    },
-                    Ok(1)
-                ),
-                "claude-code@2.1.285"
-            ),
-            Err(Status::Adapter(status::Adapter::BadManifest { .. }))
-        ));
-    }
-
-    #[test]
-    fn a_newer_protocol_is_refused_before_the_binary_downloads() {
-        let d = state_dir("newer");
-        let net = Arc::new(FakeNet {
-            files: release(2, &adapters::sha256_hex(BINARY)),
-            ..FakeNet::default()
-        });
-        let t = fetching(SharedNet(Arc::clone(&net)), Ok(2));
-        assert_eq!(
-            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
-            Err(Status::Adapter(status::Adapter::ProtocolMismatch {
-                adapter: "claude-code@2.1.285".into(),
-                speaks: 2,
-                fleet_speaks: vec![1]
-            }))
-        );
-        assert_eq!(net.count(), 1);
-    }
-
-    #[test]
-    fn a_checksum_mismatch_keeps_nothing() {
-        let d = state_dir("sha");
-        let files = release(1, &"0".repeat(64));
-        let got = resolve(
-            &store(&d.0),
-            &fetching(
-                FakeNet {
-                    files,
-                    ..FakeNet::default()
-                },
-                Ok(1),
-            ),
-            "claude-code@2.1.285",
-        );
-        assert_eq!(
-            got,
-            Err(Status::Adapter(status::Adapter::ChecksumMismatch {
-                name: "claude-code".into(),
-                version: "2.1.285".into(),
-                expected: "0".repeat(64),
-                got: adapters::sha256_hex(BINARY),
-            }))
-        );
-        assert!(!kept(&d).exists());
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_binary_speaking_another_protocol_keeps_nothing() {
-        let d = state_dir("binary");
-        let got = resolve(
-            &store(&d.0),
-            &fetching(
-                FakeNet {
-                    files: good(),
-                    ..FakeNet::default()
-                },
-                Ok(2),
-            ),
-            "claude-code@2.1.285",
-        );
-        assert!(
-            matches!(
-                got,
-                Err(Status::Adapter(status::Adapter::ProtocolMismatch {
-                    speaks: 2,
-                    ..
-                }))
-            ),
-            "{got:?}"
-        );
-        assert!(!kept(&d).exists());
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_binary_the_release_lacks_is_a_failed_download() {
-        let d = state_dir("lacks");
-        let mut files = good();
-        files.retain(|url, _| url.ends_with("manifest.json"));
-        assert!(matches!(
-            resolve(
-                &store(&d.0),
-                &fetching(
-                    FakeNet {
-                        files,
-                        ..FakeNet::default()
-                    },
-                    Ok(1)
-                ),
-                "claude-code@2.1.285"
-            ),
-            Err(Status::Adapter(status::Adapter::ReleaseMismatch {
-                what: fleet_core::status::Mismatch::BuildMissing,
-                ..
-            }))
-        ));
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_bare_name_is_refused_with_the_latest() {
-        let d = state_dir("bare");
-        let list = br#"[{"tag_name":"claude-code-v2.1.285"},{"tag_name":"claude-code-v2.1.290"}]"#;
-        let net = FakeNet {
-            files: BTreeMap::from([(RELEASE_LIST.to_owned(), list.to_vec())]),
-            ..FakeNet::default()
-        };
-        assert_eq!(
-            resolve(
-                &Store::new(&d.0.join("st"), None),
-                &fetching(net, Ok(1)),
-                "claude-code"
-            ),
-            Err(Status::Adapter(status::Adapter::AdapterUnpinned {
-                name: "claude-code".into(),
-                latest: Some("2.1.290".into())
-            }))
-        );
-        let net = Arc::new(FakeNet::default());
-        let t = fetching(SharedNet(Arc::clone(&net)), Ok(1));
-        assert_eq!(
-            resolve(&store(&d.0), &t, "claude-code"),
-            Err(Status::Adapter(status::Adapter::AdapterUnpinned {
-                name: "claude-code".into(),
-                latest: None
-            }))
-        );
-        assert_eq!(
-            net.count(),
-            0,
-            "with a base of its own, the latest is not looked up"
-        );
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_path_adapter_is_asked_its_protocol() {
-        let d = state_dir("path");
-        let s = store(&d.0);
-        assert_eq!(
-            resolve(&s, &fetching(FakeNet::default(), Ok(1)), "/a/mine"),
-            Ok("/a/mine".into())
-        );
-        assert_eq!(
-            resolve(&s, &fetching(FakeNet::default(), Ok(2)), "/a/mine"),
-            Err(Status::Adapter(status::Adapter::ProtocolMismatch {
-                adapter: "/a/mine".into(),
-                speaks: 2,
-                fleet_speaks: vec![1]
-            }))
-        );
-        let fault = AdapterFault::Exited {
-            code: Some(2),
-            said: "unknown verb".into(),
-        };
-        assert_eq!(
-            resolve(
-                &s,
-                &fetching(FakeNet::default(), Err(fault.clone())),
-                "/a/mine"
-            ),
-            Err(Status::Session(status::Session::AdapterFailed {
-                adapter: "/a/mine".into(),
-                verb: Verb::Protocol,
-                fault
-            }))
-        );
-    }
-
-    #[test]
-    fn a_fetched_build_that_cannot_say_its_protocol_is_named_by_where_it_would_be_kept() {
-        let d = state_dir("killed");
-        let fault = AdapterFault::Exited {
-            code: None,
-            said: String::new(),
-        };
-        let net = FakeNet {
-            files: good(),
-            ..FakeNet::default()
-        };
-        assert_eq!(
-            resolve(
-                &store(&d.0),
-                &fetching(net, Err(fault.clone())),
-                "claude-code@2.1.285"
-            ),
-            Err(Status::Session(status::Session::AdapterFailed {
-                adapter: kept(&d),
-                verb: Verb::Protocol,
-                fault
-            }))
-        );
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_state_directory_that_cannot_be_written_keeps_nothing() {
-        let d = state_dir("readonly");
-        let _ = fs::set_permissions(&d.0, fs::Permissions::from_mode(0o500));
-        let got = resolve(
-            &store(&d.0),
-            &fetching(
-                FakeNet {
-                    files: good(),
-                    ..FakeNet::default()
-                },
-                Ok(1),
-            ),
-            "claude-code@2.1.285",
-        );
-        assert!(
-            matches!(
-                got,
-                Err(Status::Adapter(status::Adapter::AdapterNotKept { .. }))
-            ),
-            "{got:?}"
-        );
-    }
-
-    #[test]
-    fn two_fetches_of_one_adapter_both_keep_it() {
-        let d = state_dir("race");
-        let t = Arc::new(fetching(
-            FakeNet {
-                files: good(),
-                delay: Duration::from_millis(50),
-                ..FakeNet::default()
-            },
-            Ok(1),
-        ));
-        let s = Arc::new(store(&d.0));
-        let racers: Vec<_> = (0..2)
-            .map(|_| {
-                let (t, s) = (Arc::clone(&t), Arc::clone(&s));
-                std::thread::spawn(move || resolve(&s, &t, "claude-code@2.1.285"))
-            })
-            .collect();
-        for racer in racers {
-            assert_eq!(racer.join().ok(), Some(Ok(kept(&d))));
-        }
-        assert_eq!(fs::read(kept(&d)).ok().as_deref(), Some(BINARY));
-        assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    #[test]
-    fn no_curl_is_no_downloader() {
-        let d = state_dir("nocurl");
-        assert!(matches!(
-            resolve(
-                &store(&d.0),
-                &fetching(
-                    FakeNet {
-                        no_curl: true,
-                        ..FakeNet::default()
-                    },
-                    Ok(1)
-                ),
-                "claude-code@2.1.285"
-            ),
-            Err(Status::Adapter(status::Adapter::NoDownloader { .. }))
-        ));
     }
 }

@@ -11,25 +11,23 @@ use fleet_core::agent::{
 };
 use fleet_core::tools::{AgentAdapters, Multiplexer, Pane, ToolError};
 
-use state::{MessageRow, State};
+use state::MessageRow;
 
-use crate::Tools;
 use crate::adapters::Store;
+use crate::{Supervisor, Tools};
 
-/// A temp tree with repositories `names` under `code/`, a `wing/`
-/// directory, and a state file under `st/`, all canonical.
-pub(crate) fn tree(name: &str, names: &[&str]) -> (PathBuf, Mutex<State>) {
+/// A temp tree with repositories `app`, `api`, `blog` and `lib` under
+/// `code/`, a `wing/` directory, and a state directory `st/`, all
+/// canonical: its root.
+pub(crate) fn tree(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("fleet-sup-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
-    for repo in names {
+    for repo in ["app", "api", "blog", "lib"] {
         let _ = fs::create_dir_all(root.join("code").join(repo).join(".git"));
     }
     let _ = fs::create_dir_all(root.join("wing"));
     let _ = fs::create_dir_all(root.join("st"));
-    let root = fs::canonicalize(&root).unwrap_or(root);
-    let state = State::open(&root.join("st")).ok();
-    assert!(state.is_some());
-    (root, Mutex::new(state.unwrap_or_else(|| unreachable!())))
+    fs::canonicalize(&root).unwrap_or(root)
 }
 
 /// The repository `repo` in a `tree`.
@@ -134,10 +132,10 @@ pub(crate) struct FakeMux {
     pub(crate) panes: Mutex<Vec<Pane>>,
     /// Whether a launch fails.
     pub(crate) fail_launch: bool,
-    /// What tmux says when ending a session fails, if it does.
-    pub(crate) stop_fails: Option<&'static str>,
+    /// Whether ending a session fails.
+    pub(crate) fail_stop: AtomicBool,
     /// Like a tmux that is not installed.
-    pub(crate) missing: bool,
+    pub(crate) missing: AtomicBool,
     /// Each paste: the pane and the text.
     pub(crate) typed: Mutex<Vec<(String, String)>>,
     /// Whether typing in fails.
@@ -158,7 +156,7 @@ pub(crate) fn not_installed() -> ToolError {
 
 impl Multiplexer for FakeMux {
     fn launch(&self, session: &str, _: &Path, program: &Launched) -> Result<String, ToolError> {
-        if self.missing {
+        if self.missing.load(Ordering::Relaxed) {
             return Err(not_installed());
         }
         self.launched
@@ -184,7 +182,7 @@ impl Multiplexer for FakeMux {
     }
 
     fn panes(&self) -> Result<Vec<Pane>, ToolError> {
-        if self.missing {
+        if self.missing.load(Ordering::Relaxed) {
             return Err(not_installed());
         }
         Ok(self
@@ -195,10 +193,10 @@ impl Multiplexer for FakeMux {
     }
 
     fn stop(&self, session: &str) -> Result<(), ToolError> {
-        if let Some(said) = self.stop_fails {
+        if self.fail_stop.load(Ordering::Relaxed) {
             return Err(ToolError::Failed {
                 command: "tmux kill-session".into(),
-                said: said.into(),
+                said: "no".into(),
             });
         }
         self.panes
@@ -209,7 +207,7 @@ impl Multiplexer for FakeMux {
     }
 
     fn type_in(&self, pane: &str, text: &str) -> Result<(), ToolError> {
-        if self.missing {
+        if self.missing.load(Ordering::Relaxed) {
             return Err(not_installed());
         }
         if self.fail_type.load(Ordering::Relaxed) {
@@ -250,12 +248,14 @@ pub(crate) struct FakeAgents {
     /// Each adapter's answer to a read, verbatim; one it does not hold
     /// answers with no readings. Unset, every asked session reads
     /// `activity`.
-    pub(crate) readings: Option<BTreeMap<PathBuf, Vec<Reading>>>,
+    pub(crate) readings: Mutex<Option<BTreeMap<PathBuf, Vec<Reading>>>>,
     /// What every asked session reads while `readings` is unset; idle
     /// until set.
     pub(crate) activity: Mutex<Option<Activity>>,
     /// What every adapter says it speaks; unset, protocol 1.
     pub(crate) speaks: Option<Result<u32, AdapterFault>>,
+    /// How long each launch takes.
+    pub(crate) launch_delay: std::time::Duration,
 }
 
 impl FakeAgents {
@@ -271,6 +271,7 @@ impl AgentAdapters for FakeAgents {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(adapter.to_path_buf());
+        std::thread::sleep(self.launch_delay);
         match &self.launch_fault {
             Some(fault) => Err(fault.clone()),
             None => Ok(Launched {
@@ -288,7 +289,8 @@ impl AgentAdapters for FakeAgents {
         if let Some(fault) = &self.read_fault {
             return Err(fault.clone());
         }
-        if let Some(readings) = &self.readings {
+        let readings = self.readings.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(readings) = readings.as_ref() {
             return Ok(Readings {
                 sessions: readings.get(adapter).cloned().unwrap_or_default(),
             });
@@ -364,13 +366,13 @@ impl fleet_core::tools::Network for SharedNet {
     }
 }
 
-/// The supervisor's tools made of `mux` and `agents`, which the test keeps,
-/// and a network that serves nothing.
-pub(crate) fn tools(mux: Arc<FakeMux>, agents: Arc<FakeAgents>) -> Tools {
+/// The supervisor's tools made of `mux`, `agents` and `net`, which the
+/// test keeps.
+pub(crate) fn tools(mux: Arc<FakeMux>, agents: Arc<FakeAgents>, net: Arc<FakeNet>) -> Tools {
     Tools {
         mux: Box::new(SharedMux(mux)),
         agents: Box::new(Shared(agents)),
-        net: Box::new(FakeNet::default()),
+        net: Box::new(SharedNet(net)),
     }
 }
 
@@ -401,111 +403,11 @@ pub(crate) fn typed(mux: &FakeMux) -> Vec<(String, String)> {
 }
 
 /// The kinds of the steps recorded, oldest first.
-pub(crate) fn steps(state: &Mutex<State>) -> Vec<String> {
-    crate::lock(state).steps().unwrap_or_default()
+pub(crate) fn steps(sup: &Supervisor) -> Vec<String> {
+    sup.lock().steps().unwrap_or_default()
 }
 
 /// The messages held for delivery.
-pub(crate) fn held(state: &Mutex<State>) -> Vec<MessageRow> {
-    crate::lock(state).held().unwrap_or_default()
-}
-
-/// A `tree` with a default fleet in `code/app`, on, whose roster has one
-/// role, `w` (adapter `/a/claude`, a prompt), and one seat of it, `scribe`.
-pub(crate) fn with_seat(name: &str) -> (PathBuf, Mutex<State>, fleet_core::fleets::Fleet) {
-    use fleet_core::seats::{Role, Roster, Seat};
-    let (root, state) = tree(name, &["app"]);
-    let app = code(&root, "app");
-    let fleet = fleet_core::fleets::Fleet {
-        directory: app.clone(),
-        projects: vec![app.clone()],
-    };
-    let roster = Roster {
-        roles: vec![Role {
-            label: "w".into(),
-            adapter: "/a/claude".into(),
-            model: None,
-            prompt: Some("You write the notes.".into()),
-            directory: app,
-        }],
-        seats: vec![Seat {
-            name: "scribe".into(),
-            role: "w".into(),
-        }],
-    };
-    let made = state
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .write(|w| {
-            w.create_fleet(&fleet, || Ok(()))?;
-            w.set_roster(&fleet.directory, &roster)
-        });
-    assert!(made.is_ok(), "{made:?}");
-    (root, state, fleet)
-}
-
-/// Writes `row` to state with a live pane on `mux`, as a launch would but
-/// with no adapter: for a session a test needs just as it is.
-pub(crate) fn put(state: &Mutex<State>, mux: &dyn Multiplexer, row: &state::SessionRow) {
-    let program = Launched {
-        argv: vec!["/bin/agent".into()],
-        env: BTreeMap::new(),
-    };
-    let written = state
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .write(|w| w.launch_session(row, || mux.launch(&row.id, &row.directory, &program)));
-    assert!(written.is_ok(), "{written:?}");
-}
-
-/// A session spawned from role `w` of the fleet in `fleet`, launched at
-/// `launch_time_millis`.
-pub(crate) fn spawned_row(id: &str, fleet: &Path, launch_time_millis: i64) -> state::SessionRow {
-    state::SessionRow {
-        id: id.into(),
-        adapter: "/a/claude".into(),
-        directory: fleet.to_path_buf(),
-        launch_time_millis,
-        pane: String::new(),
-        fleet: Some(fleet.to_path_buf()),
-        seat: None,
-        role: Some("w".into()),
-        role_digest: Some("d".into()),
-        state: None,
-    }
-}
-
-/// A wingman fleet in `wing/` serving `code/app` and `code/lib`, with
-/// `roles` as (label, adapter), each running sonnet in `wing/`, woken with
-/// "You take tasks.", and no seats: its root, its state, and `wing/`.
-pub(crate) fn crew(name: &str, roles: &[(&str, &str)]) -> (PathBuf, Mutex<State>, PathBuf) {
-    use fleet_core::seats::{Role, Roster};
-    let (root, state) = tree(name, &["app", "lib"]);
-    let wing = root.join("wing");
-    let fleet = fleet_core::fleets::Fleet {
-        directory: wing.clone(),
-        projects: vec![code(&root, "app"), code(&root, "lib")],
-    };
-    let roster = Roster {
-        roles: roles
-            .iter()
-            .map(|(label, adapter)| Role {
-                label: (*label).into(),
-                adapter: (*adapter).into(),
-                model: Some("sonnet".into()),
-                prompt: Some("You take tasks.".into()),
-                directory: wing.clone(),
-            })
-            .collect(),
-        seats: vec![],
-    };
-    let made = state
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .write(|w| {
-            w.create_fleet(&fleet, || Ok(()))?;
-            w.set_roster(&fleet.directory, &roster)
-        });
-    assert!(made.is_ok(), "{made:?}");
-    (root, state, wing)
+pub(crate) fn held(sup: &Supervisor) -> Vec<MessageRow> {
+    sup.lock().held().unwrap_or_default()
 }
