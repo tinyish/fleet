@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+use fleet_core::messages::Holds;
 use fleet_core::paths::{Os, state_dir};
 use fleet_core::protocol::{ProtocolError, Reply, Request, Response, Status, request, response};
 use fleet_core::tools::{AgentAdapters, Multiplexer, Network};
@@ -199,13 +200,16 @@ fn answer(supervisor: &Supervisor, stream: &UnixStream) -> Result<(), Error> {
 }
 
 /// The supervisor in process: its state, the tools it drives, its kept
-/// adapters and its tending loop's memory. It answers a request, and runs a
-/// tick at the time it is given; the socket and the clock are the caller's.
+/// adapters, its tending loop's memory and the sessions held after a
+/// paste. It answers a request, and runs a tick at the time it is given;
+/// the socket and the clock are the caller's.
 struct Supervisor {
     state: Mutex<State>,
     tools: Tools,
     store: adapters::Store,
     tending: tending::Tending,
+    /// Only a tick reads or changes them; no request does.
+    holds: Mutex<Holds>,
 }
 
 impl Supervisor {
@@ -217,6 +221,7 @@ impl Supervisor {
             tools,
             store,
             tending: tending::Tending::new(),
+            holds: Mutex::default(),
         }
     }
 
@@ -259,6 +264,11 @@ impl Supervisor {
     /// The state, locked.
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The sessions held after a paste, locked.
+    fn holds(&self) -> MutexGuard<'_, Holds> {
+        self.holds.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

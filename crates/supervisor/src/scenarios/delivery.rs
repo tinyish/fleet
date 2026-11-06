@@ -114,14 +114,11 @@ fn a_hold_starts_when_the_paste_goes_in_not_when_the_tick_began() {
     kill_all(&r.mux);
     r.tick(10_000);
     assert_eq!(typed(&r.mux).len(), 1);
-    let since = r
-        .sup
-        .tending
-        .holds()
-        .values()
-        .next()
-        .map(|h| h.since_millis);
-    assert!(since.is_some_and(|s| s >= 10_300), "{since:?}");
+    // Held from 10 300 at the earliest, so still held 30 s after the tick
+    // began.
+    let _ = r.send("scribe", "again");
+    r.tick(10_000 + HOLD_MILLIS);
+    assert_eq!(typed(&r.mux).len(), 1, "still held");
 }
 
 #[test]

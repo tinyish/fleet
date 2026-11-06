@@ -12,7 +12,6 @@ use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use fleet_core::agent::SessionState;
-use fleet_core::messages::Hold;
 use fleet_core::protocol::Status;
 use fleet_core::seats::{self, Act, Backoff, Held, SeatKey, Tended, Wanted};
 use state::{SessionRow, Step};
@@ -46,9 +45,6 @@ pub(crate) struct Tending {
     blind: Mutex<bool>,
     poked: Mutex<bool>,
     bell: Condvar,
-    /// The sessions that took a paste and take no more yet (core.md
-    /// invariant 12); only the loop's own thread changes them.
-    holds: Mutex<BTreeMap<String, Hold>>,
 }
 
 impl Tending {
@@ -71,19 +67,6 @@ impl Tending {
             .clone()
     }
 
-    /// The sessions held after a paste.
-    pub(crate) fn holds(&self) -> BTreeMap<String, Hold> {
-        self.holds
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Keeps `holds` as the sessions held after a paste.
-    pub(crate) fn set_holds(&self, holds: BTreeMap<String, Hold>) {
-        *self.holds.lock().unwrap_or_else(PoisonError::into_inner) = holds;
-    }
-
     fn set_down(&self, key: &SeatKey, down: Option<Down>) {
         let mut all = self.down.lock().unwrap_or_else(PoisonError::into_inner);
         match down {
@@ -103,9 +86,11 @@ impl Tending {
     }
 }
 
-/// One tick at `now_millis`: the seats tended, then what waits for an idle
-/// agent delivered, whatever is on or off. Delivery's clock is moved on by
-/// the time tending took, so a hold starts when its paste goes in.
+/// One tick at `now_millis`: the seats tended, then every session read
+/// once, the reading taken in by the paste holds, recorded, and what waits
+/// for an idle agent delivered, whatever is on or off. Delivery's clock is
+/// moved on by the time tending took, so a hold starts when its paste goes
+/// in.
 pub(crate) fn tick(sup: &Supervisor, now_millis: i64) {
     let started = Instant::now();
     tend_seats(sup, now_millis);
@@ -120,6 +105,8 @@ pub(crate) fn tick(sup: &Supervisor, now_millis: i64) {
     let Ok(observed) = crate::observe::observe(&sup.tools, &rows, now_millis) else {
         return;
     };
+    let live = rows.iter().map(|r| r.id.as_str());
+    sup.holds().saw(&observed.states, live, now_millis);
     record_states(sup, &rows, &observed, now_millis);
     crate::messages::deliver(sup, &rows, &observed, now_millis);
 }
@@ -129,14 +116,14 @@ pub(crate) fn tick(sup: &Supervisor, now_millis: i64) {
 /// still idle under the hold of a paste is not recorded yet: its idle is
 /// the answer only once its turn was seen, or the hold has passed.
 fn record_states(sup: &Supervisor, rows: &[SessionRow], observed: &Observed, now_millis: i64) {
-    let holds = sup.tending.holds();
-    let held = |r: &SessionRow| holds.get(&r.id).is_some_and(|h| h.blocks(now_millis));
+    let holds = sup.holds();
     let changed: Vec<(&SessionRow, SessionState)> = rows
         .iter()
         .filter_map(|r| observed.states.get(&r.id).map(|s| (r, *s)))
         .filter(|(r, s)| r.state != Some(*s))
-        .filter(|(r, s)| !(*s == SessionState::Idle && held(r)))
+        .filter(|(r, s)| holds.counts(&r.id, *s, now_millis))
         .collect();
+    drop(holds);
     if changed.is_empty() {
         return;
     }

@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use fleet_core::agent::SessionState;
-use fleet_core::messages::{self, Hold, Recipient};
+use fleet_core::messages::{self, Recipient};
 use fleet_core::protocol::{Reply, Response, Status, request, response};
 use fleet_core::seats::SeatKey;
 use fleet_core::status::{self, Takes};
@@ -99,38 +99,26 @@ fn recipient(
 }
 
 /// Delivers what waits for each idle agent at `now_millis`, from the
-/// tick's one reading of `rows`: one paste per session, then a hold
-/// (core.md invariant 12). Nothing is typed when tmux or the adapter could
-/// not say the agent is idle.
+/// tick's one reading of `rows`, which the holds have taken in: one paste
+/// per session, then a hold (core.md invariant 12). Nothing is typed when
+/// tmux or the adapter could not say the agent is idle.
 pub(crate) fn deliver(sup: &Supervisor, rows: &[SessionRow], observed: &Observed, now_millis: i64) {
-    let tending = &sup.tending;
     let held = match sup.lock().held() {
         Ok(held) => held,
         Err(e) => return log(&words::tending_failed(&e.into())),
     };
-    let mut holds = tending.holds();
-    holds.retain(|session, hold| hold.blocks(now_millis) && rows.iter().any(|r| r.id == *session));
-    if held.is_empty() && holds.is_empty() {
-        return tending.set_holds(holds);
+    if held.is_empty() {
+        return;
     }
-    let asked: Vec<&SessionRow> = rows
-        .iter()
-        .filter(|r| holds.contains_key(&r.id) || !waiting_for(&held, r).is_empty())
-        .collect();
-    for (session, hold) in &mut holds {
-        if let Some(seen) = observed.states.get(session) {
-            hold.saw(*seen);
-        }
-    }
-    for row in &asked {
+    for row in rows {
         let ids = waiting_for(&held, row);
         let idle = observed.states.get(&row.id) == Some(&SessionState::Idle);
-        let blocked = holds.get(&row.id).is_some_and(|h| h.blocks(now_millis));
-        if !ids.is_empty() && idle && !blocked && type_in(sup, row, &ids) {
-            holds.insert(row.id.clone(), Hold::new(now_millis));
+        // The holds are not locked while tmux types.
+        let free = sup.holds().may_paste(&row.id, now_millis);
+        if !ids.is_empty() && idle && free && type_in(sup, row, &ids) {
+            sup.holds().pasted(&row.id, now_millis);
         }
     }
-    tending.set_holds(holds);
 }
 
 /// The ids of the held messages for `row`'s session, oldest first: those

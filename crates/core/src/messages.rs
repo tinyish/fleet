@@ -2,6 +2,7 @@
 //! for, why one is dropped, the rules its text keeps, how several go in as
 //! one paste, and how long a session that took a paste is held.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -99,37 +100,77 @@ pub fn batch<'a>(texts: impl IntoIterator<Item = &'a str>) -> String {
         .join("\n\n")
 }
 
-/// A session that took a paste: when, and whether a reading since has
-/// shown it left idle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hold {
-    /// When the paste went in.
-    pub since_millis: i64,
-    /// Whether the agent has read working or needing you since.
-    pub left_idle: bool,
-}
+/// The sessions that took a paste, each held until a reading shows its
+/// agent left idle or [`HOLD_MILLIS`] pass (core.md invariant 12).
+#[derive(Debug, Default)]
+pub struct Holds(BTreeMap<String, Hold>);
 
-impl Hold {
-    /// A hold from a paste at `since_millis`.
-    #[must_use]
-    pub fn new(since_millis: i64) -> Hold {
-        Hold {
-            since_millis,
-            left_idle: false,
+impl Holds {
+    /// Takes in a tick's `readings` at `now_millis`, once it has dropped
+    /// the holds that passed and those of sessions not among `live`.
+    pub fn saw<'a>(
+        &mut self,
+        readings: &BTreeMap<String, SessionState>,
+        live: impl IntoIterator<Item = &'a str>,
+        now_millis: i64,
+    ) {
+        let live: BTreeSet<&str> = live.into_iter().collect();
+        self.0
+            .retain(|id, hold| hold.blocks(now_millis) && live.contains(id.as_str()));
+        for (id, hold) in &mut self.0 {
+            if let Some(state) = readings.get(id) {
+                hold.saw(*state);
+            }
         }
     }
 
+    /// Whether `session`'s reading of `state` at `now_millis` is recorded
+    /// yet: an idle under a hold is not, as the agent may not have taken
+    /// the paste.
+    #[must_use]
+    pub fn counts(&self, session: &str, state: SessionState, now_millis: i64) -> bool {
+        state != SessionState::Idle || self.may_paste(session, now_millis)
+    }
+
+    /// Whether `session` takes a paste at `now_millis`.
+    #[must_use]
+    pub fn may_paste(&self, session: &str, now_millis: i64) -> bool {
+        !self.0.get(session).is_some_and(|h| h.blocks(now_millis))
+    }
+
+    /// Holds `session`, which took a paste at `now_millis`.
+    pub fn pasted(&mut self, session: &str, now_millis: i64) {
+        self.0.insert(
+            session.to_owned(),
+            Hold {
+                since_millis: now_millis,
+                left_idle: false,
+            },
+        );
+    }
+}
+
+/// A session that took a paste: when, and whether a reading since has
+/// shown it left idle.
+#[derive(Debug)]
+struct Hold {
+    /// When the paste went in.
+    since_millis: i64,
+    /// Whether the agent has read working or needing you since.
+    left_idle: bool,
+}
+
+impl Hold {
     /// Takes in a reading: working or needing you shows the paste was
     /// taken; starting, unknown or gone shows nothing.
-    pub fn saw(&mut self, state: SessionState) {
+    fn saw(&mut self, state: SessionState) {
         if matches!(state, SessionState::Working | SessionState::NeedsYou { .. }) {
             self.left_idle = true;
         }
     }
 
     /// Whether the session still takes no paste at `now_millis`.
-    #[must_use]
-    pub fn blocks(&self, now_millis: i64) -> bool {
+    fn blocks(&self, now_millis: i64) -> bool {
         !self.left_idle && now_millis - self.since_millis < HOLD_MILLIS
     }
 }
@@ -184,24 +225,51 @@ mod tests {
         assert_eq!(batch(["alone\n"]), "alone");
     }
 
+    fn read(state: SessionState) -> BTreeMap<String, SessionState> {
+        BTreeMap::from([("s1".to_owned(), state)])
+    }
+
     #[test]
     fn a_hold_blocks_until_the_agent_leaves_idle_or_thirty_seconds_pass() {
-        let mut hold = Hold::new(1_000);
-        assert!(hold.blocks(1_000 + HOLD_MILLIS - 1));
-        assert!(!hold.blocks(1_000 + HOLD_MILLIS));
-        hold.saw(SessionState::Idle);
-        hold.saw(SessionState::Starting);
-        hold.saw(SessionState::Unknown);
-        hold.saw(SessionState::Gone);
+        let mut holds = Holds::default();
+        assert!(holds.may_paste("s1", 0), "no paste yet, no hold");
+        holds.pasted("s1", 1_000);
+        assert!(!holds.may_paste("s1", 1_000 + HOLD_MILLIS - 1));
+        assert!(holds.may_paste("s1", 1_000 + HOLD_MILLIS));
+        assert!(holds.may_paste("s2", 2_000), "another session is free");
+        for state in [
+            SessionState::Idle,
+            SessionState::Starting,
+            SessionState::Unknown,
+            SessionState::Gone,
+        ] {
+            holds.saw(&read(state), ["s1"], 2_000);
+        }
         assert!(
-            hold.blocks(2_000),
+            !holds.may_paste("s1", 2_000),
             "none of these shows the paste was taken"
         );
-        hold.saw(SessionState::Working);
-        assert!(!hold.blocks(2_000));
-        let mut asked = Hold::new(1_000);
-        asked.saw(SessionState::NeedsYou { reason: None });
-        assert!(!asked.blocks(2_000));
+        holds.saw(&read(SessionState::Working), ["s1"], 2_000);
+        assert!(holds.may_paste("s1", 2_000));
+        let mut asked = Holds::default();
+        asked.pasted("s1", 1_000);
+        asked.saw(
+            &read(SessionState::NeedsYou { reason: None }),
+            ["s1"],
+            2_000,
+        );
+        assert!(asked.may_paste("s1", 2_000));
+    }
+
+    #[test]
+    fn an_idle_under_a_hold_is_not_recorded_yet_and_any_other_reading_is() {
+        let mut holds = Holds::default();
+        holds.pasted("s1", 1_000);
+        assert!(!holds.counts("s1", SessionState::Idle, 2_000));
+        assert!(holds.counts("s1", SessionState::Working, 2_000));
+        assert!(holds.counts("s1", SessionState::Gone, 2_000));
+        assert!(holds.counts("s2", SessionState::Idle, 2_000));
+        assert!(holds.counts("s1", SessionState::Idle, 1_000 + HOLD_MILLIS));
     }
 
     fn json(value: &impl serde::Serialize) -> String {
