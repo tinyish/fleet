@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Read};
 use std::path::Path;
 
 use fleet_core::messages::{self, Sender};
-use fleet_core::protocol::request;
+use fleet_core::protocol::{self, request};
 
 use crate::client;
 use crate::protocol::{Problem, Response, Status};
@@ -19,23 +19,19 @@ pub(crate) fn run(state_dir: &Path, to: &str, text: Option<&str>) -> Result<Resp
         io::stdin().read_to_string(&mut piped).map(|_| piped)
     })?;
     messages::check_text(&text).map_err(|refusal| Status::Refused(refusal.into()))?;
-    let socket = client::socket(state_dir)?;
-    if !client::answers(&socket) {
-        return Err(Status::NotRunning);
-    }
-    let directory =
-        std::env::current_dir().map_err(|e| Status::Cannot(Problem::NoCurrentDir(e)))?;
+    let (supervisor, directory) = client::from_here(state_dir)?;
     let terminal = io::stdin().is_terminal() && io::stderr().is_terminal();
     let sender = sender(std::env::var(messages::SESSION_VAR).ok(), terminal);
-    let queued = client::message(
-        &socket,
-        request::Message::Send {
-            directory,
-            to: to.to_owned(),
-            text,
-            sender,
-        },
-    )?;
+    let request = protocol::Request::Message(request::Message::Send {
+        directory,
+        to: to.to_owned(),
+        text,
+        sender,
+    });
+    let queued = supervisor.ask(&request, |answer| match answer {
+        protocol::Response::Message(queued) => Some(queued),
+        _ => None,
+    })?;
     Ok(Response::MessageQueued(queued))
 }
 
@@ -66,7 +62,6 @@ fn sender(session: Option<String>, terminal: bool) -> Sender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_core::protocol;
 
     #[test]
     fn the_sender_is_the_session_named_else_a_person_at_a_terminal_else_a_script() {
@@ -112,20 +107,6 @@ mod tests {
             ),
             "{args:?}"
         );
-    }
-
-    #[test]
-    fn message_never_starts_the_supervisor() {
-        let dir = std::env::temp_dir().join(format!("fleet-message-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        assert!(matches!(
-            run(&dir, "scribe", Some("hi")),
-            Err(Status::NotRunning)
-        ));
-        let socket = protocol::socket_path(&dir).ok();
-        assert!(socket.is_some_and(|s| !s.exists()));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

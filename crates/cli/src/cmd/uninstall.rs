@@ -380,7 +380,9 @@ mod tests {
             Doubt::StillAnswers { waited: wait }
         ))));
         assert!(!supervisor_down(&Err(Status::CouldNotTell(
-            Doubt::OddReply { to: "stop" }
+            Doubt::OddReply {
+                during: crate::protocol::During::TurningOff
+            }
         ))));
         assert!(!supervisor_down(&Err(Status::NotRunning)));
     }

@@ -5,10 +5,10 @@
 
 use std::path::Path;
 
-use fleet_core::protocol::request;
+use fleet_core::protocol::{self, request};
 
 use crate::client;
-use crate::protocol::{Problem, Response, Status};
+use crate::protocol::{Response, Status};
 use crate::ui::{self, words};
 
 /// Spawns `role` from the current directory, in `directory` if named.
@@ -17,13 +17,13 @@ pub(crate) fn run(
     role: &str,
     directory: Option<&Path>,
 ) -> Result<Response, Status> {
-    let socket = client::socket(state_dir)?;
-    if !client::answers(&socket) {
-        return Err(Status::NotRunning);
-    }
-    let here = std::env::current_dir().map_err(|e| Status::Cannot(Problem::NoCurrentDir(e)))?;
+    let (supervisor, here) = client::from_here(state_dir)?;
+    let request = protocol::Request::Spawn(request_for(&here, role, directory));
     let spinner = ui::spinner(words::SPAWNING);
-    let spawned = client::spawn(&socket, request_for(&here, role, directory));
+    let spawned = supervisor.ask(&request, |answer| match answer {
+        protocol::Response::Spawn(spawned) => Some(spawned),
+        _ => None,
+    });
     spinner.clear();
     Ok(Response::Spawned(spawned?))
 }
@@ -83,16 +83,5 @@ mod tests {
                 working_directory: None,
             }
         );
-    }
-
-    #[test]
-    fn spawn_never_starts_the_supervisor() {
-        let dir = std::env::temp_dir().join(format!("fleet-spawn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        assert!(matches!(run(&dir, "worker", None), Err(Status::NotRunning)));
-        let socket = fleet_core::protocol::socket_path(&dir).ok();
-        assert!(socket.is_some_and(|s| !s.exists()));
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

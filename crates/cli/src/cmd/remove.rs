@@ -4,13 +4,13 @@
 use std::path::{Path, PathBuf};
 
 use fleet_core::protocol::request::{self, ConfigChoice};
-use fleet_core::protocol::response;
+use fleet_core::protocol::{self, response};
 use fleet_core::tools::ServiceManager;
 
+use crate::Ask;
 use crate::cmd::start;
-use crate::protocol::{Doubt, Problem, Response, Status};
+use crate::protocol::{Problem, Response, Status};
 use crate::ui::{self, words};
-use crate::{Ask, client};
 
 pub(crate) fn run(
     state_dir: &Path,
@@ -18,7 +18,6 @@ pub(crate) fn run(
     ask: Ask,
     projects: &[PathBuf],
 ) -> Result<Response, Status> {
-    let socket = client::socket(state_dir)?;
     let directory =
         std::env::current_dir().map_err(|e| Status::Cannot(Problem::NoCurrentDir(e)))?;
     let mut absolute = Vec::with_capacity(projects.len());
@@ -31,7 +30,7 @@ pub(crate) fn run(
         })?;
         absolute.push(path);
     }
-    let startup = start::ensure_supervisor(state_dir, &socket, service, ask)?;
+    let supervisor = start::supervisor(state_dir, service, ask)?;
     // Only a person at a terminal is asked, and only when the supervisor
     // says the answer matters; anyone else keeps the file.
     let first = if ask == Ask::Terminal {
@@ -39,23 +38,37 @@ pub(crate) fn run(
     } else {
         ConfigChoice::Keep
     };
-    let request = |config| request::Remove::Fleet {
-        directory: directory.clone(),
-        projects: absolute.clone(),
-        config,
+    let request = |config| {
+        protocol::Request::Remove(request::Remove::Fleet {
+            directory: directory.clone(),
+            projects: absolute.clone(),
+            config,
+        })
     };
-    let mut response = client::remove(&socket, request(first))?;
+    let mut response = supervisor.ask(&request(first), removed)?;
     if matches!(response, response::Remove::Ask { .. }) {
         let answer = ui::confirm(words::remove::DELETE_PROMPT, false);
         let Some(config) = answered(answer) else {
             return Ok(Response::Cancelled);
         };
-        response = client::remove(&socket, request(config))?;
-        if matches!(response, response::Remove::Ask { .. }) {
-            return Err(Status::CouldNotTell(Doubt::OddReply { to: "remove" }));
-        }
+        response = supervisor.ask(&request(config), settled)?;
     }
+    let startup = supervisor.startup;
     Ok(Response::Removed { response, startup })
+}
+
+/// Remove's answer.
+fn removed(answer: protocol::Response) -> Option<response::Remove> {
+    match answer {
+        protocol::Response::Remove(removed) => Some(removed),
+        _ => None,
+    }
+}
+
+/// Remove's answer to the second request, which does not ask first: never
+/// a question.
+fn settled(answer: protocol::Response) -> Option<response::Remove> {
+    removed(answer).filter(|removed| !matches!(removed, response::Remove::Ask { .. }))
 }
 
 /// What the second request says, from the person's answer: nothing is sent
@@ -79,5 +92,21 @@ mod tests {
         assert_eq!(answered(None), None);
         assert_eq!(answered(Some(true)), Some(ConfigChoice::Delete));
         assert_eq!(answered(Some(false)), Some(ConfigChoice::Keep));
+    }
+
+    #[test]
+    fn only_the_first_request_takes_a_question_as_its_answer() {
+        let question = || {
+            protocol::Response::Remove(response::Remove::Ask {
+                directory: "/c/app".into(),
+            })
+        };
+        assert!(removed(question()).is_some());
+        assert!(settled(question()).is_none());
+        let gone = protocol::Response::Remove(response::Remove::NothingHere {
+            directory: "/c/app".into(),
+        });
+        assert!(settled(gone).is_some());
+        assert!(removed(protocol::Response::Stop(response::Stop::AllOff)).is_none());
     }
 }

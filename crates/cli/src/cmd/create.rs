@@ -3,12 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use fleet_core::protocol::request;
+use fleet_core::protocol::{self, request};
 use fleet_core::tools::ServiceManager;
 
+use crate::Ask;
 use crate::cmd::start;
 use crate::protocol::{Problem, Response, Status};
-use crate::{Ask, client};
 
 pub(crate) fn run(
     state_dir: &Path,
@@ -16,7 +16,6 @@ pub(crate) fn run(
     ask: Ask,
     projects: &[PathBuf],
 ) -> Result<Response, Status> {
-    let socket = client::socket(state_dir)?;
     let directory =
         std::env::current_dir().map_err(|e| Status::Cannot(Problem::NoCurrentDir(e)))?;
     let mut absolute = Vec::with_capacity(projects.len());
@@ -29,11 +28,15 @@ pub(crate) fn run(
         })?;
         absolute.push(path);
     }
-    let startup = start::ensure_supervisor(state_dir, &socket, service, ask)?;
+    let supervisor = start::supervisor(state_dir, service, ask)?;
     let request = request::Create::Fleet {
         directory,
         projects: absolute,
     };
-    let response = client::create(&socket, request)?;
+    let response = supervisor.ask(&protocol::Request::Create(request), |answer| match answer {
+        protocol::Response::Create(created) => Some(created),
+        _ => None,
+    })?;
+    let startup = supervisor.startup;
     Ok(Response::Created { response, startup })
 }

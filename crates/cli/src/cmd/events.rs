@@ -5,22 +5,17 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use fleet_core::protocol::{Event, MAX_HOLD_MILLIS, request, response};
+use fleet_core::protocol::{self, Event, MAX_HOLD_MILLIS, request, response};
 
 use crate::client;
-use crate::protocol::{Doubt, Problem, Response, Status};
+use crate::protocol::{Doubt, Response, Status};
 use crate::ui::output::{self, ERR, Mark, OUT};
 use crate::ui::words;
 
 /// Follows from `since`, or from now, until stdout closes or the
 /// supervisor stops answering.
 pub(crate) fn run(state_dir: &Path, since: Option<i64>) -> Result<Response, Status> {
-    let socket = client::socket(state_dir)?;
-    if !client::answers(&socket) {
-        return Err(Status::NotRunning);
-    }
-    let directory =
-        std::env::current_dir().map_err(|e| Status::Cannot(Problem::NoCurrentDir(e)))?;
+    let (supervisor, directory) = client::from_here(state_dir)?;
     let mut from = since;
     let mut out = io::stdout().lock();
     // The first poll is not held, so the person hears at once what is
@@ -36,7 +31,10 @@ pub(crate) fn run(state_dir: &Path, since: Option<i64>) -> Result<Response, Stat
             fleet,
             events,
             next,
-        } = match (client::events(&socket, follow), from) {
+        } = match (
+            supervisor.ask(&protocol::Request::Events(follow), steps),
+            from,
+        ) {
             (Ok(steps), _) => steps,
             // Once something was asked, say where to go on from.
             (Err(Status::CouldNotTell(_)), Some(next)) => {
@@ -55,6 +53,14 @@ pub(crate) fn run(state_dir: &Path, since: Option<i64>) -> Result<Response, Stat
     }
 }
 
+/// One poll's pick.
+fn steps(answer: protocol::Response) -> Option<response::Events> {
+    match answer {
+        protocol::Response::Events(steps) => Some(steps),
+        _ => None,
+    }
+}
+
 /// Writes each event as its line, then flushes, so a pipe sees it at once.
 /// Any write that fails means the reader went away.
 fn print_all(out: &mut impl Write, events: &[Event], every: bool) -> io::Result<()> {
@@ -69,17 +75,6 @@ mod tests {
     use super::*;
     use fleet_core::protocol::Event;
     use fleet_core::record::Step;
-
-    #[test]
-    fn events_never_starts_the_supervisor() {
-        let dir = std::env::temp_dir().join(format!("fleet-events-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        assert!(matches!(run(&dir, None), Err(Status::NotRunning)));
-        let socket = fleet_core::protocol::socket_path(&dir).ok();
-        assert!(socket.is_some_and(|s| !s.exists()));
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
     /// A stdout whose reader went away.
     struct Closed;

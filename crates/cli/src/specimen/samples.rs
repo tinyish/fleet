@@ -542,7 +542,9 @@ fn doubts(kind: DoubtKind) -> Vec<Doubt> {
             }
             out
         }
-        DoubtKind::OddReply => vec![Doubt::OddReply { to: "create" }],
+        DoubtKind::OddReply => vec![Doubt::OddReply {
+            during: During::Creating,
+        }],
         DoubtKind::Following => vec![Doubt::Following { next: 1044 }],
     }
 }
@@ -550,6 +552,8 @@ fn doubts(kind: DoubtKind) -> Vec<Doubt> {
 fn durings() -> Vec<During> {
     DuringKind::iter()
         .flat_map(|kind| match kind {
+            // Never said: see `During::Greeting`.
+            DuringKind::Greeting => vec![],
             DuringKind::Creating => vec![During::Creating],
             DuringKind::TurningOn => Startup::iter().map(During::TurningOn).collect(),
             DuringKind::TurningOnProject => Startup::iter().map(During::TurningOnProject).collect(),

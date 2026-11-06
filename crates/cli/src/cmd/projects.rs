@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use fleet_core::protocol::{self, request, response};
 use fleet_core::tools::ServiceManager;
 
 use crate::cmd::start;
@@ -25,21 +26,29 @@ pub(crate) fn start(
     service: &dyn ServiceManager,
     project: &Path,
 ) -> Result<Response, Status> {
-    let socket = client::socket(state_dir)?;
     let project = absolute(project)?;
-    let startup = start::ensure_supervisor(state_dir, &socket, service, Ask::Yes)?;
-    let response = client::start_project(&socket, project, startup)?;
+    let supervisor = start::supervisor(state_dir, service, Ask::Yes)?;
+    let request = protocol::Request::Start(request::Start::Project { project });
+    let response = supervisor.ask(&request, |answer| match answer {
+        protocol::Response::Start(response::Start::ProjectOn(on)) => Some(on),
+        _ => None,
+    })?;
+    let startup = supervisor.startup;
     Ok(Response::ProjectOn { response, startup })
 }
 
 /// Turns one project off; the supervisor keeps running. With the supervisor
 /// down nothing is on, and the project's stored on or off is left as it was.
 pub(crate) fn stop(state_dir: &Path, project: &Path) -> Result<Response, Status> {
-    let socket = client::socket(state_dir)?;
     let project = absolute(project)?;
-    if !client::answers(&socket) {
-        return Ok(Response::SupervisorWasNotRunning);
-    }
-    let response = client::stop_project(&socket, project)?;
+    let supervisor = match client::running(state_dir) {
+        Err(Status::NotRunning) => return Ok(Response::SupervisorWasNotRunning),
+        found => found?,
+    };
+    let request = protocol::Request::Stop(request::Stop::Project { project });
+    let response = supervisor.ask(&request, |answer| match answer {
+        protocol::Response::Stop(response::Stop::ProjectOff(off)) => Some(off),
+        _ => None,
+    })?;
     Ok(Response::ProjectOff(response))
 }

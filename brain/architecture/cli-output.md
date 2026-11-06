@@ -126,12 +126,16 @@ A command never builds a sentence. It ends with data, and `output::report`
 words it with the ink of the stream it ends on:
 
 ```rust
-// create.rs: the client returns only create's kind of reply, or the Status
-let response = client::create(&socket, request)?;   // Result<protocol::response::Create, Status>
-Ok(Response::Created { response, startup })
+// create.rs: the pick keeps only create's kind of reply
+let response = supervisor.ask(&request, |answer| match answer {
+    protocol::Response::Create(created) => Some(created),
+    _ => None,
+})?;                                                // Result<protocol::response::Create, Status>
+Ok(Response::Created { response, startup: supervisor.startup })
 
-// client.rs: one helper per command; another kind of reply is Doubt::OddReply,
-// the supervisor's no is Status::Refused, a failed conversation is CouldNotTell
+// client.rs: one ask for every request, its time limit and During from one
+// match over Request; a reply the pick does not take is Doubt::OddReply, the
+// supervisor's no is Status::Refused, a failed conversation is CouldNotTell
 
 // ui/output.rs: words it, marks it, picks the stream and the exit code
 Ok(response) => line(Mark::Done, &words::response(response, OUT)),        // exit 0
@@ -178,7 +182,7 @@ and word it in `words::tool`. A driver never formats a sentence.
 
 **A new thing the supervisor can say.** Add a variant to the command's own
 `protocol::response::…` enum (or a new command's enum, plus its `Request` and
-`Response` variants and a `client` helper) for something it did, or a
+`Response` variants, and its arm in `client`'s `asking`) for something it did, or a
 variant of its area's enum in `crates/core/src/status.rs` (`Fleet`, `Project`,
 `File`, `Session`, `Adapter`, `Message`, `Wait`, `Naming`; a new area is a new variant of `Status` with an
 enum of its own) for a reason it says no. Field names follow the AIPs

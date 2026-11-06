@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fleet_core::protocol::{ProtocolError, Reply, Request, Response, request, response};
+use fleet_core::protocol::request;
+use fleet_core::protocol::{ProtocolError, Reply, Request, Response, response};
 use fleet_core::tools::{ADAPTER_TIMEOUT, DOWNLOAD_TIMEOUT};
 
 use crate::protocol::{Doubt, During, Problem, Startup, Status};
@@ -18,32 +19,14 @@ pub(crate) const ONE: Duration = Duration::from_secs(2);
 /// How long start and stop wait for the supervisor to come or go.
 pub(crate) const WAIT: Duration = Duration::from_secs(10);
 
-/// How long status waits for its answer: the supervisor asks each kind of
-/// adapter in turn to read its sessions, and each may take `ADAPTER_TIMEOUT`
-/// before it is a fault. Two hung kinds, one after the other, plus a margin
-/// (60 s), so their faults reach it.
-pub(crate) const LOOK: Duration = Duration::from_secs(2 * ADAPTER_TIMEOUT.as_secs() + 20);
-
-/// How long spawn waits for its answer: longer than a first fetch of an
-/// adapter at its slowest, two downloads (its manifest, then its build), the
-/// build's protocol check and then its launch, plus a margin (170 s), so a
-/// slow fetch's or adapter's fault reaches it, and a spawn that succeeds
-/// tells its caller the session's id.
-pub(crate) const LAUNCH: Duration =
-    Duration::from_secs(2 * DOWNLOAD_TIMEOUT.as_secs() + 2 * ADAPTER_TIMEOUT.as_secs() + 10);
-
 /// The supervisor's socket in `state_dir`.
 pub(crate) fn socket(state_dir: &Path) -> Result<PathBuf, Status> {
     protocol::socket_path(state_dir).map_err(|e| Status::Cannot(Problem::SocketPathTooLong(e.0)))
 }
 
-/// Asks the supervisor one thing, waiting at most `within` for each of the
-/// question and the answer: its reply, or why the conversation failed.
-pub(crate) fn ask(
-    socket: &Path,
-    request: &Request,
-    within: Duration,
-) -> Result<Reply, ProtocolError> {
+/// Says `request` to the supervisor, waiting at most `within` for each of
+/// the question and the answer: its reply, or why the conversation failed.
+fn exchange(socket: &Path, request: &Request, within: Duration) -> Result<Reply, ProtocolError> {
     let stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(within))?;
     stream.set_write_timeout(Some(within))?;
@@ -54,7 +37,7 @@ pub(crate) fn ask(
 
 pub(crate) fn answers(socket: &Path) -> bool {
     matches!(
-        ask(socket, &Request::Hello, ONE),
+        exchange(socket, &Request::Hello, ONE),
         Ok(Reply::Response(Response::Hello(_)))
     )
 }
@@ -77,7 +60,7 @@ pub(crate) enum Hello {
 /// Asks the supervisor for hello, and says how that went.
 pub(crate) fn hello(socket: &Path) -> Hello {
     use std::io::ErrorKind;
-    match ask(socket, &Request::Hello, ONE) {
+    match exchange(socket, &Request::Hello, ONE) {
         Ok(Reply::Response(Response::Hello(hello))) => Hello::Answered(hello),
         Ok(_) => Hello::Odd,
         Err(ProtocolError::Io(e))
@@ -108,240 +91,217 @@ pub(crate) fn wait_until(socket: &Path, want: bool, within: Duration) -> bool {
     }
 }
 
-/// Asks for `request`, waiting at most `within`, and keeps only the reply
-/// of the kind `pick` takes: a reply of another kind is an odd reply, the
-/// supervisor's no is a refusal, and a failed conversation is something the
-/// CLI cannot tell.
-fn ask_for<T>(
-    socket: &Path,
-    request: &Request,
-    within: Duration,
-    during: During,
-    to: &'static str,
-    pick: impl FnOnce(Response) -> Option<T>,
-) -> Result<T, Status> {
-    match ask(socket, request, within) {
-        Ok(Reply::Response(response)) => {
-            pick(response).ok_or(Status::CouldNotTell(Doubt::OddReply { to }))
+/// The supervisor, answering on its socket.
+pub(crate) struct Supervisor {
+    /// Its socket.
+    pub(crate) socket: PathBuf,
+    /// Whether it was running or this command started it.
+    pub(crate) startup: Startup,
+}
+
+impl Supervisor {
+    /// Asks it `request`, waiting as long as that kind of request may take,
+    /// and keeps what `pick` takes of its response: a response `pick` does
+    /// not take is an odd reply, the supervisor's no is a refusal, and a
+    /// failed conversation is something the CLI cannot tell.
+    pub(crate) fn ask<T>(
+        &self,
+        request: &Request,
+        pick: impl FnOnce(Response) -> Option<T>,
+    ) -> Result<T, Status> {
+        let (within, during) = asking(request, self.startup);
+        match exchange(&self.socket, request, within) {
+            Ok(Reply::Response(answer)) => {
+                pick(answer).ok_or(Status::CouldNotTell(Doubt::OddReply { during }))
+            }
+            Ok(Reply::Status(status)) => Err(Status::Refused(status)),
+            Err(error) => Err(Status::CouldNotTell(Doubt::Socket { during, error })),
         }
-        Ok(Reply::Status(status)) => Err(Status::Refused(status)),
-        Err(error) => Err(Status::CouldNotTell(Doubt::Socket { during, error })),
     }
 }
 
-/// `fleet create`'s request.
-pub(crate) fn create(socket: &Path, create: request::Create) -> Result<response::Create, Status> {
-    ask_for(
-        socket,
-        &Request::Create(create),
-        ONE,
-        During::Creating,
-        "create",
-        |r| match r {
-            Response::Create(created) => Some(created),
-            _ => None,
-        },
-    )
+/// The supervisor, if it answers on its socket in `state_dir`; it is never
+/// started here.
+pub(crate) fn running(state_dir: &Path) -> Result<Supervisor, Status> {
+    let socket = socket(state_dir)?;
+    if !answers(&socket) {
+        return Err(Status::NotRunning);
+    }
+    let startup = Startup::WasRunning;
+    Ok(Supervisor { socket, startup })
 }
 
-/// `fleet status`'s request, from `directory`.
-pub(crate) fn overview(socket: &Path, directory: PathBuf) -> Result<response::Overview, Status> {
-    ask_for(
-        socket,
-        &Request::Overview { directory },
-        LOOK,
-        During::Looking,
-        "status",
-        |r| match r {
-            Response::Overview(overview) => Some(overview),
-            _ => None,
-        },
-    )
+/// The supervisor, and the current directory to build a request from, for
+/// a command asked from here. It never starts the supervisor: starting it
+/// would turn every project on.
+pub(crate) fn from_here(state_dir: &Path) -> Result<(Supervisor, PathBuf), Status> {
+    let supervisor = running(state_dir)?;
+    let directory =
+        std::env::current_dir().map_err(|e| Status::Cannot(Problem::NoCurrentDir(e)))?;
+    Ok((supervisor, directory))
 }
 
-/// `fleet message`'s request.
-pub(crate) fn message(
-    socket: &Path,
-    message: request::Message,
-) -> Result<response::Message, Status> {
-    ask_for(
-        socket,
-        &Request::Message(message),
-        WAIT,
-        During::Messaging,
-        "message",
-        |r| match r {
-            Response::Message(queued) => Some(queued),
-            _ => None,
-        },
-    )
+/// How long `request` may take, and what it asks for, said when talking
+/// fails; `startup` is how the supervisor was found.
+fn asking(request: &Request, startup: Startup) -> (Duration, During) {
+    match request {
+        Request::Hello => (ONE, During::Greeting),
+        Request::Create(_) => (ONE, During::Creating),
+        Request::Start(request::Start::All) => (ONE, During::TurningOn(startup)),
+        Request::Start(request::Start::Project { .. }) => (ONE, During::TurningOnProject(startup)),
+        Request::Stop(request::Stop::All) => (ONE, During::TurningOff),
+        Request::Stop(request::Stop::Project { .. }) => (ONE, During::TurningOffProject),
+        Request::Remove(_) => (ONE, During::Removing),
+        // The supervisor asks each kind of adapter in turn to read its
+        // sessions, and each may take `ADAPTER_TIMEOUT` before it is a
+        // fault: two hung kinds, one after the other, plus a margin (60 s),
+        // so their faults reach status.
+        Request::Overview { .. } => (
+            Duration::from_secs(2 * ADAPTER_TIMEOUT.as_secs() + 20),
+            During::Looking,
+        ),
+        Request::Message(_) => (WAIT, During::Messaging),
+        // Longer than a first fetch of an adapter at its slowest, two
+        // downloads (its manifest, then its build), the build's protocol
+        // check and then its launch, plus a margin (170 s), so a slow fetch's
+        // or adapter's fault reaches spawn, and a spawn that succeeds tells
+        // its caller the session's id.
+        Request::Spawn(_) => (
+            Duration::from_secs(
+                2 * DOWNLOAD_TIMEOUT.as_secs() + 2 * ADAPTER_TIMEOUT.as_secs() + 10,
+            ),
+            During::Spawning,
+        ),
+        Request::End(_) => (WAIT, During::Ending),
+        Request::Events(request::Events::Follow { hold_millis, .. }) => {
+            (held(*hold_millis), During::Following)
+        }
+        Request::Wait(
+            request::Wait::For { hold_millis, .. } | request::Wait::On { hold_millis, .. },
+        ) => (held(*hold_millis), During::Waiting),
+    }
 }
 
-/// `fleet spawn`'s request.
-pub(crate) fn spawn(socket: &Path, spawn: request::Spawn) -> Result<response::Spawn, Status> {
-    ask_for(
-        socket,
-        &Request::Spawn(spawn),
-        LAUNCH,
-        During::Spawning,
-        "spawn",
-        |r| match r {
-            Response::Spawn(spawned) => Some(spawned),
-            _ => None,
-        },
-    )
-}
-
-/// `fleet end`'s request.
-pub(crate) fn end(socket: &Path, end: request::End) -> Result<response::End, Status> {
-    ask_for(
-        socket,
-        &Request::End(end),
-        WAIT,
-        During::Ending,
-        "end",
-        |r| match r {
-            Response::End(ended) => Some(ended),
-            _ => None,
-        },
-    )
-}
-
-/// One poll of `fleet events`, waiting for as long as the supervisor may
-/// hold it and 10 s more.
-pub(crate) fn events(socket: &Path, follow: request::Events) -> Result<response::Events, Status> {
-    let request::Events::Follow { hold_millis, .. } = &follow;
-    let within = Duration::from_millis(*hold_millis) + Duration::from_secs(10);
-    ask_for(
-        socket,
-        &Request::Events(follow),
-        within,
-        During::Following,
-        "events",
-        |r| match r {
-            Response::Events(steps) => Some(steps),
-            _ => None,
-        },
-    )
-}
-
-/// One poll of `fleet wait`, held by the supervisor at most `hold`; it waits
-/// for the answer 10 s more.
-pub(crate) fn wait(
-    socket: &Path,
-    ask: request::Wait,
-    hold: Duration,
-) -> Result<response::Wait, Status> {
-    ask_for(
-        socket,
-        &Request::Wait(ask),
-        hold + Duration::from_secs(10),
-        During::Waiting,
-        "wait",
-        |r| match r {
-            Response::Wait(waited) => Some(waited),
-            _ => None,
-        },
-    )
-}
-
-/// `fleet remove`'s request.
-pub(crate) fn remove(socket: &Path, remove: request::Remove) -> Result<response::Remove, Status> {
-    ask_for(
-        socket,
-        &Request::Remove(remove),
-        ONE,
-        During::Removing,
-        "remove",
-        |r| match r {
-            Response::Remove(removed) => Some(removed),
-            _ => None,
-        },
-    )
-}
-
-/// `fleet start`'s request for every project, after the supervisor was
-/// found or started as `startup` says.
-pub(crate) fn start_all(socket: &Path, startup: Startup) -> Result<response::AllOn, Status> {
-    ask_for(
-        socket,
-        &Request::Start(request::Start::All),
-        ONE,
-        During::TurningOn(startup),
-        "start",
-        |r| match r {
-            Response::Start(response::Start::AllOn(all)) => Some(all),
-            _ => None,
-        },
-    )
-}
-
-/// `fleet start --project`'s request.
-pub(crate) fn start_project(
-    socket: &Path,
-    project: PathBuf,
-    startup: Startup,
-) -> Result<response::ProjectOn, Status> {
-    ask_for(
-        socket,
-        &Request::Start(request::Start::Project { project }),
-        ONE,
-        During::TurningOnProject(startup),
-        "start --project",
-        |r| match r {
-            Response::Start(response::Start::ProjectOn(on)) => Some(on),
-            _ => None,
-        },
-    )
-}
-
-/// `fleet stop`'s request for every project.
-pub(crate) fn stop_all(socket: &Path) -> Result<(), Status> {
-    ask_for(
-        socket,
-        &Request::Stop(request::Stop::All),
-        ONE,
-        During::TurningOff,
-        "stop",
-        |r| match r {
-            Response::Stop(response::Stop::AllOff) => Some(()),
-            _ => None,
-        },
-    )
-}
-
-/// `fleet stop --project`'s request.
-pub(crate) fn stop_project(
-    socket: &Path,
-    project: PathBuf,
-) -> Result<response::ProjectOff, Status> {
-    ask_for(
-        socket,
-        &Request::Stop(request::Stop::Project { project }),
-        ONE,
-        During::TurningOffProject,
-        "stop --project",
-        |r| match r {
-            Response::Stop(response::Stop::ProjectOff(off)) => Some(off),
-            _ => None,
-        },
-    )
+/// How long a poll the supervisor may hold `hold_millis` is waited for: 10 s
+/// more.
+fn held(hold_millis: u64) -> Duration {
+    Duration::from_millis(hold_millis).saturating_add(Duration::from_secs(10))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ADAPTER_TIMEOUT, DOWNLOAD_TIMEOUT, LAUNCH, LOOK};
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    fn within(request: &Request) -> Duration {
+        asking(request, Startup::WasRunning).0
+    }
 
     #[test]
     fn spawn_outwaits_a_first_fetch_and_launch() {
+        let spawn = within(&Request::Spawn(request::Spawn::Session {
+            directory: "/c/app".into(),
+            role: "worker".into(),
+            working_directory: None,
+        }));
         assert!(
-            LAUNCH > 2 * DOWNLOAD_TIMEOUT + 2 * ADAPTER_TIMEOUT,
-            "{LAUNCH:?}"
+            spawn > 2 * DOWNLOAD_TIMEOUT + 2 * ADAPTER_TIMEOUT,
+            "{spawn:?}"
         );
     }
 
     #[test]
     fn status_outwaits_two_hung_adapter_kinds() {
-        assert!(LOOK > 2 * ADAPTER_TIMEOUT, "{LOOK:?}");
+        let status = within(&Request::Overview {
+            directory: "/c/app".into(),
+        });
+        assert!(status > 2 * ADAPTER_TIMEOUT, "{status:?}");
+    }
+
+    #[test]
+    fn from_here_never_starts_the_supervisor() {
+        let dir = std::env::temp_dir().join(format!("fleet-here-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(matches!(from_here(&dir), Err(Status::NotRunning)));
+        let socket = protocol::socket_path(&dir).ok();
+        assert!(socket.is_some_and(|s| !s.exists()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn end() -> Request {
+        Request::End(request::End::Session {
+            directory: "/c/app".into(),
+            name: "scribe".into(),
+        })
+    }
+
+    /// End's pick.
+    fn ended(answer: Response) -> Option<response::End> {
+        match answer {
+            Response::End(ended) => Some(ended),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn ask_keeps_what_its_pick_takes() {
+        let dir = std::env::temp_dir().join(format!("fleet-ask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let Ok(socket) = protocol::socket_path(&dir) else {
+            unreachable!()
+        };
+        let Ok(listener) = UnixListener::bind(&socket) else {
+            unreachable!()
+        };
+        let ended_one = response::End::AlreadyEnded {
+            session: "s1".into(),
+        };
+        let replies = vec![
+            Reply::Response(Response::End(ended_one.clone())),
+            Reply::Response(Response::Stop(response::Stop::AllOff)),
+            Reply::Status(protocol::Status::Message(
+                fleet_core::status::Message::EmptyText,
+            )),
+            Reply::Response(Response::Stop(response::Stop::AllOff)),
+        ];
+        let fake = thread::spawn(move || {
+            for reply in replies {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let _ = protocol::read_request(&mut BufReader::new(&stream));
+                let _ = protocol::write_reply(&mut &stream, &reply);
+            }
+        });
+        let found = Supervisor {
+            socket,
+            startup: Startup::Started,
+        };
+        assert_eq!(found.ask(&end(), ended).ok(), Some(ended_one));
+        assert!(matches!(
+            found.ask(&end(), ended),
+            Err(Status::CouldNotTell(Doubt::OddReply {
+                during: During::Ending
+            }))
+        ));
+        assert!(matches!(found.ask(&end(), ended), Err(Status::Refused(_))));
+        let start = Request::Start(request::Start::All);
+        assert!(matches!(
+            found.ask(&start, ended),
+            Err(Status::CouldNotTell(Doubt::OddReply {
+                during: During::TurningOn(Startup::Started)
+            }))
+        ));
+        let _ = fake.join();
+        assert!(matches!(
+            found.ask(&end(), ended),
+            Err(Status::CouldNotTell(Doubt::Socket {
+                during: During::Ending,
+                ..
+            }))
+        ));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

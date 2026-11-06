@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use fleet_core::protocol::{MAX_HOLD_MILLIS, Waited, request, response};
+use fleet_core::protocol::{self, MAX_HOLD_MILLIS, Waited, request, response};
 
 use crate::client;
 use crate::protocol::{Problem, Response, Status, WaitState};
@@ -23,12 +23,7 @@ pub(crate) fn run(
     timeout: Option<&str>,
 ) -> Result<Response, Status> {
     let timeout = timeout_of(timeout)?;
-    let socket = client::socket(state_dir)?;
-    if !client::answers(&socket) {
-        return Err(Status::NotRunning);
-    }
-    let directory =
-        std::env::current_dir().map_err(|e| Status::Cannot(Problem::NoCurrentDir(e)))?;
+    let (supervisor, directory) = client::from_here(state_dir)?;
     let deadline = timeout.map(|t| Instant::now() + t);
     let states: Vec<_> = states.iter().copied().map(WaitState::name).collect();
     // The first poll names what to wait on, and is not held, so the person
@@ -57,7 +52,11 @@ pub(crate) fn run(
                 hold_millis,
             },
         };
-        match client::wait(&socket, ask, hold)? {
+        let waited = supervisor.ask(&protocol::Request::Wait(ask), |answer| match answer {
+            protocol::Response::Wait(waited) => Some(waited),
+            _ => None,
+        })?;
+        match waited {
             response::Wait::Reached { on, session, state } => {
                 return Ok(Response::Reached { on, session, state });
             }
@@ -158,20 +157,6 @@ mod tests {
             hold_for(Some(start), start + Duration::from_secs(1)),
             Duration::ZERO
         );
-    }
-
-    #[test]
-    fn wait_never_starts_the_supervisor() {
-        let dir = std::env::temp_dir().join(format!("fleet-wait-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        assert!(matches!(
-            run(&dir, "scribe", &[WaitState::Idle], None),
-            Err(Status::NotRunning)
-        ));
-        let socket = fleet_core::protocol::socket_path(&dir).ok();
-        assert!(socket.is_some_and(|s| !s.exists()));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

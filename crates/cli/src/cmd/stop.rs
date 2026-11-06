@@ -3,10 +3,11 @@
 use std::path::Path;
 use std::time::Duration;
 
+use fleet_core::protocol::{self, request, response};
 use fleet_core::tools::ServiceManager;
 
-use crate::client;
-use crate::protocol::{Doing, Doubt, Problem, Response, Status};
+use crate::client::{self, Supervisor};
+use crate::protocol::{Doing, Doubt, Problem, Response, Startup, Status};
 use crate::ui::{self, words};
 
 pub(crate) fn run(state_dir: &Path, service: &dyn ServiceManager) -> Result<Response, Status> {
@@ -29,7 +30,15 @@ fn run_within(
         spinner.clear();
     }
     if answers {
-        client::stop_all(&socket)?;
+        let supervisor = Supervisor {
+            socket: socket.clone(),
+            startup: Startup::WasRunning,
+        };
+        let request = protocol::Request::Stop(request::Stop::All);
+        supervisor.ask(&request, |answer| match answer {
+            protocol::Response::Stop(response::Stop::AllOff) => Some(()),
+            _ => None,
+        })?;
     }
     service.stop_and_disable(state_dir).map_err(|error| {
         Status::Cannot(Problem::ServiceManager {
@@ -59,7 +68,7 @@ fn run_within(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::Cell;
     use std::fs;
@@ -69,12 +78,14 @@ mod tests {
     use fleet_core::tools::{SupervisorUnit, ToolError};
 
     /// A service manager whose supervisor never answers on the socket.
-    struct Silent {
-        running: bool,
-        stopped: Cell<bool>,
+    pub(crate) struct Silent {
+        pub(crate) running: bool,
+        pub(crate) started: Cell<bool>,
+        pub(crate) stopped: Cell<bool>,
     }
     impl ServiceManager for Silent {
         fn enable_and_start(&self, _: &SupervisorUnit) -> Result<(), ToolError> {
+            self.started.set(true);
             Ok(())
         }
         fn stop_and_disable(&self, _: &Path) -> Result<(), ToolError> {
@@ -103,6 +114,7 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let service = Silent {
             running,
+            started: Cell::new(false),
             stopped: Cell::new(false),
         };
         let ending = run_within(&dir, &service, Duration::from_millis(200));

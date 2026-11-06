@@ -531,13 +531,16 @@ fn unsure(doubt: &Doubt) -> String {
         Doubt::Socket { during, error } => {
             format!("{}: {}", during_words(*during), socket(error))
         }
-        Doubt::OddReply { to } => format!("the supervisor gave an unexpected answer to {to}"),
+        Doubt::OddReply { during } => {
+            format!("{} got an unexpected answer", during_words(*during))
+        }
         Doubt::Following { .. } => "the supervisor stopped answering".into(),
     }
 }
 
 fn during_words(during: During) -> String {
     match during {
+        During::Greeting => "asking the supervisor whether it is there".into(),
         During::Creating => "asking the supervisor to create the fleet".into(),
         During::Removing => "asking the supervisor to remove the fleet".into(),
         During::TurningOn(startup) => {

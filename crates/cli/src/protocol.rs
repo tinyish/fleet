@@ -378,8 +378,8 @@ pub(crate) enum Doubt {
     },
     /// The supervisor answered something the request does not expect.
     OddReply {
-        /// The request it was answering.
-        to: &'static str,
+        /// What the CLI was asking for.
+        during: During,
     },
     /// The supervisor stopped answering while `fleet events` followed.
     Following {
@@ -396,6 +396,9 @@ pub(crate) enum Doubt {
     strum_discriminants(name(DuringKind), derive(strum::EnumIter))
 )]
 pub(crate) enum During {
+    /// Asking whether the supervisor is there. Never said: a hello that
+    /// fails means it is not running.
+    Greeting,
     /// Creating a fleet.
     Creating,
     /// Turning every project on, after finding or starting the supervisor.
