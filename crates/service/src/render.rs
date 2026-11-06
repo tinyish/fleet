@@ -157,6 +157,7 @@ Description=tinyfleet supervisor
 ExecStart={program} supervise
 Environment={env}
 {search_path}Restart=on-failure
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -199,6 +200,7 @@ mod tests {
         assert!(text.contains("Environment=\"FLEET_STATE_DIR=/home/a/50%%/$x\"\n"));
         assert!(text.contains("WantedBy=default.target\n"));
         assert!(text.contains("Restart=on-failure\n"));
+        assert!(text.contains("KillMode=process\n"));
     }
 
     #[test]
