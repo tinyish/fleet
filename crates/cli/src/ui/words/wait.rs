@@ -141,6 +141,7 @@ pub(super) fn hint(refusal: &Wait, ink: Ink) -> Option<String> {
 pub(super) fn dropped(why: Dropped) -> &'static str {
     match why {
         Dropped::SessionEnded => "its session ended",
+        Dropped::SessionGone => "its session died",
         Dropped::SeatRemoved => "its seat was taken out",
         Dropped::FleetRemoved => "its fleet was removed",
     }

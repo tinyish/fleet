@@ -976,7 +976,7 @@ mod tests {
         );
         assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(None));
         let idle = SessionState::Idle;
-        assert!(state.write(|w| w.set_state("s1", Some(idle))).is_ok());
+        assert!(state.write(|w| w.set_state("s1", Some(idle), &[])).is_ok());
         assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(Some(idle)));
         let _ = std::fs::remove_dir_all(dir);
     }

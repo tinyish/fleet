@@ -126,6 +126,7 @@ pub(super) fn samples(kind: WaitKind) -> Vec<Wait> {
         K::FleetRemoved => vec![W::FleetRemoved { fleet: path(APP) }],
         K::Dropped => [
             Dropped::SessionEnded,
+            Dropped::SessionGone,
             Dropped::SeatRemoved,
             Dropped::FleetRemoved,
         ]

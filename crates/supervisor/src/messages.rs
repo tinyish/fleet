@@ -3,7 +3,8 @@
 //! the tending loop does each tick, types every message waiting for an idle
 //! agent in as one paste, then holds that session until it has left idle or
 //! 30 s pass. A message that can no longer reach anyone is dropped, and
-//! recorded, in the change that ends its session, seat or fleet.
+//! recorded, in the change that ends its session, seat or fleet, or that
+//! records its session gone.
 
 use std::path::{Path, PathBuf};
 
@@ -141,7 +142,7 @@ fn type_in(sup: &Supervisor, row: &SessionRow, ids: &[String]) -> bool {
         // What it reads next is recorded afresh: after a paste, idle again
         // is the agent's answer.
         if !delivered.is_empty() {
-            w.set_state(&row.id, None)?;
+            w.set_state(&row.id, None, &[])?;
         }
         for message in &delivered {
             w.record(&Step::MessageDelivered {

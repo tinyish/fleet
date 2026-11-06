@@ -112,9 +112,10 @@ pub(crate) fn tick(sup: &Supervisor, now_millis: i64) {
 }
 
 /// Records each session whose state, as `observed`, differs from the one
-/// last recorded on its row: in one write, its row and its step. A session
-/// still idle under the hold of a paste is not recorded yet: its idle is
-/// the answer only once its turn was seen, or the hold has passed.
+/// last recorded on its row: in one write, its row and its step, and for
+/// one gone, the messages held for it dropped. A session still idle under
+/// the hold of a paste is not recorded yet: its idle is the answer only
+/// once its turn was seen, or the hold has passed.
 fn record_states(sup: &Supervisor, rows: &[SessionRow], observed: &Observed, now_millis: i64) {
     let holds = sup.holds();
     let changed: Vec<(&SessionRow, SessionState)> = rows
@@ -129,13 +130,13 @@ fn record_states(sup: &Supervisor, rows: &[SessionRow], observed: &Observed, now
     }
     let written = sup.lock().write(|w| {
         for (row, now) in &changed {
-            w.set_state(&row.id, Some(*now))?;
-            w.record(&Step::SessionStateChanged {
+            let step = Step::SessionStateChanged {
                 session: row.id.clone(),
                 fleet: row.fleet.as_ref().map(|f| f.display().to_string()),
                 seat: row.seat.clone(),
                 state: *now,
-            })?;
+            };
+            w.set_state(&row.id, Some(*now), &[step])?;
         }
         Ok(())
     });

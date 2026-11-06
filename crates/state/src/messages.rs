@@ -152,13 +152,14 @@ impl Write<'_> {
     }
 
     /// Drops the messages held for session `session`, of the fleet
-    /// `fleet`, recording each dropped as its session ended.
+    /// `fleet`, recording each dropped for `why`.
     pub(crate) fn drop_for_session(
         &mut self,
         session: &str,
         fleet: Option<&str>,
+        why: Dropped,
     ) -> Result<(), StateError> {
-        self.drop_held("session = ?1", &[&session], Dropped::SessionEnded, fleet)
+        self.drop_held("session = ?1", &[&session], why, fleet)
     }
 
     /// Drops the messages held for seat `seat` of the fleet `fleet`,

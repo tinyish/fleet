@@ -165,19 +165,31 @@ fn held_messages_survive_a_restart_and_an_off_fleets_seat_still_gets_them() {
 }
 
 #[test]
-fn a_seat_message_stays_held_while_its_seat_backs_off() {
+fn a_seat_message_stays_held_while_its_seat_backs_off_and_its_gone_sessions_drop() {
     let r = rig("sc-backoff");
     r.tick(1_000);
     kill_all(&r.mux);
     r.tick(2_000);
+    let to_session = r.send(&r.seated().id, "for the session");
     // A second quick end: the seat waits 5 s before its next revival.
     kill_all(&r.mux);
     let m = r.send("scribe", "hi");
     r.tick(3_000);
     assert!(!r.sup.tending.down().is_empty());
     assert_eq!(typed(&r.mux), []);
-    assert_eq!(held(&r.sup).len(), 1, "held, not dropped");
-    assert!(!steps(&r.sup).iter().any(|s| s == "MESSAGE_DROPPED"));
+    let left: Vec<String> = held(&r.sup).into_iter().map(|m| m.text).collect();
+    assert_eq!(left, ["hi"], "the seat's held, its gone session's dropped");
+    assert_eq!(
+        r.wait(&to_session, &[]),
+        refused(status::Wait::Dropped {
+            message: to_session.clone(),
+            why: Dropped::SessionGone
+        })
+    );
+    assert_eq!(
+        r.dropped_after(&to_session),
+        Some(r.in_fleet("SESSION_STATE_CHANGED"))
+    );
     assert!(waiting_on(&r.wait(&m, &[])).is_some());
     r.tick(8_000);
     let new = r.seated();
@@ -223,10 +235,45 @@ fn a_gone_seat_sessions_messages_drop_at_its_revival() {
         r.wait(&m, &[]),
         refused(status::Wait::Dropped {
             message: m.clone(),
-            why: Dropped::SessionEnded
+            why: Dropped::SessionGone
         })
     );
     assert_eq!(r.dropped_after(&m), Some(r.in_fleet("SESSION_GONE")));
+}
+
+#[test]
+fn a_spawned_sessions_messages_drop_once_it_is_gone_and_their_wait_ends() {
+    let r = rig("sc-drop-spawned-gone");
+    let id = r.spawn();
+    let m = r.send(&id, "hi");
+    let w = r.wait(&m, &[]);
+    assert!(waiting_on(&w).is_some(), "{w:?}");
+    kill_all(&r.mux);
+    r.tick(1_000);
+    assert_eq!(held(&r.sup), []);
+    let dropped = refused(status::Wait::Dropped {
+        message: m.clone(),
+        why: Dropped::SessionGone,
+    });
+    let on = Waited::Message { message: m.clone() };
+    assert_eq!(r.wait_on(on, &[], next_of(&w)), dropped);
+    assert_eq!(r.wait(&m, &[]), dropped);
+    assert_eq!(
+        r.dropped_after(&m),
+        Some(r.in_fleet("SESSION_STATE_CHANGED"))
+    );
+    assert_eq!(
+        r.end(&r.app, &id),
+        Reply::Response(Response::End(response::End::Ended {
+            session: id.clone(),
+            seat: None
+        }))
+    );
+    let drops = steps(&r.sup)
+        .iter()
+        .filter(|s| *s == "MESSAGE_DROPPED")
+        .count();
+    assert_eq!(drops, 1, "ending it later drops nothing more");
 }
 
 #[test]

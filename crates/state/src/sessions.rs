@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use fleet_core::agent::SessionState;
+use fleet_core::messages::Dropped;
 use fleet_core::tools::ToolError;
 use rusqlite::{OptionalExtension, params};
 
@@ -114,8 +115,10 @@ impl Write<'_> {
 
     /// Forgets session `id` and runs `end`, then records `step`, the
     /// end's, and drops the messages held for the session, recording each
-    /// dropped. If `end` fails, the session stays. The row it forgot; none,
-    /// running and recording nothing, when there is no such session.
+    /// dropped as its session gone when `step` clears it as gone, else as
+    /// its session ended. If `end` fails, the session stays. The row it
+    /// forgot; none, running and recording nothing, when there is no such
+    /// session.
     ///
     /// # Errors
     ///
@@ -139,13 +142,20 @@ impl Write<'_> {
                 .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
             end().map_err(StateError::Tool)?;
             self.record(step)?;
-            self.drop_for_session(id, row.fleet.as_deref().map(utf8).transpose()?)?;
+            let fleet = row.fleet.as_deref().map(utf8).transpose()?;
+            let why = match step {
+                Step::SessionGone { .. } => Dropped::SessionGone,
+                _ => Dropped::SessionEnded,
+            };
+            self.drop_for_session(id, fleet, why)?;
         }
         Ok(row)
     }
 
-    /// Keeps `state` as the last state recorded for session `session`; none
-    /// clears it, so the next reading is recorded whatever it is.
+    /// Keeps `state` as the last state recorded for session `session`, and
+    /// records `steps`, the change's; none clears it, so the next reading
+    /// is recorded whatever it is. Gone is final, so a session recorded
+    /// gone then drops the messages held for it, recording each dropped.
     ///
     /// # Errors
     ///
@@ -154,6 +164,7 @@ impl Write<'_> {
         &mut self,
         session: &str,
         state: Option<SessionState>,
+        steps: &[Step],
     ) -> Result<(), StateError> {
         let json = state
             .map(|s| serde_json::to_string(&s))
@@ -163,7 +174,20 @@ impl Write<'_> {
             "UPDATE sessions SET state = ?1 WHERE id = ?2",
             params![json, session],
         )?;
-        Ok(())
+        steps.iter().try_for_each(|step| self.record(step))?;
+        if state != Some(SessionState::Gone) {
+            return Ok(());
+        }
+        let fleet: Option<String> = self
+            .tx
+            .query_row(
+                "SELECT fleet FROM sessions WHERE id = ?1",
+                params![session],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        self.drop_for_session(session, fleet.as_deref(), Dropped::SessionGone)
     }
 
     /// Whether a fleet is registered in `directory`, as this transaction

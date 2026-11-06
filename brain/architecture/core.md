@@ -185,9 +185,9 @@ message to a seat goes to whichever of its sessions is live when its agent is
 next idle, so one sent while it is being revived waits for the new session;
 one to an agent that needs you waits until someone answers it: nothing is ever
 typed at a prompt. A project off stops reviving, not delivering. A message
-that can no longer reach anyone (its session ended or cleared as gone, its
-seat taken out of the config, its fleet removed) is dropped in the same
-change, and recorded dropped. Status counts the messages waiting for each seat
+that can no longer reach anyone (its session ended or gone, its seat taken
+out of the config, its fleet removed) is dropped in the same change, and
+recorded dropped. Status counts the messages waiting for each seat
 and session. Reading the answer is observe's.
 
 **States.** Observe reports one of six states for every session, whatever its

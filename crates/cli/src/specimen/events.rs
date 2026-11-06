@@ -156,6 +156,7 @@ fn ends() -> Vec<Step> {
 fn drops() -> Vec<Step> {
     [
         Dropped::SessionEnded,
+        Dropped::SessionGone,
         Dropped::SeatRemoved,
         Dropped::FleetRemoved,
     ]

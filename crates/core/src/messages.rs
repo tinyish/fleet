@@ -60,8 +60,10 @@ pub enum Recipient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Dropped {
-    /// Its session was stopped, or cleared as gone.
+    /// Its session was stopped.
     SessionEnded,
+    /// Its session died: its pane ended.
+    SessionGone,
     /// Its seat was taken out of its fleet's config.
     SeatRemoved,
     /// Its seat's fleet was removed, or forgotten.
