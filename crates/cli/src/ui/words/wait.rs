@@ -103,17 +103,6 @@ fn took(after: Duration) -> String {
 /// Why the supervisor refused a wait, or why its state can never come.
 pub(super) fn refused(refusal: &Wait, ink: Ink) -> String {
     match refusal {
-        Wait::NoSuchName {
-            name,
-            fleet: Some(fleet),
-        } => format!(
-            "the fleet in {} has no seat {}, and no session or message has that id",
-            ink.path(fleet),
-            ink.accent(name)
-        ),
-        Wait::NoSuchName { name, fleet: None } => {
-            format!("no session or message has the id {}", ink.accent(name))
-        }
         Wait::NoStates { name } => {
             format!("say which states to wait for {} to reach", ink.accent(name))
         }
@@ -136,10 +125,6 @@ pub(super) fn refused(refusal: &Wait, ink: Ink) -> String {
 /// What to do about it.
 pub(super) fn hint(refusal: &Wait, ink: Ink) -> Option<String> {
     match refusal {
-        Wait::NoSuchName { .. } => Some(format!(
-            "run {} to see the seats and sessions there are",
-            ink.accent("fleet status")
-        )),
         Wait::NoStates { name } => Some(format!(
             "for example: {}",
             ink.accent(format!("fleet wait {name} idle"))
@@ -165,22 +150,9 @@ pub(super) fn dropped(why: Dropped) -> &'static str {
 mod tests {
     use super::*;
     use crate::ui::output::ERR;
-    use std::path::PathBuf;
 
     fn plain(text: &str) -> String {
         console::strip_ansi_codes(text).into_owned()
-    }
-
-    #[test]
-    fn nobody_by_that_name_says_where_it_looked() {
-        let here = Wait::NoSuchName {
-            name: "critic".into(),
-            fleet: Some(PathBuf::from("/code/app")),
-        };
-        assert_eq!(
-            plain(&refused(&here, ERR.piped())),
-            "the fleet in /code/app has no seat critic, and no session or message has that id"
-        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Why the supervisor says no to a wait: what it names, and why the state
-//! it waits for can never come.
+//! Why the supervisor says no to a wait: the states it asks for, and why
+//! the state it waits for can never come.
 
 use std::path::PathBuf;
 
@@ -16,15 +16,6 @@ use crate::messages::Dropped;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Wait {
-    /// No seat of the fleet here, no session and no message goes by this
-    /// name.
-    NoSuchName {
-        /// The name given.
-        name: String,
-        /// The fleet whose seats were searched: the one holding the
-        /// directory asked from, if any.
-        fleet: Option<PathBuf>,
-    },
     /// A seat or a session was given no state to wait for.
     NoStates {
         /// The name given.

@@ -3,20 +3,21 @@
 //! with nothing to say yet, waits on the state's bell without it, until a
 //! step commits or its hold passes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use fleet_core::agent::{SessionState, StateName};
-use fleet_core::fleets;
 use fleet_core::protocol::{
-    BATCH_BYTES, Event, MAX_HOLD_MILLIS, Reply, Response, Waited, request, response,
+    BATCH_BYTES, Event, MAX_HOLD_MILLIS, Reply, Response, Status, Waited, request, response,
 };
 use fleet_core::record::Step;
-use fleet_core::status;
+use fleet_core::seats::SeatKey;
+use fleet_core::status::{self, Takes};
 use fleet_core::waiting::{self, Verdict};
 use state::{SessionRow, State};
 
+use crate::names::{self, Named};
 use crate::{Error, lock};
 
 /// `hold_millis`, at most the longest hold.
@@ -25,7 +26,7 @@ pub(crate) fn hold(hold_millis: u64) -> Duration {
 }
 
 /// The steps from `from` (the next one when none) about the fleet holding
-/// `directory` (made canonical when it can be), with the supervisor's own,
+/// `directory`, with the supervisor's own,
 /// or every step outside every fleet; held up to `hold` while there are
 /// none.
 pub(crate) fn events(
@@ -34,10 +35,9 @@ pub(crate) fn events(
     from: Option<i64>,
     hold: Duration,
 ) -> Result<Reply, Error> {
-    let directory = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
     let (fleet, mut from, bell) = {
         let s = lock(state);
-        let fleet = fleets::holding(&s.fleets()?, &directory).map(|f| f.directory.clone());
+        let fleet = names::here(&s, directory)?.map(|f| f.directory);
         let from = match from {
             Some(from) => from,
             None => s.next_id()?,
@@ -105,65 +105,69 @@ fn first_poll(
     name: &str,
     states: &[StateName],
 ) -> Result<First, Error> {
-    let directory = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
-    let here = fleets::holding(&s.fleets()?, &directory).map(|f| f.directory.clone());
-    let rows = s.sessions()?;
     let next = s.next_id()?;
-    let refuse = |why: status::Wait| Ok(First::Decided(Reply::Status(why.into())));
-    let Some(on) = resolve(s, here.as_ref(), &rows, name)? else {
-        return refuse(status::Wait::NoSuchName {
-            name: name.into(),
-            fleet: here,
-        });
+    let refuse = |why: Status| Ok(First::Decided(Reply::Status(why)));
+    let resolved = names::resolve(s, directory, name, Takes::SeatSessionOrMessage)?;
+    let Some(named) = resolved.named else {
+        return refuse(resolved.unknown().into());
     };
-    if states.is_empty() && !matches!(on, Waited::Message { .. }) {
-        return refuse(status::Wait::NoStates { name: name.into() });
+    if states.is_empty() && !matches!(named, Named::Message(_)) {
+        return refuse(status::Wait::NoStates { name: name.into() }.into());
     }
     let wanted = |st: SessionState| states.contains(&st.name());
-    let now = match &on {
-        Waited::Seat { fleet, seat } => rows
-            .iter()
-            .filter(|r| r.fleet.as_ref() == Some(fleet) && r.seat.as_ref() == Some(seat))
-            .find_map(|r| {
-                r.state.filter(|st| wanted(*st)).map(|st| Verdict::Reached {
-                    session: r.id.clone(),
-                    state: st,
-                })
-            })
-            .unwrap_or(Verdict::Keep),
-        Waited::Session { session } => {
-            if let Some(r) = rows.iter().find(|r| r.id == *session) {
-                match r.state {
-                    Some(st) if wanted(st) => Verdict::Reached {
+    let (on, now) = match named {
+        Named::Seat(SeatKey { fleet, seat }) => {
+            let now = s
+                .sessions()?
+                .iter()
+                .filter(|r| names::of_seat(r, &fleet, &seat))
+                .find_map(|r| {
+                    r.state.filter(|st| wanted(*st)).map(|st| Verdict::Reached {
                         session: r.id.clone(),
                         state: st,
-                    },
-                    Some(SessionState::Gone) => Verdict::Never(status::Wait::Gone {
-                        session: r.id.clone(),
-                    }),
-                    _ => Verdict::Keep,
-                }
-            } else {
-                // No row: it was ended, or cleared as gone. Only what ended
-                // it counts, never a state it had before.
-                let endings: Vec<_> = s
-                    .steps_with_session(session)?
-                    .into_iter()
-                    .filter(|e| ends(&e.step))
-                    .collect();
-                waiting::judge(&on, states, &endings)
-            }
+                    })
+                })
+                .unwrap_or(Verdict::Keep);
+            (Waited::Seat { fleet, seat }, now)
         }
-        Waited::Message { message } => {
-            let steps = s.steps_with_message(message)?;
+        Named::Session(row) => {
+            let now = match row.state {
+                Some(st) if wanted(st) => Verdict::Reached {
+                    session: row.id.clone(),
+                    state: st,
+                },
+                Some(SessionState::Gone) => Verdict::Never(status::Wait::Gone {
+                    session: row.id.clone(),
+                }),
+                _ => Verdict::Keep,
+            };
+            (Waited::Session { session: row.id }, now)
+        }
+        Named::Ended(session) => {
+            // Ended, or cleared as gone: only what ended it counts, never a
+            // state it had before.
+            let endings: Vec<_> = s
+                .steps_with_session(&session)?
+                .into_iter()
+                .filter(|e| ends(&e.step))
+                .collect();
+            let on = Waited::Session { session };
+            let now = waiting::judge(&on, states, &endings);
+            (on, now)
+        }
+        Named::Message(message) => {
+            let steps = s.steps_with_message(&message)?;
+            let on = Waited::Message {
+                message: message.clone(),
+            };
             match waiting::judge(&on, states, &steps) {
                 // Delivered, and a state wanted: the answer is its session's,
                 // from the delivery on.
                 Verdict::Delivered { session } if !states.is_empty() => {
-                    let from = delivery(&steps, message).map_or(next, |id| id + 1);
+                    let from = delivery(&steps, &message).map_or(next, |id| id + 1);
                     return Ok(First::From(Waited::Session { session }, from));
                 }
-                verdict => verdict,
+                verdict => (on, verdict),
             }
         }
     };
@@ -192,41 +196,6 @@ fn ends(step: &Step) -> bool {
                 ..
             }
     )
-}
-
-/// Who `name` is: a seat of the fleet `here`, else a session (live, or
-/// launched in the record), else a message queued in the record.
-fn resolve(
-    s: &State,
-    here: Option<&PathBuf>,
-    rows: &[SessionRow],
-    name: &str,
-) -> Result<Option<Waited>, Error> {
-    if let Some(fleet) = here
-        && s.roster(fleet)?.seats.iter().any(|seat| seat.name == name)
-    {
-        return Ok(Some(Waited::Seat {
-            fleet: fleet.clone(),
-            seat: name.into(),
-        }));
-    }
-    let launched = || -> Result<bool, Error> {
-        Ok(s.steps_with_session(name)?
-            .iter()
-            .any(|e| matches!(e.step, Step::SessionLaunched { .. })))
-    };
-    if rows.iter().any(|r| r.id == name) || launched()? {
-        return Ok(Some(Waited::Session {
-            session: name.into(),
-        }));
-    }
-    let queued = s
-        .steps_with_message(name)?
-        .iter()
-        .any(|e| matches!(e.step, Step::MessageQueued { .. }));
-    Ok(queued.then(|| Waited::Message {
-        message: name.into(),
-    }))
 }
 
 /// Judges the steps from `from` as they come, held up to `hold`; with
@@ -292,9 +261,10 @@ fn answer(on: Waited, verdict: Verdict) -> Reply {
         (Verdict::Never(why), _) => Reply::Status(why.into()),
         // judge delivers only messages, and never answers Keep here.
         (Verdict::Delivered { .. } | Verdict::Keep, on) => Reply::Status(
-            status::Wait::NoSuchName {
+            status::Naming::Unknown {
                 name: name_of(&on),
                 fleet: None,
+                takes: Takes::SeatSessionOrMessage,
             }
             .into(),
         ),
@@ -319,7 +289,7 @@ fn live(rows: &[SessionRow], on: &Waited) -> (Option<String>, Option<SessionStat
         Waited::Seat { fleet, seat } => {
             let mine: Vec<&SessionRow> = rows
                 .iter()
-                .filter(|r| r.fleet.as_ref() == Some(fleet) && r.seat.as_ref() == Some(seat))
+                .filter(|r| names::of_seat(r, fleet, seat))
                 .collect();
             mine.iter()
                 .find(|r| r.state != Some(SessionState::Gone))
@@ -780,31 +750,6 @@ mod tests {
                 status::Wait::Dropped {
                     message: "m1".into(),
                     why: fleet_core::messages::Dropped::SessionEnded
-                }
-                .into()
-            )
-        );
-    }
-
-    #[test]
-    fn a_name_nobody_has_is_refused_naming_the_fleet_searched() {
-        let (root, state, fleet) = with_seat("wait-nobody");
-        assert_eq!(
-            wait_for(&state, &fleet.directory, "critic", &[StateName::Idle], NOW),
-            Reply::Status(
-                status::Wait::NoSuchName {
-                    name: "critic".into(),
-                    fleet: Some(fleet.directory.clone())
-                }
-                .into()
-            )
-        );
-        assert_eq!(
-            wait_for(&state, &root, "critic", &[StateName::Idle], NOW),
-            Reply::Status(
-                status::Wait::NoSuchName {
-                    name: "critic".into(),
-                    fleet: None
                 }
                 .into()
             )

@@ -166,27 +166,29 @@ spawned session on its own: it ends when it is told to end, and one that
 dies is reported gone, under its fleet, until it is ended, never revived.
 End takes a seat of the fleet holding the directory it is asked from, ending
 its live session, or any session by its id; ending a session that is
-already gone clears it. Ending a session drops the messages held for it; a
-seat's messages wait for its next session.
+already gone clears it, and ending one already ended says so and changes
+nothing. Ending a session drops the messages held for it; a seat's
+messages wait for its next session.
 
 **Messages.** A message goes to a seat by its name or to a session by its
 id: a name is first a seat of the fleet holding the directory it is sent
-from, then any session's id. It is one-way: sending answers, with the
-message's id, once the message is queued. Messages are held in state, so a
-restart keeps them, and the supervisor types them in when the adapter reports
-the agent idle: every message waiting for it, oldest first, as one paste.
-That session then takes no more until it has left idle, or 30 s have passed.
-Each message is recorded queued, then delivered, with what it said and who
-sent it: a person, a script, or another agent's session, which every agent
-can name because it is launched with its session's id in its environment.
-A message to a seat goes to whichever of its sessions is live when its agent
-is next idle, so one sent while it is being revived waits for the new
-session; one to an agent that needs you waits until someone answers it:
-nothing is ever typed at a prompt. A project off stops reviving, not
-delivering. A message that can no longer reach anyone (its session ended
-or cleared as gone, its seat taken out of the config, its fleet removed) is
-dropped in the same change, and recorded dropped. Status counts the messages
-waiting for each seat and session. Reading the answer is observe's.
+from, then any session's id. A session that has ended, or is gone, takes none:
+sending to it is refused, saying it has ended. It is one-way: sending answers,
+with the message's id, once the message is queued. Messages are held in state,
+so a restart keeps them, and the supervisor types them in when the adapter
+reports the agent idle: every message waiting for it, oldest first, as one
+paste. That session then takes no more until it has left idle, or 30 s have
+passed. Each message is recorded queued, then delivered, with what it said and
+who sent it: a person, a script, or another agent's session, which every agent
+can name because it is launched with its session's id in its environment. A
+message to a seat goes to whichever of its sessions is live when its agent is
+next idle, so one sent while it is being revived waits for the new session;
+one to an agent that needs you waits until someone answers it: nothing is ever
+typed at a prompt. A project off stops reviving, not delivering. A message
+that can no longer reach anyone (its session ended or cleared as gone, its
+seat taken out of the config, its fleet removed) is dropped in the same
+change, and recorded dropped. Status counts the messages waiting for each seat
+and session. Reading the answer is observe's.
 
 **States.** Observe reports one of six states for every session, whatever its
 agent: *starting* (launched, not ready yet), *working* (in a turn), *idle*
@@ -335,11 +337,12 @@ root. It asks the role's adapter how to launch without the state lock, then,
 in one transaction, checks the fleet is still there, runs the agent in tmux,
 writes the session with its fleet and role and records the step; it answers
 with the session's id once the agent runs. End sends the directory and a
-name: a seat of the fleet holding the directory, else a session's id. In one
-transaction the supervisor forgets the session, ends its tmux session, drops
-the messages held for it and records both; a seat's ended session is then
-revived at once, as the tending loop revives any seat with none. Neither
-starts the supervisor.
+name: a seat of the fleet holding the directory, else a session's id; a
+session already ended, found only in the record, is answered as already
+ended, and nothing changes. Otherwise, in one transaction the supervisor
+forgets the session, ends its tmux session, drops the messages held for it and
+records both; a seat's ended session is then revived at once, as the tending
+loop revives any seat with none. Neither starts the supervisor.
 
 **wait / events**: both read the record by long-poll,
 keeping one request and one reply per connection. A poll names the record
@@ -529,5 +532,6 @@ release whose binary accepts `fleet specimen`.
 | workspace | a git worktree on its own branch, under the state directory |
 | message | text for a seat or a session, held by the supervisor until its agent is idle, then typed in |
 | event | a recorded step, as wait and events see it |
+| name | what a command is given to point at: first a seat of the fleet holding the directory it is asked from, else a session's id, live or ended, else a message's id; each command takes only the kinds it acts on |
 | tool interface / driver | the trait in `core` for one kind of outside tool / the code behind it that runs the real tool |
 | outcome | how a command ended: done, refused, supervisor not running, could not tell, timed out |

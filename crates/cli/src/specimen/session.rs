@@ -43,16 +43,6 @@ pub(super) fn samples(kind: SessionKind) -> Vec<Session> {
             seat: "scribe".into(),
             fleet: path(APP),
         }],
-        K::NoSuchSeatOrSession => vec![
-            S::NoSuchSeatOrSession {
-                name: "scrib".into(),
-                fleet: Some(path(APP)),
-            },
-            S::NoSuchSeatOrSession {
-                name: "s3f9a01c2d4".into(),
-                fleet: None,
-            },
-        ],
     }
 }
 
@@ -68,16 +58,19 @@ pub(super) fn spawns() -> Vec<crate::protocol::Response> {
     )]
 }
 
-/// Every way `fleet end` ends done: a spawned session, and a seat's.
+/// Every way `fleet end` ends done: a spawned session, a seat's, and one
+/// already ended.
 pub(super) fn ends() -> Vec<crate::protocol::Response> {
     [None, Some("scribe")]
         .into_iter()
-        .map(|seat| {
-            crate::protocol::Response::Ended(response::End::Ended {
-                session: "s3fa01c2e9".into(),
-                seat: seat.map(str::to_owned),
-            })
+        .map(|seat| response::End::Ended {
+            session: "s3fa01c2e9".into(),
+            seat: seat.map(str::to_owned),
         })
+        .chain([response::End::AlreadyEnded {
+            session: "s3fa01c2e9".into(),
+        }])
+        .map(crate::protocol::Response::Ended)
         .collect()
 }
 

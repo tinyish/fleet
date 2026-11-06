@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use fleet_core::agent::SessionState;
-use fleet_core::fleets;
 use fleet_core::messages::{self, Dropped, Hold, Recipient, Sender};
 use fleet_core::protocol::{Reply, Response, Status, response};
-use fleet_core::status;
+use fleet_core::seats::SeatKey;
+use fleet_core::status::{self, Takes};
 use state::{MessageRow, SessionRow, State, StateError, Step, Write, now_millis};
 
+use crate::names::{self, Named};
 use crate::observe::Observed;
 use crate::tending::Tending;
 use crate::{Error, Tools, lock, log, words};
@@ -69,41 +70,36 @@ pub(crate) fn send(state: &Mutex<State>, tools: &Tools, ask: &Send) -> Result<Re
     )))
 }
 
-/// Who `ask.to` is, and their fleet: a seat of the fleet holding
-/// `ask.directory` (made canonical when it can be), else a session with
-/// that id whose pane is alive.
+/// Who `ask.to` is, and their fleet: a seat of the fleet here, else a
+/// session whose pane is alive.
 fn recipient(
     state: &State,
     tools: &Tools,
     ask: &Send,
 ) -> Result<Result<(Recipient, Option<PathBuf>), Status>, Error> {
-    let directory = std::fs::canonicalize(&ask.directory).unwrap_or_else(|_| ask.directory.clone());
-    let fleets = state.fleets()?;
-    let here = fleets::holding(&fleets, &directory).map(|f| f.directory.clone());
-    if let Some(fleet) = &here
-        && state.roster(fleet)?.seats.iter().any(|s| s.name == ask.to)
-    {
-        return Ok(Ok((
-            Recipient::Seat {
-                fleet: fleet.clone(),
-                seat: ask.to.clone(),
-            },
-            Some(fleet.clone()),
-        )));
-    }
-    let Some(row) = state.sessions()?.into_iter().find(|r| r.id == ask.to) else {
-        return Ok(Err(status::Message::NoSuchRecipient {
-            to: ask.to.clone(),
-            fleet: here,
+    let resolved = names::resolve(state, &ask.directory, &ask.to, Takes::SeatOrSession)?;
+    let row = match resolved.named {
+        Some(Named::Seat(SeatKey { fleet, seat })) => {
+            return Ok(Ok((
+                Recipient::Seat {
+                    fleet: fleet.clone(),
+                    seat,
+                },
+                Some(fleet),
+            )));
         }
-        .into()));
+        Some(Named::Session(row)) => row,
+        Some(Named::Ended(session)) => {
+            return Ok(Err(status::Message::SessionEnded { session }.into()));
+        }
+        Some(Named::Message(_)) | None => return Ok(Err(resolved.unknown().into())),
     };
     Ok(
         match crate::observe::alive(tools, std::slice::from_ref(&row)) {
             Ok(alive) if alive.get(&row.id).copied().unwrap_or(false) => {
                 Ok((Recipient::Session { session: row.id }, row.fleet))
             }
-            Ok(_) => Err(status::Message::SessionGone { session: row.id }.into()),
+            Ok(_) => Err(status::Message::SessionEnded { session: row.id }.into()),
             Err(e) => Err(crate::sessions::tool_status(e)),
         },
     )
@@ -156,9 +152,7 @@ fn waiting_for(held: &[MessageRow], row: &SessionRow) -> Vec<String> {
     held.iter()
         .filter(|m| match &m.to {
             Recipient::Session { session } => *session == row.id,
-            Recipient::Seat { fleet, seat } => {
-                row.fleet.as_ref() == Some(fleet) && row.seat.as_ref() == Some(seat)
-            }
+            Recipient::Seat { fleet, seat } => names::of_seat(row, fleet, seat),
         })
         .map(|m| m.id.clone())
         .collect()
@@ -344,65 +338,19 @@ mod tests {
     }
 
     #[test]
-    fn a_seat_wins_over_a_session_of_the_same_name() {
-        let (_root, state, app, mux, _, _) = filled("msg-shadow");
-        let row = state::SessionRow {
-            id: "scribe".into(),
-            adapter: "/a/claude".into(),
-            directory: app.clone(),
-            launch_time_millis: 1,
-            pane: String::new(),
-            fleet: None,
-            seat: None,
-            role: None,
-            role_digest: None,
-            state: None,
-        };
-        let launched = lock(&state).write(|w| w.launch_session(&row, || Ok("%9".into())));
-        assert!(launched.is_ok());
-        let t = tools(mux, Arc::new(FakeAgents::default()));
-        assert!(matches!(
-            queued(send(&state, &t, &ask(&app, "scribe", "hi"))),
-            Some(Recipient::Seat { .. })
-        ));
-    }
-
-    #[test]
-    fn nobody_by_that_name_is_refused_naming_the_fleet_searched() {
-        let (root, state, app, mux, _, _) = filled("msg-nobody");
-        let t = tools(mux, Arc::new(FakeAgents::default()));
-        assert_eq!(
-            refused(send(&state, &t, &ask(&app, "critic", "hi"))),
-            Some(
-                status::Message::NoSuchRecipient {
-                    to: "critic".into(),
-                    fleet: Some(app)
-                }
-                .into()
-            )
-        );
-        assert_eq!(
-            refused(send(&state, &t, &ask(&root.join("wing"), "scribe", "hi"))),
-            Some(
-                status::Message::NoSuchRecipient {
-                    to: "scribe".into(),
-                    fleet: None
-                }
-                .into()
-            )
-        );
-        assert_eq!(held(&state), []);
-    }
-
-    #[test]
-    fn a_session_already_gone_is_refused() {
+    fn a_session_gone_or_ended_is_refused_as_ended() {
         let (root, state, _, mux, id, _) = filled("msg-gone");
         kill_all(&mux);
-        let t = tools(mux, Arc::new(FakeAgents::default()));
-        assert_eq!(
-            refused(send(&state, &t, &ask(&root, &id, "hi"))),
-            Some(status::Message::SessionGone { session: id }.into())
+        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
+        let ended = Some(
+            status::Message::SessionEnded {
+                session: id.clone(),
+            }
+            .into(),
         );
+        assert_eq!(refused(send(&state, &t, &ask(&root, &id, "hi"))), ended);
+        assert!(crate::sessions::end(&state, &t, &root, &id).is_ok());
+        assert_eq!(refused(send(&state, &t, &ask(&root, &id, "hi"))), ended);
         assert_eq!(held(&state), []);
     }
 
@@ -658,21 +606,6 @@ mod tests {
         assert!(crate::sessions::end(&state, &t, &app, "scribe").is_ok());
         let left: Vec<String> = held(&state).into_iter().map(|m| m.text).collect();
         assert_eq!(left, ["for the seat"]);
-    }
-
-    #[test]
-    fn a_seat_wins_over_a_session_of_the_same_name_for_end() {
-        let (_root, state, app, mux, id, _) = filled("end-shadow");
-        let row = state::SessionRow {
-            id: "scribe".into(),
-            ..crate::testing::spawned_row("x", Path::new("/gone"), 1)
-        };
-        crate::testing::put(&state, &SharedMux(mux.clone()), &row);
-        let t = tools(mux, Arc::new(FakeAgents::default()));
-        assert!(matches!(
-            crate::sessions::end(&state, &t, &app, "scribe"),
-            Ok(Reply::Response(Response::End(response::End::Ended { session, seat: Some(_) }))) if session == id
-        ));
     }
 
     #[test]

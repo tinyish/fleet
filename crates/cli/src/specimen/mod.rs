@@ -9,6 +9,7 @@ mod events;
 mod file;
 mod fleet;
 mod message;
+mod naming;
 mod overview;
 mod project;
 mod refusals;

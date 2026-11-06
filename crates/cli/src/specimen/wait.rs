@@ -110,16 +110,6 @@ pub(super) fn samples(kind: WaitKind) -> Vec<Wait> {
     use Wait as W;
     use WaitKind as K;
     match kind {
-        K::NoSuchName => vec![
-            W::NoSuchName {
-                name: "critic".into(),
-                fleet: Some(path(APP)),
-            },
-            W::NoSuchName {
-                name: "s3f9a01c2d4".into(),
-                fleet: None,
-            },
-        ],
         K::NoStates => vec![W::NoStates {
             name: "scribe".into(),
         }],

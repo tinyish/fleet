@@ -4,6 +4,7 @@
 mod adapters;
 mod create;
 mod messages;
+mod names;
 mod observe;
 mod overview;
 mod projects;

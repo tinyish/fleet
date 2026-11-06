@@ -402,6 +402,12 @@ pub mod response {
             #[serde(default, skip_serializing_if = "Option::is_none")]
             seat: Option<String>,
         },
+        /// The session was already ended, or cleared as gone: nothing
+        /// changed.
+        AlreadyEnded {
+            /// Its id.
+            session: String,
+        },
     }
 
     mod overview;
@@ -656,7 +662,7 @@ mod tests {
                     seat: "scribe".into(),
                 },
             })),
-            Reply::Status(Status::Message(status::Message::SessionGone {
+            Reply::Status(Status::Message(status::Message::SessionEnded {
                 session: "s1".into(),
             })),
             Reply::Response(Response::Hello(response::Hello {
@@ -768,10 +774,6 @@ mod tests {
             })),
         ];
         let refusals = [
-            status::Wait::NoSuchName {
-                name: "critic".into(),
-                fleet: Some(PathBuf::from("/c/app")),
-            },
             status::Wait::NoStates {
                 name: "scribe".into(),
             },
@@ -862,9 +864,16 @@ mod tests {
                 error: "denied".into(),
             }
             .into(),
-            status::Session::NoSuchSeatOrSession {
+            status::Naming::Unknown {
                 name: "s0123456789".into(),
                 fleet: None,
+                takes: status::Takes::SeatOrSession,
+            }
+            .into(),
+            status::Naming::Unknown {
+                name: "critic".into(),
+                fleet: Some(PathBuf::from("/c/app")),
+                takes: status::Takes::SeatSessionOrMessage,
             }
             .into(),
             status::Adapter::ReleaseMismatch {
@@ -914,6 +923,9 @@ mod tests {
                 session: "s1".into(),
                 seat: Some("scribe".into()),
             })),
+            Reply::Response(Response::End(response::End::AlreadyEnded {
+                session: "s1".into(),
+            })),
             Reply::Status(Status::Session(status::Session::AdapterFailed {
                 adapter: PathBuf::from("/a/claude"),
                 verb: Verb::Launch,
@@ -943,14 +955,6 @@ mod tests {
             Reply::Status(Status::Session(status::Session::SeatNotRunning {
                 seat: "scribe".into(),
                 fleet: "/c/app".into(),
-            })),
-            Reply::Status(Status::Session(status::Session::NoSuchSeatOrSession {
-                name: "s0".into(),
-                fleet: None,
-            })),
-            Reply::Status(Status::Session(status::Session::NoSuchSeatOrSession {
-                name: "scrib".into(),
-                fleet: Some("/c/app".into()),
             })),
         ];
         for reply in replies {
@@ -997,9 +1001,8 @@ mod tests {
                         session: None,
                         older_role: false,
                         down: Some(response::Down {
-                            why: Some(Status::Session(status::Session::NoSuchSeatOrSession {
-                                name: "s0".into(),
-                                fleet: None,
+                            why: Some(Status::Session(status::Session::NoFleetHere {
+                                directory: "/c/x".into(),
                             })),
                             next_try_millis: 9,
                         }),

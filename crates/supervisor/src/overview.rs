@@ -8,7 +8,6 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use fleet_core::agent::SessionState;
-use fleet_core::fleets;
 use fleet_core::messages::Recipient;
 use fleet_core::protocol::{Reply, Response, response};
 use fleet_core::seats::{Roster, SeatKey};
@@ -17,20 +16,19 @@ use state::{FleetRoster, MessageRow, SessionRow, State, now_millis};
 use crate::tending::{Down, Tending};
 use crate::{Error, Tools, lock};
 
-/// The overview from `directory` (made canonical when it can be): the
-/// fleet holding it, or every fleet and the loose sessions.
+/// The overview from `directory`: the fleet holding it, or every fleet
+/// and the loose sessions.
 pub(crate) fn overview(
     state: &Mutex<State>,
     tools: &Tools,
     tending: &Tending,
     directory: &Path,
 ) -> Result<Reply, Error> {
-    let directory = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
-    let (fleets, rosters, rows, held) = {
+    let (here, rosters, rows, held) = {
         let s = lock(state);
-        (s.fleets()?, s.rosters()?, s.sessions()?, s.held()?)
+        let here = crate::names::here(&s, directory)?.map(|f| f.directory);
+        (here, s.rosters()?, s.sessions()?, s.held()?)
     };
-    let here = fleets::holding(&fleets, &directory).map(|f| f.directory.clone());
     let rosters: Vec<FleetRoster> = rosters
         .into_iter()
         .filter(|f| here.as_ref().is_none_or(|h| *h == f.fleet))
@@ -105,7 +103,7 @@ fn fleet_overview(
             let of_seat: Vec<&SessionRow> = mine
                 .iter()
                 .copied()
-                .filter(|r| r.seat.as_deref() == Some(seat.name.as_str()))
+                .filter(|r| crate::names::of_seat(r, &f.fleet, &seat.name))
                 .collect();
             let waiting = held
                 .iter()

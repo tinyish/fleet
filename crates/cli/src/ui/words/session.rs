@@ -38,6 +38,9 @@ pub(super) fn ended(ended: &response::End, ink: Ink) -> String {
             ink.accent(session),
             ink.accent(seat)
         ),
+        response::End::AlreadyEnded { session } => {
+            format!("{} had already ended; nothing changed", ink.accent(session))
+        }
     }
 }
 
@@ -81,17 +84,6 @@ pub(super) fn refused(refusal: &Session, ink: Ink) -> String {
         Session::SeatNotRunning { seat, .. } => {
             format!("{} has no session running", ink.accent(seat))
         }
-        Session::NoSuchSeatOrSession {
-            name,
-            fleet: Some(fleet),
-        } => format!(
-            "the fleet in {} has no seat {}, and no session has that id",
-            ink.path(fleet),
-            ink.accent(name)
-        ),
-        Session::NoSuchSeatOrSession { name, fleet: None } => {
-            format!("no session has the id {}", ink.accent(name))
-        }
         Session::LaunchTooLong { bytes, limit } => format!(
             "launching the agent takes a {bytes}-byte {} command, more than the {limit} it \
              takes: shorten its role's prompt",
@@ -115,10 +107,6 @@ pub(super) fn hint(refusal: &Session, ink: Ink) -> Option<String> {
         Session::NotAProject { .. } => {
             Some("name a project's root, or leave the directory out for the role's own".into())
         }
-        Session::NoSuchSeatOrSession { .. } => Some(format!(
-            "run {} to see the seats and sessions there are",
-            ink.accent("fleet status")
-        )),
         Session::AdapterFailed { .. }
         | Session::MultiplexerCouldNotRun { .. }
         | Session::MultiplexerFailed { .. }
@@ -225,20 +213,6 @@ mod tests {
             }),
             "scribe has no session running"
         );
-        assert_eq!(
-            said(&Session::NoSuchSeatOrSession {
-                name: "scrib".into(),
-                fleet: Some("/code/app".into())
-            }),
-            "the fleet in /code/app has no seat scrib, and no session has that id"
-        );
-        assert_eq!(
-            said(&Session::NoSuchSeatOrSession {
-                name: "s0".into(),
-                fleet: None
-            }),
-            "no session has the id s0"
-        );
     }
 
     #[test]
@@ -271,6 +245,12 @@ mod tests {
                 seat: Some("scribe".into())
             }),
             "ended scribe's session s1b2c3d4e5; scribe comes back fresh while its fleet is on"
+        );
+        assert_eq!(
+            plain(&response::End::AlreadyEnded {
+                session: "s3fa01c2e9".into()
+            }),
+            "s3fa01c2e9 had already ended; nothing changed"
         );
     }
 }

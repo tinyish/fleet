@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use fleet_core::agent::{self, Verb};
-use fleet_core::fleets;
 use fleet_core::messages::Dropped;
 use fleet_core::protocol::{Reply, Response, Status, response};
 use fleet_core::seats::{Role, SeatKey};
-use fleet_core::status;
+use fleet_core::status::{self, Takes};
 use fleet_core::tools::ToolError;
 use state::{SessionRow, State, StateError, Step, Write, now_millis};
 
+use crate::names::{self, Named};
 use crate::{Error, Tools, adapters, lock};
 
 /// What a launch asks for.
@@ -188,12 +188,9 @@ fn spawnable(
     label: &str,
     working_directory: Option<&Path>,
 ) -> Result<Result<Spawnable, Status>, Error> {
-    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let directory = canonical(directory);
-    let fleets = state.fleets()?;
-    let Some(fleet) = fleets::holding(&fleets, &directory) else {
+    let Some(fleet) = crate::names::here(state, directory)? else {
         return Ok(Err(Status::Session(status::Session::NoFleetHere {
-            directory,
+            directory: directory.to_path_buf(),
         })));
     };
     let Some(role) = state.roster(&fleet.directory)?.role(label).cloned() else {
@@ -202,6 +199,7 @@ fn spawnable(
             fleet: fleet.directory.clone(),
         })));
     };
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let works = match working_directory.map(canonical) {
         None => role.directory.clone(),
         Some(named) if fleet.projects.contains(&named) => named,
@@ -213,7 +211,7 @@ fn spawnable(
         }
     };
     Ok(Ok(Spawnable {
-        fleet: fleet.directory.clone(),
+        fleet: fleet.directory,
         role,
         directory: works,
     }))
@@ -319,8 +317,8 @@ fn settle<T>(
 /// Ends `name`: a seat of the fleet holding `directory`, its live session,
 /// else a session by its id. In one transaction the session is forgotten,
 /// its tmux session ended, its step recorded and the messages held for it
-/// dropped, or nothing changes. The state lock is held from finding the
-/// session to ending it.
+/// dropped, or nothing changes; a session already ended changes nothing.
+/// The state lock is held from finding the session to ending it.
 pub(crate) fn end(
     state: &Mutex<State>,
     tools: &Tools,
@@ -330,7 +328,7 @@ pub(crate) fn end(
     let mut state = lock(state);
     let row = match endable(&state, tools, directory, name)? {
         Ok(row) => row,
-        Err(status) => return Ok(Reply::Status(status)),
+        Err(reply) => return Ok(reply),
     };
     let step = Step::SessionEnded {
         session: row.id.clone(),
@@ -363,46 +361,46 @@ pub(crate) fn end(
     }
 }
 
-/// The session `name` names from `directory` (made canonical when it can
-/// be): a seat of the fleet holding it, its session whose pane is alive;
-/// else the session with that id.
+/// The session `name` names from `directory`: a seat of the fleet here,
+/// its session whose pane is alive; else the session with that id. What
+/// to answer instead when there is none to end.
 fn endable(
     state: &State,
     tools: &Tools,
     directory: &Path,
     name: &str,
-) -> Result<Result<SessionRow, Status>, Error> {
-    let directory = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
-    let fleets = state.fleets()?;
-    let here = fleets::holding(&fleets, &directory).map(|f| f.directory.clone());
-    let rows = state.sessions()?;
-    if let Some(fleet) = &here
-        && state.roster(fleet)?.seats.iter().any(|s| s.name == name)
-    {
-        let seats: Vec<SessionRow> = rows
-            .into_iter()
-            .filter(|r| r.fleet.as_ref() == Some(fleet) && r.seat.as_deref() == Some(name))
-            .collect();
-        let alive = match crate::observe::alive(tools, &seats) {
-            Ok(alive) => alive,
-            Err(e) => return Ok(Err(tool_status(e))),
-        };
-        return Ok(seats
-            .into_iter()
-            .find(|r| alive.get(&r.id).copied().unwrap_or(false))
-            .ok_or_else(|| {
-                Status::Session(status::Session::SeatNotRunning {
-                    seat: name.to_owned(),
-                    fleet: fleet.clone(),
-                })
-            }));
-    }
-    Ok(rows.into_iter().find(|r| r.id == name).ok_or_else(|| {
-        Status::Session(status::Session::NoSuchSeatOrSession {
-            name: name.to_owned(),
-            fleet: here,
-        })
-    }))
+) -> Result<Result<SessionRow, Reply>, Error> {
+    let resolved = names::resolve(state, directory, name, Takes::SeatOrSession)?;
+    let key = match resolved.named {
+        Some(Named::Seat(key)) => key,
+        Some(Named::Session(row)) => return Ok(Ok(row)),
+        Some(Named::Ended(session)) => {
+            return Ok(Err(Reply::Response(Response::End(
+                response::End::AlreadyEnded { session },
+            ))));
+        }
+        Some(Named::Message(_)) | None => {
+            return Ok(Err(Reply::Status(resolved.unknown().into())));
+        }
+    };
+    let seats: Vec<SessionRow> = state
+        .sessions()?
+        .into_iter()
+        .filter(|r| names::of_seat(r, &key.fleet, &key.seat))
+        .collect();
+    let alive = match crate::observe::alive(tools, &seats) {
+        Ok(alive) => alive,
+        Err(e) => return Ok(Err(Reply::Status(tool_status(e)))),
+    };
+    Ok(seats
+        .into_iter()
+        .find(|r| alive.get(&r.id).copied().unwrap_or(false))
+        .ok_or(Reply::Status(Status::Session(
+            status::Session::SeatNotRunning {
+                seat: key.seat,
+                fleet: key.fleet,
+            },
+        ))))
 }
 
 /// What tmux failing comes to, as the facts the CLI words.
@@ -696,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn a_spawned_session_ends_by_its_id_and_a_second_end_finds_nobody() {
+    fn a_spawned_session_ends_by_its_id_and_a_second_end_changes_nothing() {
         let (root, state, wing) = crew("end-spawned", &[("worker", "/a/claude")]);
         let tools = tools(FakeMux::default(), FakeAgents::default());
         let id = spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker"));
@@ -713,11 +711,10 @@ mod tests {
         assert_eq!(steps.last().map(String::as_str), Some("SESSION_ENDED"));
         assert_eq!(
             end_in(&state, &tools, &wing, &id),
-            Reply::Status(Status::Session(status::Session::NoSuchSeatOrSession {
-                name: id,
-                fleet: Some(wing.clone()),
-            }))
+            Reply::Response(Response::End(response::End::AlreadyEnded { session: id }))
         );
+        let again = crate::lock(&state).steps().unwrap_or_default();
+        assert_eq!(again, steps, "nothing recorded");
     }
 
     #[test]
@@ -813,19 +810,6 @@ mod tests {
             Reply::Status(Status::Session(status::Session::SeatNotRunning {
                 seat: "scribe".into(),
                 fleet: fleet.directory.clone(),
-            }))
-        );
-    }
-
-    #[test]
-    fn nobody_by_that_name_from_outside_every_fleet_names_no_fleet() {
-        let (root, state, _wing) = crew("end-nobody", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
-        assert_eq!(
-            end_in(&state, &tools, &root, "s0"),
-            Reply::Status(Status::Session(status::Session::NoSuchSeatOrSession {
-                name: "s0".into(),
-                fleet: None,
             }))
         );
     }

@@ -22,18 +22,7 @@ pub(super) fn queued(queued: &response::Message, ink: Ink) -> String {
 /// Why the supervisor would not queue a message.
 pub(super) fn refused(refusal: &Message, ink: Ink) -> String {
     match refusal {
-        Message::NoSuchRecipient {
-            to,
-            fleet: Some(fleet),
-        } => format!(
-            "the fleet in {} has no seat {}, and no session has that id",
-            ink.path(fleet),
-            ink.accent(to)
-        ),
-        Message::NoSuchRecipient { to, fleet: None } => {
-            format!("no session has the id {}", ink.accent(to))
-        }
-        Message::SessionGone { session } => {
+        Message::SessionEnded { session } => {
             format!("the session {} has ended", ink.accent(session))
         }
         Message::EmptyText => "the message is empty".into(),
@@ -44,45 +33,19 @@ pub(super) fn refused(refusal: &Message, ink: Ink) -> String {
 }
 
 /// What to do about it.
-pub(super) fn hint(refusal: &Message, ink: Ink) -> Option<String> {
+pub(super) fn hint(refusal: &Message) -> Option<String> {
     match refusal {
-        Message::NoSuchRecipient { .. } => Some(format!(
-            "run {} to see the seats and sessions there are",
-            ink.accent("fleet status")
-        )),
-        Message::SessionGone { .. } | Message::EmptyText | Message::TooLong { .. } => None,
+        Message::SessionEnded { .. } | Message::EmptyText | Message::TooLong { .. } => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::output::ERR;
     use std::path::PathBuf;
 
     fn plain(text: &str) -> String {
         console::strip_ansi_codes(text).into_owned()
-    }
-
-    #[test]
-    fn nobody_by_that_name_says_where_it_looked() {
-        let here = Message::NoSuchRecipient {
-            to: "scrib".into(),
-            fleet: Some(PathBuf::from("/code/app")),
-        };
-        assert_eq!(
-            plain(&refused(&here, ERR.piped())),
-            "the fleet in /code/app has no seat scrib, and no session has that id"
-        );
-        let nowhere = Message::NoSuchRecipient {
-            to: "s0".into(),
-            fleet: None,
-        };
-        assert_eq!(
-            plain(&refused(&nowhere, ERR.piped())),
-            "no session has the id s0"
-        );
-        assert!(hint(&nowhere, ERR.piped()).is_some());
     }
 
     #[test]

@@ -7,14 +7,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AdapterFault, Verb};
 
+mod naming;
 mod wait;
+#[cfg(feature = "specimen")]
+pub use naming::NamingKind;
+pub use naming::{Naming, Takes};
 pub use wait::Wait;
 #[cfg(feature = "specimen")]
 pub use wait::WaitKind;
 
 /// Why the supervisor says no, grouped by what it is about: where a fleet
 /// can go, one project's on or off, a path or a config file, agents'
-/// sessions, naming and fetching adapters, messages, or waits. Facts only: the CLI words them
+/// sessions, naming and fetching adapters, messages, waits, or what a name
+/// points at. Facts only: the CLI words them
 /// (core.md invariant 9), one words file and one specimen file per area.
 /// The CLI and the protocol write it as `protocol::Status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,10 +40,12 @@ pub enum Status {
     Session(Session),
     /// Naming and fetching adapters.
     Adapter(Adapter),
-    /// Messages: who one is for, and its text.
+    /// Messages: whether their session takes them, and their text.
     Message(Message),
-    /// Waits: what one names, and why its state can never come.
+    /// Waits: the states one asks for, and why they can never come.
     Wait(Wait),
+    /// Names: what one points at (core.md § Terms, name).
+    Naming(Naming),
     /// The request could not be understood.
     Malformed {
         /// What was wrong with it.
@@ -321,14 +328,6 @@ pub enum Session {
         /// The fleet's directory.
         fleet: PathBuf,
     },
-    /// No seat of `fleet`, the fleet holding the directory if any, and no
-    /// session has this name.
-    NoSuchSeatOrSession {
-        /// The name asked for.
-        name: String,
-        /// The fleet searched, if any.
-        fleet: Option<PathBuf>,
-    },
     /// Launching the agent would make a tmux command longer than it takes:
     /// its prompt is too long.
     LaunchTooLong {
@@ -454,7 +453,7 @@ pub enum Mismatch {
     BuildMissing,
 }
 
-/// Messages: who one is for, and its text.
+/// Messages: whether their session takes them, and their text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "specimen",
@@ -463,16 +462,8 @@ pub enum Mismatch {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Message {
-    /// No seat of the fleet here, and no session, goes by this name.
-    NoSuchRecipient {
-        /// The name given.
-        to: String,
-        /// The fleet whose seats were searched: the one holding the
-        /// directory sent from, if any.
-        fleet: Option<PathBuf>,
-    },
-    /// The session's pane has ended.
-    SessionGone {
+    /// The session has ended: it was ended, or its pane has.
+    SessionEnded {
         /// Its id.
         session: String,
     },

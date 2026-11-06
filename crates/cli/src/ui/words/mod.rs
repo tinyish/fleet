@@ -18,6 +18,7 @@ mod events;
 mod file;
 mod fleet;
 mod message;
+mod naming;
 mod overview;
 mod project;
 pub(crate) mod remove;
@@ -356,8 +357,9 @@ fn refused_hint(status: &protocol::Status, ink: Ink) -> Option<String> {
         protocol::Status::File(refusal) => file::hint(refusal, ink),
         protocol::Status::Session(refusal) => session::hint(refusal, ink),
         protocol::Status::Adapter(refusal) => adapters::hint(refusal, ink),
-        protocol::Status::Message(refusal) => message::hint(refusal, ink),
+        protocol::Status::Message(refusal) => message::hint(refusal),
         protocol::Status::Wait(refusal) => wait::hint(refusal, ink),
+        protocol::Status::Naming(refusal) => Some(naming::hint(refusal, ink)),
         protocol::Status::Malformed { .. } => None,
     }
 }
@@ -417,6 +419,7 @@ pub(super) fn refused(status: &protocol::Status, ink: Ink) -> String {
         protocol::Status::Adapter(refusal) => adapters::refused(refusal, ink),
         protocol::Status::Message(refusal) => message::refused(refusal, ink),
         protocol::Status::Wait(refusal) => wait::refused(refusal, ink),
+        protocol::Status::Naming(refusal) => naming::refused(refusal, ink),
         protocol::Status::Malformed { error } => {
             format!("the supervisor could not understand the request: {error}")
         }
