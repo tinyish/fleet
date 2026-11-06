@@ -22,8 +22,9 @@ pub struct Event {
 /// milliseconds.
 pub const MAX_HOLD_MILLIS: u64 = 25_000;
 
-/// How many bytes of steps one answer carries at most, under the socket's
-/// 64 KiB line; one step always goes, however long.
+/// How many bytes of steps one answer carries at most, so an answer stays
+/// small however far behind the reader is; one step always goes, however
+/// long.
 pub const BATCH_BYTES: usize = 48 * 1024;
 
 /// What a wait waits on, as its first poll resolved the name.

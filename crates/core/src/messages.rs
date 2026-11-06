@@ -14,7 +14,7 @@ use crate::status;
 pub const SESSION_VAR: &str = "FLEET_SESSION";
 
 /// The longest text a message may hold, in bytes as it travels: JSON
-/// escaping grows text, and the socket's line is 64 KiB.
+/// escaping grows text, and a request's line is 64 KiB.
 pub const MAX_TEXT_BYTES: usize = 32 * 1024;
 
 /// How long a session that took a paste, and still reads idle, takes no

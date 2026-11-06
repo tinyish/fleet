@@ -87,7 +87,7 @@ fn protocol_words(error: &ProtocolError) -> String {
         ProtocolError::Io(e) => e.to_string(),
         ProtocolError::Malformed(e) => format!("could not understand the request: {e}"),
         ProtocolError::Empty => "the other side closed without asking".into(),
-        ProtocolError::TooLong => format!("a request longer than {} bytes", protocol::MAX_LINE),
+        ProtocolError::TooLong => format!("a request longer than {} bytes", protocol::MAX_REQUEST),
     }
 }
 

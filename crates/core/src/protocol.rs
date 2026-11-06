@@ -10,8 +10,12 @@ mod observe;
 pub use observe::{BATCH_BYTES, Event, MAX_HOLD_MILLIS, Waited};
 use serde::{Deserialize, Serialize};
 
-/// The longest line either side reads, in bytes.
-pub const MAX_LINE: usize = 64 * 1024;
+/// The longest request the supervisor reads, in bytes.
+pub const MAX_REQUEST: usize = 64 * 1024;
+
+/// The longest reply the CLI reads, in bytes: an overview grows with every
+/// session listed, so replies get far more room than requests.
+pub const MAX_REPLY: usize = 16 * 1024 * 1024;
 
 /// The longest socket path accepted. macOS allows 104 bytes and Linux 108;
 /// this leaves room for both.
@@ -458,7 +462,7 @@ pub enum ProtocolError {
     Malformed(String),
     /// The other side closed without a line.
     Empty,
-    /// The line was longer than `MAX_LINE`.
+    /// The line was longer than `MAX_REQUEST` or `MAX_REPLY`.
     TooLong,
 }
 
@@ -490,14 +494,17 @@ fn write_line(w: &mut impl Write, value: &impl Serialize) -> Result<(), Protocol
     Ok(())
 }
 
-fn read_line<T: for<'de> Deserialize<'de>>(r: &mut impl BufRead) -> Result<T, ProtocolError> {
+fn read_line<T: for<'de> Deserialize<'de>>(
+    r: &mut impl BufRead,
+    max: usize,
+) -> Result<T, ProtocolError> {
     let mut line = String::new();
-    let limit = u64::try_from(MAX_LINE + 1).unwrap_or(u64::MAX);
+    let limit = u64::try_from(max + 1).unwrap_or(u64::MAX);
     let read = r.take(limit).read_line(&mut line)?;
     if read == 0 {
         return Err(ProtocolError::Empty);
     }
-    if read > MAX_LINE {
+    if read > max {
         return Err(ProtocolError::TooLong);
     }
     serde_json::from_str(line.trim_end()).map_err(|e| ProtocolError::Malformed(e.to_string()))
@@ -518,7 +525,7 @@ pub fn write_request(w: &mut impl Write, r: &Request) -> Result<(), ProtocolErro
 ///
 /// When the socket fails or the line is empty, too long or not a request.
 pub fn read_request(r: &mut impl BufRead) -> Result<Request, ProtocolError> {
-    read_line(r)
+    read_line(r, MAX_REQUEST)
 }
 
 /// Sends one reply.
@@ -536,7 +543,7 @@ pub fn write_reply(w: &mut impl Write, reply: &Reply) -> Result<(), ProtocolErro
 ///
 /// When the socket fails or the line is empty, too long or not a reply.
 pub fn read_reply(r: &mut impl BufRead) -> Result<Reply, ProtocolError> {
-    read_line(r)
+    read_line(r, MAX_REPLY)
 }
 
 #[cfg(test)]
@@ -1066,11 +1073,29 @@ mod tests {
     }
 
     #[test]
-    fn garbage_empty_and_oversized_lines_are_errors() {
+    fn garbage_and_empty_lines_are_errors() {
         assert!(read_request(&mut Cursor::new(b"nonsense\n".to_vec())).is_err());
         assert!(read_request(&mut Cursor::new(Vec::new())).is_err());
-        let big = vec![b'a'; MAX_LINE + 10];
-        assert!(read_request(&mut Cursor::new(big)).is_err());
+    }
+
+    #[test]
+    fn requests_and_replies_have_their_own_length_limits() {
+        let line = |len: usize| {
+            let message = Reply::Status(Status::Message(status::Message::EmptyText));
+            let mut json = serde_json::to_string(&message).unwrap_or_default();
+            json.push_str(&" ".repeat(len.saturating_sub(json.len() + 1)));
+            json.push('\n');
+            Cursor::new(json.into_bytes())
+        };
+        assert!(matches!(
+            read_request(&mut line(MAX_REQUEST + 10)),
+            Err(ProtocolError::TooLong)
+        ));
+        assert!(read_reply(&mut line(MAX_REQUEST * 4)).is_ok());
+        assert!(matches!(
+            read_reply(&mut line(MAX_REPLY + 10)),
+            Err(ProtocolError::TooLong)
+        ));
     }
 
     #[test]

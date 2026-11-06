@@ -560,7 +560,7 @@ fn socket(error: &ProtocolError) -> String {
         ProtocolError::Io(e) => e.to_string(),
         ProtocolError::Malformed(e) => format!("could not understand the supervisor: {e}"),
         ProtocolError::Empty => "the supervisor closed without answering".into(),
-        ProtocolError::TooLong => format!("an answer longer than {} bytes", protocol::MAX_LINE),
+        ProtocolError::TooLong => format!("an answer longer than {} bytes", protocol::MAX_REPLY),
     }
 }
 
