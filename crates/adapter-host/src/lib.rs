@@ -12,12 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fleet_core::agent::{self, AdapterFault, Verb};
-use fleet_core::tools::AgentAdapters;
+use fleet_core::tools::{ADAPTER_TIMEOUT, AgentAdapters};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-
-/// How long an adapter has to answer, unless told otherwise.
-pub const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The most of an answer that is read, in bytes.
 const MAX_ANSWER: u64 = 1 << 20;
@@ -36,7 +33,7 @@ pub struct Host {
 
 impl Default for Host {
     fn default() -> Host {
-        Host::with_timeout(TIMEOUT)
+        Host::with_timeout(ADAPTER_TIMEOUT)
     }
 }
 

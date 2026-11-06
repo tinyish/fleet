@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fleet_core::protocol::{ProtocolError, Reply, Request, Response, request, response};
+use fleet_core::tools::{ADAPTER_TIMEOUT, DOWNLOAD_TIMEOUT};
 
 use crate::protocol::{Doubt, During, Problem, Startup, Status};
 
@@ -17,14 +18,19 @@ pub(crate) const ONE: Duration = Duration::from_secs(2);
 /// How long start and stop wait for the supervisor to come or go.
 pub(crate) const WAIT: Duration = Duration::from_secs(10);
 
-/// How long status waits for its answer: the supervisor asks each adapter
-/// to read its sessions, and an adapter may take 20 s before it is a fault.
-pub(crate) const LOOK: Duration = Duration::from_secs(30);
+/// How long status waits for its answer: the supervisor asks each kind of
+/// adapter in turn to read its sessions, and each may take `ADAPTER_TIMEOUT`
+/// before it is a fault. Two hung kinds, one after the other, plus a margin
+/// (60 s), so their faults reach it.
+pub(crate) const LOOK: Duration = Duration::from_secs(2 * ADAPTER_TIMEOUT.as_secs() + 20);
 
 /// How long spawn waits for its answer: longer than a first fetch of an
-/// adapter (curl's 60 s, then the adapter's own time), so a slow fetch's or
-/// adapter's fault reaches it.
-pub(crate) const LAUNCH: Duration = Duration::from_secs(90);
+/// adapter at its slowest, two downloads (its manifest, then its build), the
+/// build's protocol check and then its launch, plus a margin (170 s), so a
+/// slow fetch's or adapter's fault reaches it, and a spawn that succeeds
+/// tells its caller the session's id.
+pub(crate) const LAUNCH: Duration =
+    Duration::from_secs(2 * DOWNLOAD_TIMEOUT.as_secs() + 2 * ADAPTER_TIMEOUT.as_secs() + 10);
 
 /// The supervisor's socket in `state_dir`.
 pub(crate) fn socket(state_dir: &Path) -> Result<PathBuf, Status> {
@@ -320,4 +326,22 @@ pub(crate) fn stop_project(
             _ => None,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ADAPTER_TIMEOUT, DOWNLOAD_TIMEOUT, LAUNCH, LOOK};
+
+    #[test]
+    fn spawn_outwaits_a_first_fetch_and_launch() {
+        assert!(
+            LAUNCH > 2 * DOWNLOAD_TIMEOUT + 2 * ADAPTER_TIMEOUT,
+            "{LAUNCH:?}"
+        );
+    }
+
+    #[test]
+    fn status_outwaits_two_hung_adapter_kinds() {
+        assert!(LOOK > 2 * ADAPTER_TIMEOUT, "{LOOK:?}");
+    }
 }

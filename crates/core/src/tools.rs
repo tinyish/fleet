@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::agent;
 
@@ -248,6 +249,10 @@ pub enum Fetched {
     NotFound,
 }
 
+/// The longest one download may take, all told: the network's driver gives
+/// up on it then.
+pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The network: downloads files. Only adapters are ever fetched
 /// (core.md § Outside tools).
 pub trait Network {
@@ -266,6 +271,10 @@ pub trait Network {
     /// When the downloader is not on the `PATH` or does not run.
     fn version(&self) -> Result<String, ToolError>;
 }
+
+/// How long an adapter has to answer one request: the agent tool's driver
+/// kills it then, and that is a fault.
+pub const ADAPTER_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The agent tool interface: the programs that adapt an agent, such as
 /// Claude Code, to tinyfleet, each run once per request (see [`agent`]).

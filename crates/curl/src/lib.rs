@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use fleet_core::tools::{Fetched, Network, ToolError};
+use fleet_core::tools::{DOWNLOAD_TIMEOUT, Fetched, Network, ToolError};
 
 /// The most of one download, in bytes: far more than any adapter.
 pub const MAX_BYTES: u64 = 64 << 20;
@@ -45,7 +45,8 @@ impl Network for Curl {
         // -q, first: never read the person's ~/.curlrc, which could turn
         // off the TLS checks the SHA-256 rests on.
         let out = Command::new(&self.program)
-            .args(["-q", "-fsSL", "--connect-timeout", "10", "--max-time", "60"])
+            .args(["-q", "-fsSL", "--connect-timeout", "10", "--max-time"])
+            .arg(DOWNLOAD_TIMEOUT.as_secs().to_string())
             .args(["--max-filesize", &MAX_BYTES.to_string()])
             .args(["--proto", proto, "--proto-redir", "=https", "-o"])
             .arg(to)
