@@ -5,7 +5,8 @@
 #   deletes the copy, never target/debug/fleet.
 # - It runs it with an empty environment but for what it sets: HOME and the
 #   state directory inside the root, LC_ALL=C, and a PATH whose service
-#   manager is the fake in this directory. Nothing from your shell reaches it.
+#   manager and tmux are the fakes in this directory. Nothing from your shell
+#   reaches it.
 # - On macOS it runs it under sandbox-exec, denying /bin/launchctl and any
 #   write under your real home, so even a driver that named the real tool by
 #   its path could not reach it.

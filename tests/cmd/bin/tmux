@@ -1,0 +1,35 @@
+#!/bin/sh
+# A fake tmux for the evals. It answers only the call the CLI makes,
+# kill-server on the socket given with -S, the way the real one does: a
+# server runs there when the socket file is there, and killing it removes
+# the socket and records `kill-server <socket>` in $HOME/.fake-tmux, which
+# the fleet shim points into the case's temp root. With no socket, it says
+# what tmux says and fails.
+set -eu
+
+socket=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -u) shift ;;
+        -S | -f)
+            [ "$1" = -S ] && socket=$2
+            shift 2
+            ;;
+        *) break ;;
+    esac
+done
+
+case "${1:-}" in
+    kill-server)
+        [ -e "$socket" ] || {
+            printf 'error connecting to %s (No such file or directory)\n' "$socket" >&2
+            exit 1
+        }
+        rm -f "$socket"
+        echo "kill-server $socket" >>"$HOME/.fake-tmux"
+        ;;
+    *)
+        printf 'fake tmux: not faked: %s\n' "$*" >&2
+        exit 64
+        ;;
+esac

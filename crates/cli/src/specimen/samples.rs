@@ -412,6 +412,13 @@ fn problems(kind: ProblemKind) -> Vec<Problem> {
             path: path("/Users/you/.local/bin/fleet"),
             error: denied(),
         }],
+        ProblemKind::EndAgents => vec![Problem::EndAgents {
+            socket: path(STATE).join("tmux.sock"),
+            error: ToolError::CouldNotRun {
+                program: "tmux".into(),
+                error: not_found(),
+            },
+        }],
         ProblemKind::ServiceManager => {
             let mut out: Vec<Problem> = tool_errors()
                 .into_iter()

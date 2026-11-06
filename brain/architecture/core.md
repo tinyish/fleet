@@ -39,7 +39,7 @@ the two disagree, the code wins.
 | **supervisor** | Replies with facts (a `protocol::Reply`: a `Response` or a `Status`), never sentences. The only writer of anything tinyfleet writes: registers fleets, writes their config file, turns projects on and off, launches and watches agents' sessions, keeps every seat filled, holds each message until its agent is idle, records each session's state as it reads it, appends the record of every step. | from the supervisor's start to its stop; the service manager restarts it if it crashes, and it adopts the sessions still running |
 | **state** | One SQLite file in the per-user state directory: the fleet registry, each project's on or off, each fleet's roles and seats as its config last read, agents' sessions, the record of every step. | forever |
 | **fleet directory** | Anywhere; holds only the person's config file. By default the project itself, left uncommitted; or a directory outside the repos, serving one or many. | the person's |
-| **tmux server** | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop |
+| **tmux server** | Holds agents' sessions on tinyfleet's own socket, never the person's. The person can attach to watch an agent. | outlives the supervisor and any fleet's stop; uninstall ends it |
 | **adapter programs** *(directional for task trackers and forges)* | One program per kind of agent, task tracker or forge. An agent's adapter says how to launch it and reads what state it is in; a tracker's or a forge's reaches that tool. | one request: the supervisor runs it through a driver, and it exits with its answer |
 | **workspaces** *(directional: arrive with Delivery)* | Git worktrees, each on its own branch, for work kept apart from a project's checkout. | under the state directory, until whoever made one removes it |
 
@@ -74,7 +74,7 @@ real tool. The core never runs a tool itself.
 | Tool interface | Driver now | Used by |
 | --- | --- | --- |
 | service manager | launchd (macOS), systemd user units (Linux) | CLI, to start and stop the supervisor; doctor |
-| multiplexer | tmux, on tinyfleet's own socket | supervisor; doctor *(directional)* |
+| multiplexer | tmux, on tinyfleet's own socket | supervisor; CLI, to end its server at uninstall; doctor *(directional)* |
 | git | git | doctor; the supervisor *(directional: when work lands)* |
 | agent | an adapter program per kind of agent, named by its path or as a release of fleet-adapters, fetched | supervisor |
 | task | *directional:* an adapter program per kind of task tracker | supervisor |
@@ -377,10 +377,14 @@ fleet; a directory with no fleet is nothing to remove, and says so.
 **uninstall**: the CLI asks first (`--non-interactive` answers yes; with no
 terminal and no `--non-interactive` it does nothing and exits 3), then stops
 the supervisor and removes its unit exactly as stop does. Only once the
-supervisor is down does it delete the files tinyfleet keeps in its state
+supervisor is down does it end the tmux server, and every agent with it, so
+nothing of tinyfleet runs afterwards (no server running is nothing to
+end, and neither is no tmux with no socket; a socket with no tmux to end
+it is a server that would not end); then it deletes the files tinyfleet keeps in its state
 directory (the adapters it fetched; its workspaces too, landed or not: *directional, with
 Delivery*), that directory if it is then empty (a `.DS_Store` left alone by
-Finder goes too), and the running `fleet` binary. A stop that fails or cannot tell leaves everything; a delete that
+Finder goes too), and the running `fleet` binary. A stop that fails or cannot tell leaves everything, agents
+included, and so does a server that would not end; a delete that
 fails names what is left, and running uninstall again finishes. The
 `fleet.toml` files in projects stay.
 

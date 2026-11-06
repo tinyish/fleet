@@ -238,6 +238,14 @@ pub trait Multiplexer {
     ///
     /// When the multiplexer fails, or the pane is not there.
     fn type_in(&self, pane: &str, text: &str) -> Result<(), ToolError>;
+
+    /// Ends tinyfleet's server, and every session and agent on it. A server
+    /// that is not running is not an error.
+    ///
+    /// # Errors
+    ///
+    /// When the multiplexer fails.
+    fn end_all(&self) -> Result<(), ToolError>;
 }
 
 /// What a download found.

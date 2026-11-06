@@ -368,6 +368,7 @@ fn refused_hint(status: &protocol::Status, ink: Ink) -> Option<String> {
 fn cannot_hint(problem: &Problem, ink: Ink) -> Option<String> {
     match problem {
         Problem::Uninstall { .. } => Some(uninstall::try_again(ink)),
+        Problem::EndAgents { socket, .. } => Some(uninstall::end_by_hand(socket, ink)),
         Problem::SocketPathTooLong(_) => Some(format!(
             "set {} to a shorter directory",
             ink.accent("FLEET_STATE_DIR")
@@ -458,6 +459,7 @@ fn cannot(problem: &Problem, ink: Ink) -> String {
         Problem::BadPath { path, error } => format!("{}: {error}", ink.path(path)),
         Problem::NoBinary(error) => format!("cannot find this fleet binary: {error}"),
         Problem::Uninstall { path, error } => uninstall::could_not_remove(path, error, ink),
+        Problem::EndAgents { error, .. } => uninstall::could_not_end(&tool(error, ink)),
         Problem::ServiceManager { doing, error } => format!(
             "the service manager did not {} the supervisor: {}",
             match doing {

@@ -216,6 +216,22 @@ impl Multiplexer for Tmux {
         self.run("paste-buffer", &args, Some(text.as_bytes()))
             .map(|_| ())
     }
+
+    fn end_all(&self) -> Result<(), ToolError> {
+        match self.run("kill-server", &["kill-server".into()], None) {
+            Ok(_) => Ok(()),
+            Err(ToolError::Failed { said, .. }) if no_server(&said) => Ok(()),
+            // No tmux on this PATH and no socket: no server ever ran. A
+            // socket may be a server run by a tmux on another PATH, the
+            // supervisor's, so it is not taken for none.
+            Err(ToolError::CouldNotRun { error, .. })
+                if error.kind() == io::ErrorKind::NotFound && !self.socket.exists() =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// tmux refuses a command longer than about 16 KiB (measured on tmux
@@ -447,6 +463,16 @@ mod tests {
     }
 
     #[test]
+    fn ending_all_ends_every_session_and_no_server_is_fine() {
+        let Some(s) = server("end") else { return };
+        assert!(s.tmux.end_all().is_ok(), "no server to end");
+        assert!(s.tmux.launch("s13", &s.dir, &sh("sleep 30")).is_ok());
+        assert!(s.tmux.launch("s14", &s.dir, &sh("sleep 30")).is_ok());
+        assert!(s.tmux.end_all().is_ok());
+        assert_eq!(s.tmux.panes().ok(), Some(vec![]));
+    }
+
+    #[test]
     fn a_pane_id_is_read_trimmed_and_an_empty_one_is_none() {
         assert_eq!(pane_id(b"%12\n").as_deref(), Some("%12"));
         assert_eq!(pane_id(b"  %3 ").as_deref(), Some("%3"));
@@ -531,7 +557,9 @@ mod tests {
 
     #[test]
     fn a_tmux_that_is_not_installed_cannot_run() {
-        let dir = std::env::temp_dir();
+        let dir =
+            std::env::temp_dir().join(format!("fleet-tmux-{}-not-installed", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
         let tmux = Tmux::with_program("fleet-no-such-tmux", dir.join(TMUX_SOCKET));
         assert!(
             matches!(tmux.panes(), Err(ToolError::CouldNotRun { program, .. }) if program == "tmux"),
@@ -542,6 +570,13 @@ mod tests {
             tmux.launch("s8", &dir, &sh("true")),
             Err(ToolError::CouldNotRun { .. })
         ));
+        assert!(tmux.end_all().is_ok(), "no tmux and no socket: no server");
+        let _ = fs::write(dir.join(TMUX_SOCKET), "");
+        assert!(
+            matches!(tmux.end_all(), Err(ToolError::CouldNotRun { .. })),
+            "a socket that no tmux here can end is an error"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

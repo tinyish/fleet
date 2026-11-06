@@ -55,3 +55,23 @@ pub(super) fn could_not_remove(path: &Path, error: &io::Error, ink: Ink) -> Stri
 pub(super) fn try_again(ink: Ink) -> String {
     format!("delete it, or run {} again", ink.accent("fleet uninstall"))
 }
+
+/// The agents' tmux server uninstall could not end, after the supervisor
+/// was stopped: `why`, worded.
+pub(super) fn could_not_end(why: &str) -> String {
+    format!(
+        "the supervisor is stopped, but its agents could not be ended, so its files are kept: {why}"
+    )
+}
+
+/// The way on after `could_not_end`: end the server at `socket` by hand.
+pub(super) fn end_by_hand(socket: &Path, ink: Ink) -> String {
+    format!(
+        "end them with {}, then run {} again",
+        ink.accent(format!(
+            "tmux -S {} kill-server",
+            super::shell_quoted(&socket.display().to_string())
+        )),
+        ink.accent("fleet uninstall")
+    )
+}

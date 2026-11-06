@@ -322,6 +322,14 @@ pub(crate) enum Problem {
         /// What the system said.
         error: io::Error,
     },
+    /// Uninstall stopped the supervisor but could not end the tmux server
+    /// its agents run on, so it kept tinyfleet's files.
+    EndAgents {
+        /// The server's socket.
+        socket: PathBuf,
+        /// What tmux said.
+        error: ToolError,
+    },
     /// The service manager would not start or stop the supervisor.
     ServiceManager {
         /// What was asked of it.

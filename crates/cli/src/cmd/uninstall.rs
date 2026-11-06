@@ -1,12 +1,13 @@
 //! `fleet uninstall`: after asking, the supervisor stopped and its unit
-//! removed, tinyfleet's own files in the state directory deleted, and this
-//! `fleet` binary too. The `fleet.toml` files in projects stay.
+//! removed, the tmux server ended with every agent on it, tinyfleet's own
+//! files in the state directory deleted, and this `fleet` binary too. The
+//! `fleet.toml` files in projects stay.
 
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use fleet_core::tools::ServiceManager;
+use fleet_core::tools::{Multiplexer, ServiceManager};
 
 use crate::Ask;
 use crate::cmd::stop;
@@ -16,16 +17,18 @@ use crate::ui::{self, words};
 pub(crate) fn run(
     state_dir: &Path,
     service: &dyn ServiceManager,
+    mux: &dyn Multiplexer,
     ask: Ask,
 ) -> Result<Response, Status> {
     let binary = std::env::current_exe().map_err(|e| Status::Cannot(Problem::NoBinary(e)))?;
-    run_with(state_dir, service, ask, &binary)
+    run_with(state_dir, service, mux, ask, &binary)
 }
 
 /// `run`, deleting `binary` as this `fleet`.
 fn run_with(
     state_dir: &Path,
     service: &dyn ServiceManager,
+    mux: &dyn Multiplexer,
     ask: Ask,
     binary: &Path,
 ) -> Result<Response, Status> {
@@ -43,6 +46,13 @@ fn run_with(
     if !supervisor_down(&stopped) {
         return stopped;
     }
+    // Stop leaves agents running; nothing of tinyfleet may once it is gone.
+    mux.end_all().map_err(|error| {
+        Status::Cannot(Problem::EndAgents {
+            socket: state_dir.join(fleet_core::paths::TMUX_SOCKET),
+            error,
+        })
+    })?;
     let kept_state_dir = remove_own_files(state_dir)?;
     remove(binary)?;
     Ok(Response::Uninstalled {
@@ -144,8 +154,9 @@ mod tests {
     use std::cell::Cell;
     use std::path::PathBuf;
 
+    use fleet_core::agent::Launched;
     use fleet_core::paths::OWN_FILES;
-    use fleet_core::tools::{SupervisorUnit, ToolError};
+    use fleet_core::tools::{Pane, SupervisorUnit, ToolError};
 
     struct Fake {
         stopped: Cell<bool>,
@@ -182,6 +193,37 @@ mod tests {
         }
     }
 
+    /// tmux, whose server is ended, or fails to end.
+    #[derive(Default)]
+    struct Mux {
+        ended: Cell<bool>,
+        fail: bool,
+    }
+    impl Multiplexer for Mux {
+        fn launch(&self, _: &str, _: &Path, _: &Launched) -> Result<String, ToolError> {
+            Ok(String::new())
+        }
+        fn panes(&self) -> Result<Vec<Pane>, ToolError> {
+            Ok(Vec::new())
+        }
+        fn stop(&self, _: &str) -> Result<(), ToolError> {
+            Ok(())
+        }
+        fn type_in(&self, _: &str, _: &str) -> Result<(), ToolError> {
+            Ok(())
+        }
+        fn end_all(&self) -> Result<(), ToolError> {
+            if self.fail {
+                return Err(ToolError::Failed {
+                    command: "tmux kill-server".into(),
+                    said: String::new(),
+                });
+            }
+            self.ended.set(true);
+            Ok(())
+        }
+    }
+
     fn fake(fail_stop: bool) -> Fake {
         Fake {
             stopped: Cell::new(false),
@@ -213,10 +255,11 @@ mod tests {
     fn ask_never_removes_nothing_and_needs_an_answer() {
         let (root, state, binary) = machine("never");
         let service = fake(false);
-        let ending = run_with(&state, &service, Ask::Never, &binary);
+        let mux = Mux::default();
+        let ending = run_with(&state, &service, &mux, Ask::Never, &binary);
         assert!(matches!(ending, Err(Status::NeedsAnswer)), "{ending:?}");
         assert!(all_there(&state, &binary));
-        assert!(!service.stopped.get());
+        assert!(!service.stopped.get() && !mux.ended.get());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -224,7 +267,8 @@ mod tests {
     fn non_interactive_removes_tinyfleets_files_the_empty_dir_and_the_binary() {
         let (root, state, binary) = machine("yes");
         let service = fake(false);
-        let ending = run_with(&state, &service, Ask::Yes, &binary);
+        let mux = Mux::default();
+        let ending = run_with(&state, &service, &mux, Ask::Yes, &binary);
         assert!(
             matches!(
                 ending,
@@ -236,7 +280,7 @@ mod tests {
             "{ending:?}"
         );
         assert!(!state.exists() && !binary.exists());
-        assert!(service.stopped.get());
+        assert!(service.stopped.get() && mux.ended.get());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -246,7 +290,7 @@ mod tests {
         let kept = state.join("adapters/claude-code/2.1.285");
         let _ = fs::create_dir_all(&kept);
         let _ = fs::write(kept.join("fleet-claude-code"), "adapter");
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(
                 ending,
@@ -265,7 +309,7 @@ mod tests {
     fn a_state_dir_holding_other_files_is_kept_and_said() {
         let (root, state, binary) = machine("kept");
         let _ = fs::write(state.join("notes.txt"), "mine");
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(
                 ending,
@@ -284,9 +328,27 @@ mod tests {
     #[test]
     fn a_stop_that_fails_removes_nothing() {
         let (root, state, binary) = machine("fails");
-        let ending = run_with(&state, &fake(true), Ask::Yes, &binary);
+        let mux = Mux::default();
+        let ending = run_with(&state, &fake(true), &mux, Ask::Yes, &binary);
         assert!(
             matches!(ending, Err(Status::Cannot(Problem::ServiceManager { .. }))),
+            "{ending:?}"
+        );
+        assert!(all_there(&state, &binary));
+        assert!(!mux.ended.get(), "the agents run on");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_server_that_will_not_end_removes_nothing() {
+        let (root, state, binary) = machine("mux-fails");
+        let mux = Mux {
+            fail: true,
+            ..Mux::default()
+        };
+        let ending = run_with(&state, &fake(false), &mux, Ask::Yes, &binary);
+        assert!(
+            matches!(ending, Err(Status::Cannot(Problem::EndAgents { .. }))),
             "{ending:?}"
         );
         assert!(all_there(&state, &binary));
@@ -296,8 +358,8 @@ mod tests {
     #[test]
     fn again_after_everything_is_gone_still_succeeds() {
         let (root, state, binary) = machine("again");
-        let _ = run_with(&state, &fake(false), Ask::Yes, &binary);
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let _ = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(ending, Ok(Response::Uninstalled { .. })),
             "{ending:?}"
@@ -310,7 +372,7 @@ mod tests {
         let (root, state, binary) = machine("binary");
         let _ = fs::remove_file(&binary);
         let _ = fs::create_dir_all(binary.join("inside"));
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(&ending, Err(Status::Cannot(Problem::Uninstall { path, .. })) if *path == binary),
             "{ending:?}"
@@ -318,7 +380,7 @@ mod tests {
         assert!(!state.exists());
         let _ = fs::remove_dir_all(&binary);
         let _ = fs::write(&binary, "binary");
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(ending, Ok(Response::Uninstalled { .. })),
             "{ending:?}"
@@ -333,7 +395,7 @@ mod tests {
         for file in OWN_FILES.iter().filter(|f| **f != "supervisor.log") {
             let _ = fs::remove_file(state.join(file));
         }
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(ending, Ok(Response::Uninstalled { .. })),
             "{ending:?}"
@@ -347,7 +409,7 @@ mod tests {
         let (root, real, binary) = machine("symlink");
         let link = root.join("link");
         let _ = std::os::unix::fs::symlink(&real, &link);
-        let ending = run_with(&link, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&link, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(
                 ending,
@@ -391,7 +453,7 @@ mod tests {
     fn a_ds_store_left_alone_goes_and_one_beside_other_files_stays() {
         let (root, state, binary) = machine("ds-store");
         let _ = fs::write(state.join(".DS_Store"), "finder");
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(
                 ending,
@@ -407,7 +469,7 @@ mod tests {
         let (root, state, binary) = machine("ds-store-kept");
         let _ = fs::write(state.join(".DS_Store"), "finder");
         let _ = fs::write(state.join("notes.txt"), "mine");
-        let ending = run_with(&state, &fake(false), Ask::Yes, &binary);
+        let ending = run_with(&state, &fake(false), &Mux::default(), Ask::Yes, &binary);
         assert!(
             matches!(
                 ending,

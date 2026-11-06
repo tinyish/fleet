@@ -32,7 +32,7 @@ Commands are not run by a shell: no `>`, `|`, `cd` or `&&`. The helpers in
 
 | Command | Does |
 | --- | --- |
-| `fleet …` | the built binary, hermetic: a copy of it, run with an empty environment except `HOME` and the state directory inside the case, `LC_ALL=C`, and a `PATH` whose service manager is the fake. On macOS it also runs under `sandbox-exec`, which denies `/bin/launchctl` and any write in your real home. It exits 99 rather than run outside a case's temp directory |
+| `fleet …` | the built binary, hermetic: a copy of it, run with an empty environment except `HOME` and the state directory inside the case, `LC_ALL=C`, and a `PATH` whose service manager and tmux are the fakes. On macOS it also runs under `sandbox-exec`, which denies `/bin/launchctl` and any write in your real home. It exits 99 rather than run outside a case's temp directory |
 | `in DIR CMD…` | runs CMD in DIR (made if missing), under the case's directory |
 | `repo DIR…` | makes each DIR a git repository with one commit |
 | `write FILE TEXT` | writes TEXT, with `\n` escapes, to FILE |
@@ -52,6 +52,13 @@ answer only the calls the drivers make, the way the real tools do, and run
 the unit's environment. `write .fleet/home/.fake-down ''` makes the service
 manager look unreachable. A supervisor a case leaves running is killed when
 the run ends.
+
+`bin/tmux` is a fake of tmux for the CLI, which uninstall runs to end the
+agents' server: a server runs while its socket file is there (`write
+.fleet/st/tmux.sock ''` stands one up), and ending it deletes the socket and
+records `kill-server <socket>` in `.fleet/home/.fake-tmux`. The supervisor
+never reaches it: the fake service managers run it without `bin/` on its
+`PATH`.
 
 To write a new case, put its commands down with no output, run
 `TRYCMD=overwrite cargo test -p fleet --test cmd`, then read every captured

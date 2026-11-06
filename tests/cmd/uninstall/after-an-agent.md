@@ -1,8 +1,10 @@
-# Uninstall after an agent ran takes the tmux socket too
+# Uninstall after an agent ran ends its tmux server and takes the socket
 
-An agent's tmux server leaves its socket in the state directory, as the one
-written here stands in for: uninstall deletes it with the rest, so the
-directory goes and nothing is said to be the person's.
+An agent's tmux server outlives the supervisor's stop: uninstall ends it,
+on tinyfleet's own socket, so no agent keeps running once tinyfleet is gone.
+The socket written here stands in for the server's, which the fake tmux
+ends. Then the socket goes with the rest, so the directory goes and nothing
+is said to be the person's.
 
 ```console
 $ repo code/app
@@ -14,6 +16,9 @@ $ write .fleet/st/tmux.sock ''
 
 $ fleet uninstall --non-interactive
 tinyfleet is uninstalled: the supervisor, its state and [CWD]/.fleet/bin/fleet are gone
+
+$ cat .fleet/home/.fake-tmux
+kill-server [CWD]/.fleet/st/tmux.sock
 
 $ ls .fleet
 bin

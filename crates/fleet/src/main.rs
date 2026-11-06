@@ -1,14 +1,13 @@
 //! The `fleet` binary: the supervisor when run as `fleet supervise`, the
 //! CLI otherwise.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|a| a == "supervise") {
         return supervisor::main(std::env::args_os().skip(2), |state_dir| supervisor::Tools {
-            mux: Box::new(tmux::Tmux::new(
-                state_dir.join(fleet_core::paths::TMUX_SOCKET),
-            )),
+            mux: Box::new(tmux(state_dir)),
             agents: Box::new(adapter_host::Host::default()),
             // file:// releases only when a base of its own is given.
             net: Box::new(curl::Curl::new(
@@ -22,5 +21,11 @@ fn main() -> ExitCode {
         service.as_deref().map_err(|e| *e),
         &git::Git,
         &curl::Curl::new(false),
+        &|state_dir| Box::new(tmux(state_dir)),
     )
+}
+
+/// tmux on the server of `state_dir`, whose socket is its own.
+fn tmux(state_dir: &Path) -> tmux::Tmux {
+    tmux::Tmux::new(state_dir.join(fleet_core::paths::TMUX_SOCKET))
 }

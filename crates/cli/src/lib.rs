@@ -10,12 +10,12 @@ mod ui;
 
 use std::ffi::OsString;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
 use fleet_core::paths::{Os, PathError, state_dir};
-use fleet_core::tools::{Git, Network, NoServiceManager, ServiceManager};
+use fleet_core::tools::{Git, Multiplexer, Network, NoServiceManager, ServiceManager};
 
 use crate::protocol::{Problem, Request, Status};
 use cmd::{
@@ -41,12 +41,14 @@ struct Args {
 
 /// Runs one invocation of `fleet` and returns how it ended. `service` is
 /// this machine's service manager, or why there is none; `git` is the
-/// person's git.
+/// person's git; `mux` is the multiplexer on the server of a state
+/// directory.
 pub fn run<I, T>(
     args: I,
     service: Result<&dyn ServiceManager, NoServiceManager>,
     git: &dyn Git,
     net: &dyn Network,
+    mux: &dyn Fn(&Path) -> Box<dyn Multiplexer>,
 ) -> ExitCode
 where
     I: IntoIterator<Item = T>,
@@ -104,9 +106,8 @@ where
             states,
             timeout,
         } => setup(service).and_then(|(_, dir)| wait::run(&dir, name, states, timeout.as_deref())),
-        Request::Uninstall => {
-            setup(service).and_then(|(service, dir)| uninstall::run(&dir, service, ask))
-        }
+        Request::Uninstall => setup(service)
+            .and_then(|(service, dir)| uninstall::run(&dir, service, &*mux(&dir), ask)),
         Request::Remove { projects } => {
             setup(service).and_then(|(service, dir)| remove::run(&dir, service, ask, projects))
         }

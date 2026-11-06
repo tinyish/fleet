@@ -224,6 +224,14 @@ impl Multiplexer for FakeMux {
             .push((pane.into(), text.into()));
         Ok(())
     }
+
+    fn end_all(&self) -> Result<(), ToolError> {
+        self.panes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        Ok(())
+    }
 }
 
 /// Agent adapters in memory: a launch runs `/bin/agent`, a read finds
@@ -339,6 +347,9 @@ impl Multiplexer for SharedMux {
     }
     fn type_in(&self, p: &str, t: &str) -> Result<(), ToolError> {
         self.0.type_in(p, t)
+    }
+    fn end_all(&self) -> Result<(), ToolError> {
+        self.0.end_all()
     }
 }
 
