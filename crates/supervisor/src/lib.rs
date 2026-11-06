@@ -309,6 +309,24 @@ fn repo_root_of(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// `path` made canonical; for one that no longer exists, its `..` resolved
+/// by text and its nearest existing ancestor made canonical, so a deleted
+/// repository written `../blog` still names the project it was.
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    if let Ok(path) = fs::canonicalize(path) {
+        return path;
+    }
+    let lexical = fleet_core::paths::lexical(path);
+    lexical
+        .ancestors()
+        .find_map(|base| {
+            let real = fs::canonicalize(base).ok()?;
+            let rest = lexical.strip_prefix(base).ok()?;
+            Some(real.join(rest))
+        })
+        .unwrap_or(lexical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

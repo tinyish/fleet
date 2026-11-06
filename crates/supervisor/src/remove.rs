@@ -14,7 +14,7 @@ use fleet_core::protocol::{Reply, Response, Status};
 use fleet_core::status;
 use state::{State, StateError, Step};
 
-use crate::{Error, lock};
+use crate::{Error, canonical, lock};
 
 /// Removes the fleet in `directory`, or takes `projects` out of it, under
 /// the state lock so it never races a create or a start. A path that no
@@ -36,24 +36,6 @@ pub(crate) fn remove(
         RemoveDecision::Whole(fleet) => whole(&mut state, fleet, config),
         RemoveDecision::Take { fleet, taken } => take(&mut state, fleet, taken),
     }
-}
-
-/// `path` made canonical; for one that no longer exists, its `..` resolved
-/// by text and its nearest existing ancestor made canonical, so a deleted
-/// repository written `../blog` still names the project it was.
-fn canonical(path: &Path) -> PathBuf {
-    if let Ok(path) = fs::canonicalize(path) {
-        return path;
-    }
-    let lexical = fleet_core::paths::lexical(path);
-    lexical
-        .ancestors()
-        .find_map(|base| {
-            let real = fs::canonicalize(base).ok()?;
-            let rest = lexical.strip_prefix(base).ok()?;
-            Some(real.join(rest))
-        })
-        .unwrap_or(lexical)
 }
 
 fn answer(remove: response::Remove) -> Reply {

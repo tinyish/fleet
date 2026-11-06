@@ -12,7 +12,7 @@ use fleet_core::seats::{self, Roster, RosterChange};
 use fleet_core::status;
 use state::{State, StateError, Step, Write};
 
-use crate::{Error, lock, repo_root_of};
+use crate::{Error, canonical, lock, repo_root_of};
 
 fn shown(path: &Path) -> String {
     path.display().to_string()
@@ -356,7 +356,7 @@ pub(crate) fn project_on(state: &Mutex<State>, project: &Path) -> Result<Reply, 
 /// Turns one project off; the rest of its fleet keeps its own on or off. A
 /// project whose repository is gone is still found by the path given.
 pub(crate) fn project_off(state: &Mutex<State>, project: &Path) -> Result<Reply, Error> {
-    let project = fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let project = canonical(project);
     let mut state = lock(state);
     let registered = state.fleets()?;
     let Some(fleet) = registered
