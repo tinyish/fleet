@@ -387,6 +387,7 @@ dependencies = [
  "curl",
  "fleet-core",
  "git",
+ "serde_json",
  "service",
  "supervisor",
  "tmux",
@@ -1065,7 +1066,6 @@ version = "0.0.0"
 dependencies = [
  "fleet-core",
  "rusqlite",
- "serde",
  "serde_json",
 ]
 

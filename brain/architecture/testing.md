@@ -20,9 +20,14 @@ code can be thrown away, the evals are kept.
   and a scenario covered there is not tested again module by module. Like
   unit tests, they test this implementation; Delivery's CLI evals still come
   once its milestone is built.
-- **Fitness tests:** check `core.md`'s invariants and dependency rules by
-  reading the workspace's dependency graph; a dependency or placement
-  `core.md` does not allow fails them.
+- **Fitness tests:** check `core.md`'s dependency rules and invariant 7
+  (only drivers start outside programs), the size budgets and unused
+  dependencies (`conventions.md#size-budgets`), and that every crate takes
+  the workspace's lints, by reading the workspace's dependency graph and
+  its source; a dependency or placement `core.md` does not allow fails
+  them. Invariant 10 is held by the types; the other invariants are
+  behaviour, for scenarios and evals. They live in
+  `crates/fleet/tests/fitness.rs`, and run with every `cargo test`.
 - **Evals:** transcript cases at the CLI boundary, under
   `tests/cmd/<verb>/`, checked by trycmd on every `cargo test`. A case is
   one command, or a short run of them, in one temp directory, with the
