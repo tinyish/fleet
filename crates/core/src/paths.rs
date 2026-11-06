@@ -6,15 +6,19 @@ use std::path::{Path, PathBuf};
 /// The state file's name, in the state directory.
 pub const STATE_FILE: &str = "state.sqlite3";
 
+/// The tmux server's socket's name, in the state directory.
+pub const TMUX_SOCKET: &str = "tmux.sock";
+
 /// Every file tinyfleet keeps in its state directory, so uninstall deletes
 /// those and nothing else.
-pub const OWN_FILES: [&str; 6] = [
+pub const OWN_FILES: [&str; 7] = [
     STATE_FILE,
     "state.sqlite3-wal",
     "state.sqlite3-shm",
     "supervisor.log",
     "supervisor.sock",
     "supervisor.lock",
+    TMUX_SOCKET,
 ];
 
 /// Every directory tinyfleet keeps in its state directory, deleted whole by

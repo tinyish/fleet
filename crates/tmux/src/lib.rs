@@ -13,9 +13,6 @@ use std::process::{Command, Output, Stdio};
 use fleet_core::agent::Launched;
 use fleet_core::tools::{FileStep, Multiplexer, Pane, ToolError};
 
-/// The socket's file name in the state directory.
-pub const SOCKET: &str = "tmux.sock";
-
 /// What tmux says when its server is not running: no sessions, not a
 /// failure.
 const NO_SERVER: [&str; 2] = ["no server running", "error connecting to"];
@@ -314,6 +311,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use fleet_core::agent::Launched;
+    use fleet_core::paths::TMUX_SOCKET;
     use fleet_core::tools::{Multiplexer, Pane, ToolError};
 
     /// A tmux server of the test's own, on a socket in a temp directory,
@@ -348,7 +346,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).ok()?;
         let dir = fs::canonicalize(&dir).ok()?;
-        let socket = dir.join(SOCKET);
+        let socket = dir.join(TMUX_SOCKET);
         Some(Server {
             tmux: Tmux::new(socket.clone()),
             dir,
@@ -534,7 +532,7 @@ mod tests {
     #[test]
     fn a_tmux_that_is_not_installed_cannot_run() {
         let dir = std::env::temp_dir();
-        let tmux = Tmux::with_program("fleet-no-such-tmux", dir.join(SOCKET));
+        let tmux = Tmux::with_program("fleet-no-such-tmux", dir.join(TMUX_SOCKET));
         assert!(
             matches!(tmux.panes(), Err(ToolError::CouldNotRun { program, .. }) if program == "tmux"),
             "{:?}",

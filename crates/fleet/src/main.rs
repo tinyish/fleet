@@ -6,7 +6,9 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|a| a == "supervise") {
         return supervisor::main(std::env::args_os().skip(2), |state_dir| supervisor::Tools {
-            mux: Box::new(tmux::Tmux::new(state_dir.join(tmux::SOCKET))),
+            mux: Box::new(tmux::Tmux::new(
+                state_dir.join(fleet_core::paths::TMUX_SOCKET),
+            )),
             agents: Box::new(adapter_host::Host::default()),
             // file:// releases only when a base of its own is given.
             net: Box::new(curl::Curl::new(
