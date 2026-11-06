@@ -498,7 +498,7 @@ fn tool(error: &ToolError, ink: Ink) -> String {
                 UnitPath::Program => "program path",
                 UnitPath::StateDir => "state directory path",
                 UnitPath::Log => "log path",
-                UnitPath::SearchPath => "PATH",
+                UnitPath::Env => "environment variable",
             },
             ink.path(path),
             match why {

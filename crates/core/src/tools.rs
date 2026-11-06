@@ -14,9 +14,11 @@ pub struct SupervisorUnit {
     pub program: PathBuf,
     /// The state directory, passed to the supervisor as `FLEET_STATE_DIR`.
     pub state_dir: PathBuf,
-    /// The `PATH` the supervisor, and the agents it launches, run with: the
-    /// CLI's, so they find what the person's shell finds. None writes none.
-    pub search_path: Option<OsString>,
+    /// The `PATH`, `LANG` and `LC_*` the supervisor, and the agents it
+    /// launches, run with, by name: the CLI's, so they find what the
+    /// person's shell finds and run in the person's locale. One unset is
+    /// not here, and none is written.
+    pub env: Vec<(String, OsString)>,
 }
 
 /// An outside tool failed, as facts; the CLI words them.
@@ -102,8 +104,8 @@ pub enum UnitPath {
     StateDir,
     /// The supervisor's log.
     Log,
-    /// The `PATH` it runs with.
-    SearchPath,
+    /// A variable of the environment it runs with, as `NAME=value`.
+    Env,
 }
 
 /// Why a path cannot go into a unit file.

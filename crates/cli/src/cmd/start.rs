@@ -1,6 +1,7 @@
 //! `fleet start`: the supervisor up, every config re-read, every project on.
 //! Also how any command that needs the supervisor brings it up.
 
+use std::ffi::OsString;
 use std::path::Path;
 
 use fleet_core::tools::{ServiceManager, SupervisorUnit};
@@ -45,7 +46,7 @@ pub(crate) fn ensure_supervisor(
     let unit = SupervisorUnit {
         program,
         state_dir: state_dir.to_path_buf(),
-        search_path: std::env::var_os("PATH"),
+        env: carried(std::env::vars_os()),
     };
     service.enable_and_start(&unit).map_err(|error| {
         Status::Cannot(Problem::ServiceManager {
@@ -63,4 +64,38 @@ pub(crate) fn ensure_supervisor(
         }));
     }
     Ok(Startup::Started)
+}
+
+/// Of `vars`, what the supervisor's unit carries: `PATH`, `LANG` and every
+/// `LC_*`, sorted by name.
+fn carried(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<(String, OsString)> {
+    let mut env: Vec<_> = vars
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value)))
+        .filter(|(name, _)| name == "PATH" || name == "LANG" || name.starts_with("LC_"))
+        .collect();
+    env.sort();
+    env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_unit_carries_the_path_and_the_locale_only() {
+        let vars = [
+            ("PATH", "/opt/homebrew/bin:/usr/bin"),
+            ("HOME", "/Users/you"),
+            ("LC_CTYPE", "UTF-8"),
+            ("LANGUAGE", "en"),
+            ("LANG", "en_US.UTF-8"),
+            ("LC_ALL", "C"),
+        ]
+        .map(|(n, v)| (OsString::from(n), OsString::from(v)));
+        let names: Vec<String> = carried(vars.into_iter())
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["LANG", "LC_ALL", "LC_CTYPE", "PATH"]);
+    }
 }

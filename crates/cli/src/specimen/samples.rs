@@ -488,7 +488,7 @@ fn unit_path(which: UnitPath, why: BadUnitPath) -> PathBuf {
         UnitPath::Program => ("/opt/fleet", "bin/fleet"),
         UnitPath::StateDir => ("/Users/you/fleet", "state"),
         UnitPath::Log => ("/Users/you/fleet/state", "supervisor.log"),
-        UnitPath::SearchPath => ("/opt/homebrew/bin:/usr/bin", ":/bin"),
+        UnitPath::Env => ("PATH=/opt/homebrew/bin:/usr/bin", ":/bin"),
     };
     let mut bytes = dir.as_bytes().to_vec();
     match why {

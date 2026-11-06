@@ -3,7 +3,8 @@
 //! server and never their `~/.tmux.conf`. A driver, so it may start
 //! programs; it depends on nothing in the workspace but `fleet-core`.
 
-use std::ffi::OsString;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -132,7 +133,7 @@ impl Multiplexer for Tmux {
         args.push("/usr/bin/env".into());
         args.push("-i".into());
         args.extend(
-            environment(program)
+            environment(program, std::env::vars_os())
                 .iter()
                 .map(|e| OsString::from(escaped(e))),
         );
@@ -227,7 +228,8 @@ pub const LIMIT: usize = 16_000;
 /// What the agent keeps of the supervisor's environment: who it runs as
 /// (Claude Code finds its login in the macOS Keychain by `USER`), where,
 /// with what shell and language, and the person's SSH agent, which git over
-/// SSH needs.
+/// SSH needs. Every `LC_*` is kept too, beside these: the rest of the
+/// person's locale.
 const KEPT: [&str; 8] = [
     "HOME",
     "USER",
@@ -240,13 +242,26 @@ const KEPT: [&str; 8] = [
 ];
 
 /// The agent's whole environment, as `NAME=value` arguments to `env -i`:
-/// the supervisor's [`KEPT`] variables, tmux's `TERM`, then what the
-/// adapter asks for, which wins.
-fn environment(program: &Launched) -> Vec<String> {
+/// of the `supervisor`'s, the [`KEPT`] variables and every `LC_*` by name,
+/// tmux's `TERM`, then what the adapter asks for, which wins.
+fn environment(
+    program: &Launched,
+    supervisor: impl Iterator<Item = (OsString, OsString)>,
+) -> Vec<String> {
+    let supervisor: BTreeMap<OsString, OsString> = supervisor.collect();
     let mut env = Vec::new();
     for name in KEPT {
-        if let Some(value) = std::env::var_os(name) {
+        if let Some(value) = supervisor.get(OsStr::new(name)) {
             env.push(format!("{name}={}", value.to_string_lossy()));
+        }
+    }
+    for (name, value) in &supervisor {
+        if name.to_str().is_some_and(|n| n.starts_with("LC_")) {
+            env.push(format!(
+                "{}={}",
+                name.to_string_lossy(),
+                value.to_string_lossy()
+            ));
         }
     }
     env.push("TERM=tmux-256color".to_owned());
@@ -346,6 +361,27 @@ mod tests {
             argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
             env: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn the_agent_keeps_the_supervisors_lang_and_every_lc_variable() {
+        let supervisor = [
+            ("LC_CTYPE", "UTF-8"),
+            ("EDITOR", "vi"),
+            ("LANG", "en_US.UTF-8"),
+            ("LANGUAGE", "en"),
+            ("LC_ALL", "fr_FR.UTF-8"),
+        ]
+        .map(|(n, v)| (OsString::from(n), OsString::from(v)));
+        assert_eq!(
+            environment(&sh("true"), supervisor.into_iter()),
+            [
+                "LANG=en_US.UTF-8",
+                "LC_ALL=fr_FR.UTF-8",
+                "LC_CTYPE=UTF-8",
+                "TERM=tmux-256color"
+            ]
+        );
     }
 
     /// Waits up to five seconds for `done`.

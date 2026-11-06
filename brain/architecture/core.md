@@ -60,9 +60,10 @@ not read stays off, named with why, and the others still come on. Once
 started, the supervisor comes back after a logout or a reboot, and every
 project with it as it was, until stop. Stopping leaves agents' sessions
 running, and starting adopts the sessions still there. When start brings the
-supervisor up, it writes the person's `PATH` into the supervisor's unit, so
-the supervisor, and the agents it launches, find the tools the person's shell
-finds; a running supervisor keeps the `PATH` it started with.
+supervisor up, it writes the person's `PATH`, `LANG` and every `LC_*` set
+into the supervisor's unit, so the supervisor, and the agents it launches,
+find the tools the person's shell finds and run in the person's locale; a
+running supervisor keeps the environment it started with.
 
 ## Outside tools
 

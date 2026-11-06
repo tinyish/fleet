@@ -1,5 +1,6 @@
 //! The supervisor's unit files, as text. Pure: nothing here touches disk.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use fleet_core::tools::{BadUnitPath, SupervisorUnit, ToolError, UnitPath};
@@ -15,6 +16,18 @@ fn text(path: &Path, which: UnitPath) -> Result<&str, ToolError> {
         return Err(bad(BadUnitPath::Newline));
     }
     Ok(s)
+}
+
+/// The unit's environment variables, each as `NAME=value`.
+fn env(unit: &SupervisorUnit) -> Result<Vec<String>, ToolError> {
+    unit.env
+        .iter()
+        .map(|(name, value)| {
+            let mut pair = OsString::from(format!("{name}="));
+            pair.push(value);
+            text(Path::new(&pair), UnitPath::Env).map(str::to_owned)
+        })
+        .collect()
 }
 
 fn xml(s: &str) -> String {
@@ -82,13 +95,18 @@ pub fn systemd_state_dir(text: &str) -> Option<PathBuf> {
 pub fn plist(unit: &SupervisorUnit, log: &Path) -> Result<String, ToolError> {
     let program = xml(text(&unit.program, UnitPath::Program)?);
     let state_dir = xml(text(&unit.state_dir, UnitPath::StateDir)?);
-    let search_path = match &unit.search_path {
-        Some(p) => format!(
-            "\t\t<key>PATH</key>\n\t\t<string>{}</string>\n",
-            xml(text(Path::new(p), UnitPath::SearchPath)?)
-        ),
-        None => String::new(),
-    };
+    let env = env(unit)?
+        .iter()
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(name, value)| {
+            format!(
+                "\t\t<key>{}</key>\n\t\t<string>{}</string>\n",
+                xml(name),
+                xml(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .concat();
     let log = xml(text(log, UnitPath::Log)?);
     let label = crate::LAUNCHD_LABEL;
     Ok(format!(
@@ -107,7 +125,7 @@ pub fn plist(unit: &SupervisorUnit, log: &Path) -> Result<String, ToolError> {
 \t<dict>
 \t\t<key>FLEET_STATE_DIR</key>
 \t\t<string>{state_dir}</string>
-{search_path}\t</dict>
+{env}\t</dict>
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>KeepAlive</key>
@@ -132,31 +150,26 @@ pub fn plist(unit: &SupervisorUnit, log: &Path) -> Result<String, ToolError> {
 /// When a path is not UTF-8 or contains a newline.
 pub fn systemd_unit(unit: &SupervisorUnit) -> Result<String, ToolError> {
     let program = systemd_quoted(text(&unit.program, UnitPath::Program)?, true);
-    let env = systemd_quoted(
+    let state_dir = systemd_quoted(
         &format!(
             "FLEET_STATE_DIR={}",
             text(&unit.state_dir, UnitPath::StateDir)?
         ),
         false,
     );
-    let search_path = match &unit.search_path {
-        Some(p) => format!(
-            "Environment={}\n",
-            systemd_quoted(
-                &format!("PATH={}", text(Path::new(p), UnitPath::SearchPath)?),
-                false
-            )
-        ),
-        None => String::new(),
-    };
+    let env = env(unit)?
+        .iter()
+        .map(|pair| format!("Environment={}\n", systemd_quoted(pair, false)))
+        .collect::<Vec<_>>()
+        .concat();
     Ok(format!(
         "[Unit]
 Description=tinyfleet supervisor
 
 [Service]
 ExecStart={program} supervise
-Environment={env}
-{search_path}Restart=on-failure
+Environment={state_dir}
+{env}Restart=on-failure
 KillMode=process
 
 [Install]
@@ -173,7 +186,7 @@ mod tests {
         SupervisorUnit {
             program: PathBuf::from(program),
             state_dir: PathBuf::from(state_dir),
-            search_path: None,
+            env: Vec::new(),
         }
     }
 
@@ -236,47 +249,59 @@ mod tests {
     }
 
     #[test]
-    fn the_path_is_carried_into_both_units_escaped() {
+    fn the_path_and_the_locale_are_carried_into_both_units_escaped() {
         let mut u = unit("/bin/fleet", "/s");
-        u.search_path = Some("/opt/homebrew/bin:/a&b/50%".into());
+        u.env = vec![
+            ("LANG".into(), "en_US.UTF-8".into()),
+            ("LC_ALL".into(), "fr_FR.UTF-8@\"$x\"".into()),
+            ("PATH".into(), "/opt/homebrew/bin:/a&b/50%".into()),
+        ];
         let p = plist(&u, Path::new("/s/l")).unwrap_or_default();
-        assert!(
-            p.contains("<key>PATH</key>\n\t\t<string>/opt/homebrew/bin:/a&amp;b/50%</string>"),
-            "{p}"
-        );
+        for pair in [
+            "<key>LANG</key>\n\t\t<string>en_US.UTF-8</string>",
+            "<key>LC_ALL</key>\n\t\t<string>fr_FR.UTF-8@&quot;$x&quot;</string>",
+            "<key>PATH</key>\n\t\t<string>/opt/homebrew/bin:/a&amp;b/50%</string>",
+        ] {
+            assert!(p.contains(pair), "{p}");
+        }
         assert_eq!(plist_state_dir(&p), Some(PathBuf::from("/s")));
         let s = systemd_unit(&u).unwrap_or_default();
-        assert!(
-            s.contains("Environment=\"PATH=/opt/homebrew/bin:/a&b/50%%\"\n"),
-            "{s}"
-        );
+        for line in [
+            "Environment=\"LANG=en_US.UTF-8\"\n",
+            "Environment=\"LC_ALL=fr_FR.UTF-8@\\\"$x\\\"\"\n",
+            "Environment=\"PATH=/opt/homebrew/bin:/a&b/50%%\"\n",
+        ] {
+            assert!(s.contains(line), "{s}");
+        }
         assert_eq!(systemd_state_dir(&s), Some(PathBuf::from("/s")));
     }
 
     #[test]
-    fn no_path_writes_none_and_a_bad_one_is_refused() {
+    fn no_variable_writes_none_and_a_bad_one_is_refused() {
         let u = unit("/bin/fleet", "/s");
-        assert!(
-            !plist(&u, Path::new("/s/l"))
-                .unwrap_or_default()
-                .contains("PATH")
-        );
-        assert!(!systemd_unit(&u).unwrap_or_default().contains("PATH"));
-        let mut bad = unit("/bin/fleet", "/s");
-        bad.search_path = Some("/a\n/b".into());
-        assert!(matches!(
-            systemd_unit(&bad),
-            Err(ToolError::UnitPath {
-                which: UnitPath::SearchPath,
-                ..
-            })
-        ));
-        assert!(matches!(
-            plist(&bad, Path::new("/s/l")),
-            Err(ToolError::UnitPath {
-                which: UnitPath::SearchPath,
-                ..
-            })
-        ));
+        let p = plist(&u, Path::new("/s/l")).unwrap_or_default();
+        let s = systemd_unit(&u).unwrap_or_default();
+        for name in ["PATH", "LANG", "LC_"] {
+            assert!(!p.contains(name), "{p}");
+            assert!(!s.contains(name), "{s}");
+        }
+        for (name, value) in [("PATH", "/a\n/b"), ("LANG", "en\nUS")] {
+            let mut bad = unit("/bin/fleet", "/s");
+            bad.env = vec![(name.into(), value.into())];
+            assert!(matches!(
+                systemd_unit(&bad),
+                Err(ToolError::UnitPath {
+                    which: UnitPath::Env,
+                    ..
+                })
+            ));
+            assert!(matches!(
+                plist(&bad, Path::new("/s/l")),
+                Err(ToolError::UnitPath {
+                    which: UnitPath::Env,
+                    ..
+                })
+            ));
+        }
     }
 }
