@@ -5,6 +5,7 @@
 //! it depends on nothing in the workspace but `fleet-core`.
 
 use std::io::{self, Read as _, Write as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -52,15 +53,9 @@ impl Host {
     ) -> Result<A, AdapterFault> {
         let mut line = serde_json::to_vec(request).unwrap_or_default();
         line.push(b'\n');
-        let mut child = Command::new(adapter)
-            .arg(verb.as_str())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| AdapterFault::CouldNotRun {
-                error: e.to_string(),
-            })?;
+        let mut child = start(adapter, verb).map_err(|e| AdapterFault::CouldNotRun {
+            error: e.to_string(),
+        })?;
         if let Some(mut stdin) = child.stdin.take() {
             // An adapter need not read its request: a closed pipe is fine.
             thread::spawn(move || {
@@ -91,7 +86,9 @@ impl Host {
         })
     }
 
-    /// Waits for `child` to exit, or kills it once the time limit passes.
+    /// Waits for `child` to exit, or once the time limit passes kills it with
+    /// its process group, so nothing it started keeps running or keeps its
+    /// pipes open.
     fn wait(&self, child: &mut Child) -> Option<std::process::ExitStatus> {
         let until = Instant::now() + self.timeout;
         loop {
@@ -99,6 +96,10 @@ impl Host {
                 return Some(status);
             }
             if Instant::now() >= until {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .stderr(Stdio::null())
+                    .status();
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
@@ -106,6 +107,18 @@ impl Host {
             thread::sleep(TICK);
         }
     }
+}
+
+/// Starts `adapter <verb>` with piped stdio, in a process group of its own
+/// so that a timed-out run is killed with all it started.
+fn start(adapter: &Path, verb: Verb) -> io::Result<Child> {
+    Command::new(adapter)
+        .arg(verb.as_str())
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
 }
 
 /// Reads at most `max` bytes of `from` on a thread of its own, so a full
@@ -270,6 +283,30 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A hang in a child the adapter started, holding its stdout and
+    /// stderr: the timeout kills that child too, so both pipes close and
+    /// their drain threads end.
+    #[test]
+    fn a_timed_out_adapter_leaves_no_pipe_open() {
+        let (_dir, path) = adapter(
+            "orphan",
+            r#"[ "$1" = launch ] || exit 0; sleep 10 & echo started; wait"#,
+        );
+        // A new script's first run can be slow to start (macOS checks it),
+        // so it runs once before the timed one.
+        let _ = Host::default().protocol(&path);
+        let started = start(&path, Verb::Launch);
+        assert!(started.is_ok(), "{started:?}");
+        let Ok(mut child) = started else { return };
+        let stdout = drain(child.stdout.take(), MAX_ANSWER);
+        let stderr = drain(child.stderr.take(), MAX_ANSWER);
+        let host = Host::with_timeout(Duration::from_millis(300));
+        assert_eq!(host.wait(&mut child), None);
+        let limit = Duration::from_secs(2);
+        assert_eq!(stdout.recv_timeout(limit), Ok(b"started\n".to_vec()));
+        assert_eq!(stderr.recv_timeout(limit), Ok(Vec::new()));
     }
 
     #[test]
