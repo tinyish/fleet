@@ -1,8 +1,9 @@
 //! The checks every adapter must pass, run against its built program: an
 //! adapter's integration test calls [`agent`] with its
-//! `CARGO_BIN_EXE_<name>`. Each run is made as tinyfleet makes it,
-//! `<program> <verb>` with the request on stdin, in an environment that
-//! holds only what [`Adapter::env`] gives, and is killed after its time
+//! `CARGO_BIN_EXE_<name>`. Each run is made as tinyfleet's adapter host
+//! makes it: `<program> <verb>` in the environment it is checked from, with
+//! what [`Adapter::env`] adds, the request on stdin as one line and stdin
+//! then closed, stderr kept as the host keeps it, and killed after its time
 //! limit.
 
 use std::collections::BTreeSet;
@@ -47,6 +48,10 @@ pub const READ_NONE: &str = "read of no sessions answers no readings";
 /// Read answers only the sessions asked about, each at most once.
 pub const READ_ONLY_ASKED: &str = "read answers only the sessions asked about, each at most once";
 
+/// The most of what an adapter says on stderr that is kept, in characters,
+/// once trimmed: adapter-host's `MAX_SAID`.
+const MAX_SAID: usize = 2000;
+
 /// How often a running adapter is checked on.
 const TICK: Duration = Duration::from_millis(25);
 
@@ -74,7 +79,8 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    /// The program at `program`, run with an empty environment.
+    /// The program at `program`, run with the environment it is checked
+    /// from, as the adapter host runs it with the supervisor's.
     #[must_use]
     pub fn new(program: impl Into<PathBuf>) -> Adapter {
         Adapter {
@@ -84,7 +90,7 @@ impl Adapter {
         }
     }
 
-    /// Adds `name` to the environment its runs get.
+    /// Sets `name` in the environment its runs get.
     #[must_use]
     pub fn env(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Adapter {
         self.env.push((name.into(), value.into()));
@@ -118,7 +124,8 @@ pub fn agent(adapter: &Adapter, directory: &Path) -> Vec<Breach> {
 /// What one run did.
 struct Ran {
     code: Option<i32>,
-    stdout: String,
+    /// Its raw bytes, parsed as the adapter host parses them.
+    stdout: Vec<u8>,
     stderr: String,
 }
 
@@ -126,7 +133,7 @@ impl Ran {
     /// The answer, when the run exited 0 with one that reads as a `T`.
     fn answer<T: DeserializeOwned>(&self) -> Option<T> {
         (self.code == Some(i32::from(ANSWERED)))
-            .then(|| serde_json::from_str(&self.stdout).ok())
+            .then(|| serde_json::from_slice(&self.stdout).ok())
             .flatten()
     }
 
@@ -144,7 +151,7 @@ impl fmt::Display for Ran {
         write!(
             f,
             "exited {code}, stdout {:?}, stderr {:?}",
-            clip(&self.stdout),
+            clip(&String::from_utf8_lossy(&self.stdout)),
             clip(&self.stderr)
         )
     }
@@ -272,13 +279,13 @@ fn json(value: &impl Serialize) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
-/// Runs `adapter` once with `args`. With `stdin`, writes it and closes the
-/// pipe; without, leaves stdin open until the run ends, as a terminal
-/// would. None when it ran past the time limit and was killed.
+/// Runs `adapter` once with `args`. With `stdin`, writes it as one line and
+/// closes the pipe, as the adapter host does; without, leaves stdin open
+/// until the run ends, as a terminal would. None when it ran past the time
+/// limit and was killed.
 fn run(adapter: &Adapter, args: &[&str], stdin: Option<&str>) -> io::Result<Option<Ran>> {
     let mut child = Command::new(&adapter.program)
         .args(args)
-        .env_clear()
         .envs(adapter.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -288,7 +295,7 @@ fn run(adapter: &Adapter, args: &[&str], stdin: Option<&str>) -> io::Result<Opti
     if let Some(text) = stdin
         && let Some(mut pipe) = held.take()
     {
-        let text = text.as_bytes().to_vec();
+        let text = format!("{text}\n").into_bytes();
         thread::spawn(move || {
             let _ = pipe.write_all(&text);
         });
@@ -311,18 +318,20 @@ fn run(adapter: &Adapter, args: &[&str], stdin: Option<&str>) -> io::Result<Opti
     let Some(status) = status else {
         return Ok(None);
     };
-    let text = |rx: mpsc::Receiver<Vec<u8>>| {
-        String::from_utf8_lossy(&rx.recv_timeout(TICK * 40).unwrap_or_default()).into_owned()
-    };
+    let bytes = |rx: mpsc::Receiver<Vec<u8>>| rx.recv_timeout(TICK * 40).unwrap_or_default();
     Ok(Some(Ran {
         code: status.code(),
-        stdout: text(stdout),
-        stderr: text(stderr),
+        stdout: bytes(stdout),
+        stderr: String::from_utf8_lossy(&bytes(stderr))
+            .trim()
+            .chars()
+            .take(MAX_SAID)
+            .collect(),
     }))
 }
 
-/// Reads at most [`MAX_JSON`] bytes of `from` on a thread of its own, so a
-/// full pipe never stalls the adapter.
+/// Reads at most [`MAX_JSON`] bytes of `from` (adapter-host's `MAX_ANSWER`)
+/// on a thread of its own, so a full pipe never stalls the adapter.
 fn drain(from: Option<impl io::Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
     if let Some(from) = from {
@@ -373,10 +382,7 @@ esac"#;
         let bin = FakePath::new()?;
         let program = bin.program("adapter", script)?;
         let work = TempDir::new("conformance-work")?;
-        // The environment is cleared: the scripts' sh needs a PATH for cat.
-        let adapter = Adapter::new(program)
-            .env("PATH", "/usr/bin:/bin")
-            .time_limit(limit);
+        let adapter = Adapter::new(program).time_limit(limit);
         Ok(agent(&adapter, work.path())
             .iter()
             .map(|b| b.rule)
@@ -386,6 +392,40 @@ esac"#;
     #[test]
     fn an_adapter_that_keeps_every_rule_breaches_none() -> io::Result<()> {
         assert_eq!(check(GOOD)?, Vec::<&str>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn an_adapter_that_reads_its_request_as_a_line_breaches_none() -> io::Result<()> {
+        let script = GOOD.replace(
+            "req=$(cat)",
+            r#"IFS= read -r req || { echo "the request: no line" >&2; exit 1; }"#,
+        );
+        assert_eq!(check(&script)?, Vec::<&str>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn an_adapter_runs_with_the_environment_it_is_checked_from() -> io::Result<()> {
+        // cargo sets CARGO_MANIFEST_DIR for a test, as the supervisor's
+        // environment holds what it was started with.
+        let script = format!(
+            r#"[ -n "$CARGO_MANIFEST_DIR" ] || {{ echo "no environment" >&2; exit 1; }}{GOOD}"#
+        );
+        assert_eq!(check(&script)?, Vec::<&str>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn what_an_adapter_says_is_kept_as_the_host_keeps_it() -> io::Result<()> {
+        let bin = FakePath::new()?;
+        let program = bin.program("adapter", "printf ' %03000d \n' 0 >&2")?;
+        let ran = run(&Adapter::new(program), &[], None)?;
+        let said = ran.map(|r| r.stderr).unwrap_or_default();
+        assert_eq!(
+            (said.chars().count(), said.trim() == said),
+            (MAX_SAID, true)
+        );
         Ok(())
     }
 
@@ -438,6 +478,16 @@ esac"#;
         let script = GOOD.replace(
             r#"launch) echo '{"argv":["/bin/echo","hi"]}' ;;"#,
             "launch) echo 'no agent here' >&2; exit 1 ;;",
+        );
+        assert_eq!(check(&script)?, vec![LAUNCH_ANSWERS]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_answer_that_is_not_utf_8_breaches() -> io::Result<()> {
+        let script = GOOD.replace(
+            r#"launch) echo '{"argv":["/bin/echo","hi"]}' ;;"#,
+            r#"launch) printf '{"argv":["/bin/echo","h\377i"]}\n' ;;"#,
         );
         assert_eq!(check(&script)?, vec![LAUNCH_ANSWERS]);
         Ok(())
