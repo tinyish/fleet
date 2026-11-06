@@ -149,7 +149,6 @@ fn an_adopted_file_brings_its_roles_and_seats() {
     assert!(fs::write(r.app.join("fleet.toml"), text).is_ok());
     assert!(created(&r.create(&r.app, &[])).is_some());
     assert_eq!(seats_of(&r, &r.app), ["scribe"]);
-    assert_eq!(steps(&r.sup), ["ROLE_ADDED", "SEAT_ADDED", "FLEET_CREATED"]);
 }
 
 #[test]
@@ -423,13 +422,12 @@ fn a_directory_that_cannot_be_looked_at_is_not_forgotten() {
 const SEAT: &str = "[roles.w]\nadapter = \"/a/claude\"\n[seats.scribe]\nrole = \"w\"\n";
 
 #[test]
-fn start_keeps_each_fleets_roster_and_records_what_moved() {
+fn start_keeps_each_fleets_roster() {
     let r = bare("start-roster", Fakes::default());
     let wing = wingman(&r, &["api"]);
     write_config(&r, &["api"], SEAT);
     assert!(all_on(&r).is_some());
     assert_eq!(seats_of(&r, &wing), ["scribe"]);
-    assert!(steps(&r.sup).contains(&"SEAT_ADDED".to_owned()));
     write_config(
         &r,
         &["api"],
@@ -437,31 +435,6 @@ fn start_keeps_each_fleets_roster_and_records_what_moved() {
     );
     assert!(all_on(&r).is_some());
     assert_eq!(seats_of(&r, &wing), ["critic"]);
-    let seen = steps(&r.sup);
-    for want in ["SEAT_REMOVED", "ROLE_CHANGED"] {
-        assert!(seen.iter().any(|s| s == want), "{want}: {seen:?}");
-    }
-    assert_eq!(seen.iter().filter(|s| *s == "SEAT_ADDED").count(), 2);
-    write_config(
-        &r,
-        &["api"],
-        "[roles.k]\nadapter = \"/a/other\"\n[seats.critic]\nrole = \"k\"\n",
-    );
-    assert!(all_on(&r).is_some());
-    let seen = steps(&r.sup);
-    for want in ["SEAT_CHANGED", "ROLE_ADDED", "ROLE_REMOVED"] {
-        assert!(seen.iter().any(|s| s == want), "{want}: {seen:?}");
-    }
-    // Read again unchanged, nothing moved.
-    let before = seen.len();
-    assert!(all_on(&r).is_some());
-    let after = steps(&r.sup);
-    assert!(
-        after[before..]
-            .iter()
-            .all(|s| !s.starts_with("SEAT_") && s != "ROLE_CHANGED"),
-        "{after:?}"
-    );
 }
 
 #[test]

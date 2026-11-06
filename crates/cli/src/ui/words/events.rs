@@ -122,14 +122,6 @@ fn sentence(step: &Step, every: bool, ink: Ink) -> String {
             every,
             ink,
         ),
-        Step::SessionGone {
-            session,
-            fleet,
-            seat,
-        } => format!(
-            "{} was gone, and was cleared to come back",
-            who(session, Some(fleet), Some(seat), every, ink)
-        ),
         Step::SeatAdded { seat, role, .. } => format!(
             "the seat {} was added, as {}",
             ink.accent(seat),

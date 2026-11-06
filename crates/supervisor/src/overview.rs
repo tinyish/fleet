@@ -10,7 +10,7 @@ use fleet_core::agent::SessionState;
 use fleet_core::messages::Recipient;
 use fleet_core::protocol::{Reply, Response, response};
 use fleet_core::seats::{Roster, SeatKey};
-use state::{FleetRoster, MessageRow, SessionRow, now_millis};
+use state::{FleetRoster, Life, MessageRow, SessionRow, now_millis};
 
 use crate::tending::Down;
 use crate::{Error, Supervisor};
@@ -145,7 +145,8 @@ fn fleet_overview(
     }
 }
 
-/// One seat: its session (the live one, else the newest), whether that was
+/// One seat: its session among `rows`, oldest launched first (the live
+/// one, else the newest), whether that was
 /// launched from an older role, and its backoff while nothing of it lives.
 fn seat_overview(
     roster: &Roster,
@@ -154,19 +155,17 @@ fn seat_overview(
     down: Option<&Down>,
     listed: &impl Fn(&SessionRow) -> response::Listed,
 ) -> response::SeatOverview {
-    let sessions: Vec<(response::Listed, &SessionRow)> =
-        rows.iter().map(|r| (listed(r), *r)).collect();
-    let chosen = sessions
+    let chosen = rows
         .iter()
-        .find(|(l, _)| l.state != SessionState::Gone)
-        .or_else(|| sessions.iter().max_by_key(|(l, _)| l.launch_time_millis));
-    let live = chosen.is_some_and(|(l, _)| l.state != SessionState::Gone);
+        .find(|r| r.life == Life::Live)
+        .or_else(|| rows.last());
+    let live = chosen.is_some_and(|r| r.life == Life::Live);
     let digest = roster.role(&seat.role).map(fleet_core::seats::Role::digest);
     response::SeatOverview {
         name: seat.name.clone(),
         role: seat.role.clone(),
-        older_role: chosen.is_some_and(|(_, r)| r.role_digest != digest),
-        session: chosen.map(|(l, _)| l.clone()),
+        older_role: chosen.is_some_and(|r| r.role_digest != digest),
+        session: chosen.map(|r| listed(r)),
         down: down.filter(|_| !live).map(|d| response::Down {
             why: d.why.clone(),
             next_try_millis: d.backoff.next_try_millis,

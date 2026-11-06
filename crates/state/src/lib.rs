@@ -6,19 +6,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fleet_core::fleets::{Change, Fleet};
+use fleet_core::fleets::Fleet;
 use fleet_core::seats::{Role, Roster, Seat};
 use fleet_core::tools::ToolError;
 use rusqlite::{Connection, params};
 
+mod fleets;
 mod messages;
 mod records;
 mod sessions;
 
-pub use fleet_core::record::Step;
 pub use messages::MessageRow;
 pub use records::Bell;
-pub use sessions::SessionRow;
+pub use sessions::{Launched, Life, Named, SessionRow};
 
 /// The schema version this code reads and writes. Until tinyfleet's first
 /// release every schema change goes into version 1 (see core.md § Boundaries).
@@ -109,9 +109,11 @@ impl State {
                      role_digest        TEXT,
                      role               TEXT,
                      state              TEXT,
+                     end_time_millis    INTEGER,
                      CHECK (seat IS NULL OR (fleet IS NOT NULL AND role IS NOT NULL)),
                      CHECK (role IS NULL OR fleet IS NOT NULL)
                  );
+                 CREATE INDEX sessions_seat ON sessions (fleet, seat);
                  CREATE TABLE roles (
                      fleet     TEXT NOT NULL REFERENCES fleets (directory) ON DELETE CASCADE,
                      label     TEXT NOT NULL,
@@ -214,8 +216,8 @@ impl State {
 impl State {
     /// Runs `change` in one transaction: every write it makes, and every
     /// step it records, commits together, or none of them does. Every write
-    /// to state goes through here, so a change and the step that records it
-    /// never part.
+    /// to state goes through here, and each records its own steps, so a
+    /// change and the step that records it never part.
     ///
     /// # Errors
     ///
@@ -241,204 +243,14 @@ pub struct Write<'a> {
     tx: rusqlite::Transaction<'a>,
 }
 
-impl Write<'_> {
-    /// Registers `fleet`, its projects on, and runs `write_config`: if writing
-    /// the config fails, the transaction fails with it.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails, a path is not UTF-8, or `write_config` fails.
-    pub fn create_fleet(
-        &mut self,
-        fleet: &Fleet,
-        write_config: impl FnOnce() -> io::Result<()>,
-    ) -> Result<(), StateError> {
-        self.tx.execute(
-            "INSERT INTO fleets (directory, create_time_millis) VALUES (?1, ?2)",
-            params![utf8(&fleet.directory)?, now_millis()],
-        )?;
-        for project in &fleet.projects {
-            self.tx.execute(
-                "INSERT INTO projects (directory, fleet, active) VALUES (?1, ?2, 1)",
-                params![utf8(project)?, utf8(&fleet.directory)?],
-            )?;
-        }
-        write_config().map_err(StateError::Config)
-    }
-
-    /// Whether seat `seat` of the fleet in `fleet` is still wanted as this
-    /// transaction sees it: the fleet has a project on, and the seat is in
-    /// its roster with a role whose digest is `role_digest`.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the path is not UTF-8.
-    pub fn seat_wanted(
-        &self,
-        fleet: &Path,
-        seat: &str,
-        role_digest: &str,
-    ) -> Result<bool, StateError> {
-        if !on_in(&self.tx, fleet)? {
-            return Ok(false);
-        }
-        let roster = roster_in(&self.tx, fleet)?;
-        Ok(roster
-            .seats
-            .iter()
-            .find(|s| s.name == seat)
-            .and_then(|s| roster.role(&s.role))
-            .is_some_and(|role| role.digest() == role_digest))
-    }
-
-    /// Replaces the roles and seats of the fleet in `fleet` with `roster`'s
-    /// and records `steps`, the change's; then drops the messages held for
-    /// each seat that left, recording each dropped.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or a path is not UTF-8.
-    pub fn set_roster(
-        &mut self,
-        fleet: &Path,
-        roster: &Roster,
-        steps: &[Step],
-    ) -> Result<(), StateError> {
-        let had = roster_in(&self.tx, fleet)?.seats;
-        let fleet = utf8(fleet)?;
-        self.tx
-            .execute("DELETE FROM roles WHERE fleet = ?1", params![fleet])?;
-        self.tx
-            .execute("DELETE FROM seats WHERE fleet = ?1", params![fleet])?;
-        for role in &roster.roles {
-            self.tx.execute(
-                "INSERT INTO roles (fleet, label, adapter, model, prompt, directory)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    fleet,
-                    role.label,
-                    role.adapter,
-                    role.model,
-                    role.prompt,
-                    utf8(&role.directory)?
-                ],
-            )?;
-        }
-        for seat in &roster.seats {
-            self.tx.execute(
-                "INSERT INTO seats (fleet, name, role) VALUES (?1, ?2, ?3)",
-                params![fleet, seat.name, seat.role],
-            )?;
-        }
-        steps.iter().try_for_each(|step| self.record(step))?;
-        had.iter()
-            .filter(|old| !roster.seats.iter().any(|s| s.name == old.name))
-            .try_for_each(|seat| self.drop_for_seat(fleet, &seat.name))
-    }
-
-    /// Removes the fleet in `directory`, records `step`, the removal's, and
-    /// drops the messages held for its seats, recording each dropped. Its
-    /// projects, roles and seats go with it, and its seats' sessions stay.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the path is not UTF-8.
-    pub fn remove_fleet(&mut self, directory: &Path, step: &Step) -> Result<(), StateError> {
-        let directory = utf8(directory)?;
-        self.tx.execute(
-            "DELETE FROM fleets WHERE directory = ?1",
-            params![directory],
-        )?;
-        self.record(step)?;
-        self.drop_for_fleet(directory)
-    }
-
-    /// Takes `projects` out of the fleet that serves them.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or a path is not UTF-8.
-    pub fn remove_projects(&mut self, projects: &[PathBuf]) -> Result<(), StateError> {
-        for project in projects {
-            self.tx.execute(
-                "DELETE FROM projects WHERE directory = ?1",
-                params![utf8(project)?],
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Turns one project on or off.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the path is not UTF-8.
-    pub fn set_active(&mut self, project: &Path, active: bool) -> Result<(), StateError> {
-        self.tx.execute(
-            "UPDATE projects SET active = ?1 WHERE directory = ?2",
-            params![active, utf8(project)?],
-        )?;
-        Ok(())
-    }
-
-    /// Turns every project of the fleet in `directory` on or off.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the path is not UTF-8.
-    pub fn set_fleet_active(&mut self, directory: &Path, active: bool) -> Result<(), StateError> {
-        self.tx.execute(
-            "UPDATE projects SET active = ?1 WHERE fleet = ?2",
-            params![active, utf8(directory)?],
-        )?;
-        Ok(())
-    }
-
-    /// Turns every project on or off.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails.
-    pub fn set_all_active(&mut self, active: bool) -> Result<(), StateError> {
-        self.tx
-            .execute("UPDATE projects SET active = ?1", params![active])?;
-        Ok(())
-    }
-
-    /// Applies what re-reading every fleet's config changed. A project
-    /// removed from one fleet and added to another moves, keeping its on or
-    /// off; a project only added comes in off, and one only removed is
-    /// dropped.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or a path is not UTF-8.
-    pub fn apply_reread(&mut self, changes: &[(PathBuf, Change)]) -> Result<(), StateError> {
-        let added: Vec<&PathBuf> = changes.iter().flat_map(|(_, c)| &c.added).collect();
-        for (_, change) in changes {
-            for project in change.removed.iter().filter(|p| !added.contains(p)) {
-                self.tx.execute(
-                    "DELETE FROM projects WHERE directory = ?1",
-                    params![utf8(project)?],
-                )?;
-            }
-        }
-        for (fleet, change) in changes {
-            for project in &change.added {
-                self.tx.execute(
-                    "INSERT INTO projects (directory, fleet, active) VALUES (?1, ?2, 0)
-                     ON CONFLICT (directory) DO UPDATE SET fleet = excluded.fleet",
-                    params![utf8(project)?, utf8(fleet)?],
-                )?;
-            }
-        }
-        Ok(())
-    }
-}
-
 fn utf8(path: &Path) -> Result<&str, StateError> {
     path.to_str()
         .ok_or_else(|| StateError::NotUtf8(path.to_path_buf()))
+}
+
+/// `path` as a step names it.
+fn shown(path: &Path) -> String {
+    path.display().to_string()
 }
 
 /// The roles and seats of the fleet in `fleet`, read through `conn`.
@@ -493,8 +305,12 @@ pub fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use fleet_core::agent::SessionState;
-    use fleet_core::messages::{Recipient, Sender};
-    use fleet_core::seats::{Role, Seat};
+    use fleet_core::fleets::Change;
+    use fleet_core::messages::{Dropped, Recipient, Sender};
+    use fleet_core::protocol::response::ConfigFate;
+    use fleet_core::record::Step;
+    use fleet_core::seats::{Role, Seat, SeatKey};
+    use fleet_core::status::{self, Status, Takes};
     use fleet_core::tools::ToolError;
     use std::sync::Arc;
     use std::time::Duration;
@@ -527,6 +343,21 @@ mod tests {
             .ok()
     }
 
+    /// Every step recorded, oldest first.
+    fn recorded(state: &State) -> Vec<Step> {
+        state
+            .events(0, None, 1 << 20)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.step)
+            .collect()
+    }
+
+    /// Every step recorded from `from` on, oldest first.
+    fn recorded_from(state: &State, from: usize) -> Vec<Step> {
+        recorded(state).split_off(from)
+    }
+
     fn fleet(dir: &str, projects: &[&str]) -> Fleet {
         Fleet {
             directory: dir.into(),
@@ -534,15 +365,19 @@ mod tests {
         }
     }
 
+    /// Writes `f` with no roles or seats, its config written.
+    fn create(state: &mut State, f: &Fleet) {
+        let done = state.write(|w| w.create_fleet(f, &Roster::default(), false, || Ok(())));
+        assert!(done.is_ok(), "{done:?}");
+    }
+
     #[test]
     fn a_write_that_fails_part_way_changes_nothing() {
         let (mut state, dir) = fresh("rollback");
-        let f = fleet("/f/a", &["/c/app"]);
-        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
+        create(&mut state, &fleet("/f/a", &["/c/app"]));
         let before = records(&state);
         let failed = state.write(|w| {
-            w.set_all_active(false)?;
-            w.record(&Step::EveryFleetOff)?;
+            w.all_off()?;
             Err::<(), _>(StateError::NotUtf8(PathBuf::from("/x")))
         });
         assert!(failed.is_err());
@@ -554,14 +389,11 @@ mod tests {
     #[test]
     fn a_project_moved_between_fleets_keeps_its_on_or_off() {
         let (mut state, dir) = fresh("moved");
-        for f in [
-            fleet("/f/a", &["/c/app", "/c/api"]),
-            fleet("/f/b", &["/c/web"]),
-        ] {
-            assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
-        }
+        create(&mut state, &fleet("/f/a", &["/c/app", "/c/api"]));
+        create(&mut state, &fleet("/f/b", &["/c/web"]));
         let off = state.write(|w| w.set_active(Path::new("/c/api"), false));
         assert!(off.is_ok());
+        let from = recorded(&state).len();
         let changes = [
             (
                 PathBuf::from("/f/a"),
@@ -587,35 +419,150 @@ mod tests {
             fleets,
             vec![fleet("/f/b", &["/c/api", "/c/app", "/c/new", "/c/web"])]
         );
+        let removed = |p: &str| Step::ProjectRemoved {
+            fleet: "/f/a".into(),
+            project: p.into(),
+        };
+        let added = |p: &str| Step::ProjectAdded {
+            fleet: "/f/b".into(),
+            project: p.into(),
+        };
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                removed("/c/app"),
+                removed("/c/api"),
+                added("/c/app"),
+                added("/c/api"),
+                added("/c/new")
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn removing_a_fleet_takes_its_projects_with_it() {
+    fn removing_or_forgetting_a_fleet_takes_its_projects_and_records_it_once() {
         let (mut state, dir) = fresh("remove");
-        let f = fleet("/f/a", &["/c/api", "/c/app"]);
-        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
-        assert!(
-            state
-                .write(|w| w.remove_fleet(Path::new("/f/a"), &forgotten("/f/a")))
-                .is_ok()
-        );
+        create(&mut state, &fleet("/f/a", &["/c/app", "/c/api"]));
+        create(&mut state, &fleet("/f/b", &["/c/web"]));
+        let from = recorded(&state).len();
+        let done = state.write(|w| {
+            w.remove_fleet(Path::new("/f/a"), ConfigFate::Deleted)?;
+            w.forget_fleet(Path::new("/f/b"))?;
+            w.remove_fleet(Path::new("/f/a"), ConfigFate::Kept)?;
+            w.forget_fleet(Path::new("/f/b"))
+        });
+        assert!(done.is_ok(), "{done:?}");
         assert_eq!(state.fleets().ok(), Some(vec![]));
         assert_eq!(active(&state, "/c/app"), None);
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                Step::FleetRemoved {
+                    directory: "/f/a".into(),
+                    projects: vec!["/c/api".into(), "/c/app".into()],
+                    config: ConfigFate::Deleted,
+                },
+                Step::FleetForgotten {
+                    directory: "/f/b".into()
+                }
+            ],
+            "a fleet already gone records nothing"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn taking_projects_keeps_the_fleet_and_the_rest() {
         let (mut state, dir) = fresh("take");
-        let f = fleet("/f/a", &["/c/api", "/c/app"]);
-        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
+        create(&mut state, &fleet("/f/a", &["/c/api", "/c/app"]));
+        let from = recorded(&state).len();
+        let taken = [PathBuf::from("/c/app")];
         assert!(
             state
-                .write(|w| w.remove_projects(&[PathBuf::from("/c/app")]))
+                .write(|w| w.remove_projects(Path::new("/f/a"), &taken))
                 .is_ok()
         );
         assert_eq!(state.fleets().ok(), Some(vec![fleet("/f/a", &["/c/api"])]));
+        assert_eq!(
+            recorded_from(&state, from),
+            [Step::ProjectsTaken {
+                fleet: "/f/a".into(),
+                projects: vec!["/c/app".into()]
+            }]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn on_and_off_record_each_project_with_its_fleet_and_every_fleet() {
+        let (mut state, dir) = fresh("on-off");
+        create(&mut state, &fleet("/f/a", &["/c/app"]));
+        create(&mut state, &fleet("/f/b", &["/c/web"]));
+        let from = recorded(&state).len();
+        let done = state.write(|w| {
+            w.supervisor_started("1.2.3", 42)?;
+            w.set_active(Path::new("/c/app"), false)?;
+            w.set_active(Path::new("/c/app"), true)?;
+            w.set_active(Path::new("/c/none"), true)?;
+            w.all_off()?;
+            w.all_on(&[PathBuf::from("/f/a")], &[PathBuf::from("/f/b")])
+        });
+        assert!(done.is_ok(), "{done:?}");
+        assert_eq!(active(&state, "/c/app"), Some(true));
+        assert_eq!(active(&state, "/c/web"), Some(false));
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                Step::SupervisorStarted {
+                    version: "1.2.3".into(),
+                    pid: 42
+                },
+                Step::ProjectOff {
+                    project: "/c/app".into(),
+                    fleet: "/f/a".into()
+                },
+                Step::ProjectOn {
+                    project: "/c/app".into(),
+                    fleet: "/f/a".into()
+                },
+                Step::EveryFleetOff,
+                Step::EveryFleetOn,
+            ],
+            "a project no fleet serves records nothing"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_broken_config_and_a_failed_launch_are_recorded() {
+        let (mut state, dir) = fresh("broken");
+        let why = Status::File(status::File::Missing {
+            path: "/f/a/fleet.toml".into(),
+        });
+        let key = SeatKey {
+            fleet: "/f/a".into(),
+            seat: "scribe".into(),
+        };
+        let done = state.write(|w| {
+            w.config_broken(Path::new("/f/a"), &why)?;
+            w.seat_launch_failed(&key, &why)
+        });
+        assert!(done.is_ok(), "{done:?}");
+        assert_eq!(
+            recorded(&state),
+            [
+                Step::FleetConfigBroken {
+                    fleet: "/f/a".into(),
+                    why: why.clone()
+                },
+                Step::SeatLaunchFailed {
+                    fleet: "/f/a".into(),
+                    seat: "scribe".into(),
+                    why
+                }
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -631,49 +578,33 @@ mod tests {
             role: None,
             role_digest: None,
             state: None,
+            life: Life::Live,
         }
     }
 
-    #[test]
-    fn a_launched_session_keeps_its_pane() {
-        let (mut state, _dir) = fresh("pane");
-        let written = state.write(|w| w.launch_session(&row("s1"), || Ok("%7".into())));
-        assert!(written.is_ok(), "{written:?}");
-        let rows = state.sessions().unwrap_or_default();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pane, "%7");
-    }
-
-    fn ended(id: &str) -> Step {
-        Step::SessionEnded {
-            session: id.into(),
-            fleet: None,
-            seat: None,
+    /// A seat's row: scribe of the fleet in `/c/app`.
+    fn seat_row(id: &str) -> SessionRow {
+        SessionRow {
+            fleet: Some("/c/app".into()),
+            seat: Some("scribe".into()),
+            role: Some("w".into()),
+            role_digest: Some("ab".into()),
+            ..row(id)
         }
     }
 
-    fn forgotten(directory: &str) -> Step {
-        Step::FleetForgotten {
-            directory: directory.into(),
-        }
-    }
-
-    fn launched(id: &str) -> Step {
-        Step::SessionLaunched {
-            session: id.into(),
-            adapter: "/a/claude".into(),
-            directory: "/c/app".into(),
-            program: "/a/claude".into(),
-            model: None,
+    fn launched() -> Launched {
+        Launched {
+            adapter: "claude-code@2.1.285".into(),
+            model: Some("opus".into()),
             prompt: None,
-            fleet: None,
-            seat: None,
-            role: None,
         }
     }
 
-    fn steps(state: &State) -> Vec<String> {
-        state.steps().unwrap_or_default()
+    /// Launches `row` in pane `%1`.
+    fn launch(state: &mut State, row: &SessionRow) {
+        let done = state.write(|w| w.launch_session(row, &launched(), || Ok("%1".into())));
+        assert!(done.is_ok(), "{done:?}");
     }
 
     fn tmux_said_no() -> ToolError {
@@ -684,75 +615,106 @@ mod tests {
     }
 
     #[test]
-    fn a_launched_session_is_listed_and_recorded() {
+    fn a_launched_session_is_listed_with_its_pane_and_recorded() {
         let (mut state, dir) = fresh("session");
-        let done = state.write(|w| {
-            w.launch_session(&row("s1"), || Ok("%1".into()))?;
-            w.record(&launched("s1"))
-        });
-        assert!(done.is_ok(), "{done:?}");
+        launch(&mut state, &seat_row("s1"));
         assert_eq!(
             state.sessions().ok(),
             Some(vec![SessionRow {
                 pane: "%1".into(),
-                ..row("s1")
+                ..seat_row("s1")
             }])
         );
-        assert_eq!(steps(&state), ["SESSION_LAUNCHED"]);
+        assert_eq!(
+            recorded(&state),
+            [Step::SessionLaunched {
+                session: "s1".into(),
+                adapter: "claude-code@2.1.285".into(),
+                program: "/a/claude".into(),
+                directory: "/c/app".into(),
+                model: Some("opus".into()),
+                prompt: None,
+                fleet: Some("/c/app".into()),
+                seat: Some("scribe".into()),
+                role: Some("w".into()),
+            }]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_launch_that_fails_leaves_nothing() {
         let (mut state, dir) = fresh("session-fails");
-        let failed = state.write(|w| {
-            w.launch_session(&row("s1"), || Err(tmux_said_no()))?;
-            w.record(&launched("s1"))
-        });
+        let failed =
+            state.write(|w| w.launch_session(&row("s1"), &launched(), || Err(tmux_said_no())));
         assert!(matches!(failed, Err(StateError::Tool(_))), "{failed:?}");
         assert_eq!(state.sessions().ok(), Some(vec![]));
-        assert_eq!(steps(&state), Vec::<String>::new());
+        assert_eq!(recorded(&state), []);
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn to_session(id: &str, message: &str) -> messages::MessageRow {
+        messages::MessageRow {
+            id: message.into(),
+            to: Recipient::Session { session: id.into() },
+            sender: Sender::Script,
+            text: "hi".into(),
+            queue_time_millis: 1,
+        }
+    }
+
+    /// Queues message `message` for session `id`, recorded under `/c/app`.
+    fn queue(state: &mut State, id: &str, message: &str) {
+        let row = to_session(id, message);
+        let done = state.write(|w| w.queue_message(&row, Some(Path::new("/c/app"))));
+        assert!(done.is_ok(), "{done:?}");
+    }
+
+    fn dropped(message: &str, why: Dropped) -> Step {
+        Step::MessageDropped {
+            message: message.into(),
+            why,
+            fleet: Some("/c/app".into()),
+        }
+    }
+
     #[test]
-    fn ending_forgets_the_session_and_ending_again_says_there_was_none() {
+    fn ending_records_it_drops_its_messages_and_ending_again_changes_nothing() {
         let (mut state, dir) = fresh("session-stop");
-        assert!(
-            state
-                .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
-                .is_ok()
-        );
+        launch(&mut state, &seat_row("s1"));
+        queue(&mut state, "s1", "m1");
+        let from = recorded(&state).len();
         let ran = std::cell::Cell::new(0);
         let stop = || {
             ran.set(ran.get() + 1);
             Ok(())
         };
-        let first = state
-            .write(|w| w.end_session("s1", &ended("s1"), stop))
-            .ok();
+        let first = state.write(|w| w.end_session("s1", stop)).ok();
         assert_eq!(first.flatten().map(|r| r.id), Some("s1".to_owned()));
         assert_eq!(state.sessions().ok(), Some(vec![]));
-        assert_eq!(
-            state
-                .write(|w| w.end_session("s1", &ended("s1"), stop))
-                .ok(),
-            Some(None)
-        );
+        assert_eq!(state.held().ok(), Some(vec![]));
+        assert_eq!(state.write(|w| w.end_session("s1", stop)).ok(), Some(None));
         assert_eq!(ran.get(), 1, "end runs only for a session that was there");
-        assert_eq!(steps(&state), ["SESSION_ENDED"], "and records only then");
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                Step::SessionEnded {
+                    session: "s1".into(),
+                    fleet: Some("/c/app".into()),
+                    seat: Some("scribe".into())
+                },
+                dropped("m1", Dropped::SessionEnded)
+            ],
+            "and records only then"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn an_end_that_fails_keeps_the_session() {
         let (mut state, dir) = fresh("session-stop-fails");
-        assert!(
-            state
-                .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
-                .is_ok()
-        );
-        let failed = state.write(|w| w.end_session("s1", &ended("s1"), || Err(tmux_said_no())));
+        launch(&mut state, &row("s1"));
+        let failed = state.write(|w| w.end_session("s1", || Err(tmux_said_no())));
         assert!(matches!(failed, Err(StateError::Tool(_))), "{failed:?}");
         assert_eq!(
             state.sessions().ok(),
@@ -764,34 +726,198 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Ends session `id`, its tmux session stopped.
+    fn end(state: &mut State, id: &str) {
+        let done = state.write(|w| w.end_session(id, || Ok(())));
+        assert!(done.is_ok(), "{done:?}");
+    }
+
+    /// Records session `id` read `now`.
+    fn read(state: &mut State, id: &str, now: SessionState) {
+        let done = state.write(|w| w.set_state(id, Some(now)));
+        assert!(done.is_ok(), "{done:?}");
+    }
+
+    /// Session `id`'s life, as `session` and `named` read it back, and
+    /// whether `sessions` lists it.
+    fn life(state: &State, id: &str) -> (Option<Life>, bool) {
+        let row = state.session(id).ok().flatten();
+        let named = state.named(None, id, Takes::SeatOrSession).ok().flatten();
+        assert_eq!(named, row.clone().map(Named::Session), "{id}");
+        let rows = state.sessions().unwrap_or_default();
+        (row.map(|r| r.life), rows.iter().any(|r| r.id == id))
+    }
+
+    #[test]
+    fn a_sessions_life_is_kept_on_its_row() {
+        let (mut state, dir) = fresh("life");
+        let spawned = |id: &str| SessionRow {
+            fleet: Some("/f/wing".into()),
+            role: Some("worker".into()),
+            ..row(id)
+        };
+        let seat = |id: &str, seat: &str, at: i64| SessionRow {
+            seat: Some(seat.into()),
+            launch_time_millis: at,
+            ..seat_row(id)
+        };
+        let gone = SessionState::Gone;
+        for id in ["p1", "p2", "p3", "p4", "p5"] {
+            launch(&mut state, &spawned(id));
+        }
+        read(&mut state, "p2", gone);
+        read(&mut state, "p3", gone);
+        end(&mut state, "p3");
+        end(&mut state, "p4");
+        // Seat one is read gone; seat two read gone, then revived after
+        // the clock stepped back; seat three ended, then revived; seat four
+        // read gone three times; seat five read gone, then revived and that
+        // one ended.
+        launch(&mut state, &seat("k1", "one", 5));
+        read(&mut state, "k1", gone);
+        launch(&mut state, &seat("k2", "two", 5));
+        read(&mut state, "k2", gone);
+        launch(&mut state, &seat("k3", "two", 4));
+        launch(&mut state, &seat("k4", "three", 5));
+        end(&mut state, "k4");
+        launch(&mut state, &seat("k5", "three", 6));
+        for id in ["k6", "k7", "k8"] {
+            launch(&mut state, &seat(id, "four", 5));
+            read(&mut state, id, gone);
+        }
+        launch(&mut state, &seat("k9", "five", 5));
+        read(&mut state, "k9", gone);
+        launch(&mut state, &seat("k10", "five", 6));
+        end(&mut state, "k10");
+        end(&mut state, "p5");
+        let from = recorded(&state).len();
+        read(&mut state, "p5", SessionState::Idle);
+        read(&mut state, "p5", gone);
+        assert_eq!(recorded_from(&state, from), [], "a reading after its end");
+        let cases = [
+            ("p1", Life::Live, true),
+            ("p2", Life::Gone, true),
+            ("p3", Life::Ended, false),
+            ("p4", Life::Ended, false),
+            ("k1", Life::Gone, true),
+            ("k2", Life::Gone, false),
+            ("k3", Life::Live, true),
+            ("k4", Life::Ended, false),
+            ("k5", Life::Live, true),
+            ("k6", Life::Gone, false),
+            ("k7", Life::Gone, false),
+            ("k8", Life::Gone, true),
+            ("k9", Life::Gone, false),
+            ("k10", Life::Ended, false),
+            ("p5", Life::Ended, false),
+        ];
+        for (id, now, listed) in cases {
+            assert_eq!(life(&state, id), (Some(now), listed), "{id}");
+        }
+        assert_eq!(life(&state, "zz"), (None, false), "never launched");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_state_is_kept_on_its_row_and_recorded_and_gone_drops_its_messages() {
+        let (mut state, dir) = fresh("row-state");
+        launch(&mut state, &seat_row("s1"));
+        queue(&mut state, "s1", "m1");
+        let from = recorded(&state).len();
+        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(None));
+        let idle = SessionState::Idle;
+        assert!(state.write(|w| w.set_state("s1", Some(idle))).is_ok());
+        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(Some(idle)));
+        assert!(state.write(|w| w.set_state("s1", None)).is_ok());
+        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(None));
+        assert!(state.write(|w| w.set_state("s9", Some(idle))).is_ok());
+        let gone = SessionState::Gone;
+        assert!(state.write(|w| w.set_state("s1", Some(gone))).is_ok());
+        assert_eq!(state.held().ok(), Some(vec![]));
+        let changed = |state| Step::SessionStateChanged {
+            session: "s1".into(),
+            fleet: Some("/c/app".into()),
+            seat: Some("scribe".into()),
+            state,
+        };
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                changed(idle),
+                changed(gone),
+                dropped("m1", Dropped::SessionGone)
+            ],
+            "clearing, or no such session, records nothing"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_message_is_recorded_queued_then_delivered_and_its_session_read_afresh() {
+        let (mut state, dir) = fresh("deliver-steps");
+        launch(&mut state, &seat_row("s1"));
+        let idle = Some(SessionState::Idle);
+        assert!(state.write(|w| w.set_state("s1", idle)).is_ok());
+        let from = recorded(&state).len();
+        queue(&mut state, "s1", "m1");
+        let ids = ["m1".to_owned(), "m9".to_owned()];
+        let delivered = state.write(|w| w.deliver(&ids, "s1", |_| Ok(())));
+        assert_eq!(delivered.ok(), Some(vec!["m1".to_owned()]));
+        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(None));
+        let none = state.write(|w| w.deliver(&ids, "s1", |_| Ok(())));
+        assert_eq!(none.ok(), Some(vec![]));
+        let row = to_session("s1", "m1");
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                Step::MessageQueued {
+                    message: "m1".into(),
+                    to: row.to,
+                    sender: row.sender,
+                    text: row.text,
+                    fleet: Some("/c/app".into())
+                },
+                Step::MessageDelivered {
+                    message: "m1".into(),
+                    session: "s1".into(),
+                    fleet: Some("/c/app".into())
+                }
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn role(label: &str, adapter: &str) -> Role {
+        Role {
+            label: label.into(),
+            adapter: adapter.into(),
+            model: None,
+            prompt: None,
+            directory: "/c/app".into(),
+        }
+    }
+
+    fn seat(name: &str, role: &str) -> Seat {
+        Seat {
+            name: name.into(),
+            role: role.into(),
+        }
+    }
+
     fn roster() -> Roster {
         Roster {
             roles: vec![
                 Role {
-                    label: "w".into(),
-                    adapter: "claude-code@2.1.285".into(),
                     model: Some("opus".into()),
                     prompt: Some("notes".into()),
-                    directory: "/c/app".into(),
+                    ..role("w", "claude-code@2.1.285")
                 },
                 Role {
-                    label: "x".into(),
-                    adapter: "/a/x".into(),
-                    model: None,
-                    prompt: None,
                     directory: "/c/app/x".into(),
+                    ..role("x", "/a/x")
                 },
             ],
-            seats: vec![
-                Seat {
-                    name: "critic".into(),
-                    role: "x".into(),
-                },
-                Seat {
-                    name: "scribe".into(),
-                    role: "w".into(),
-                },
-            ],
+            seats: vec![seat("critic", "x"), seat("scribe", "w")],
         }
     }
 
@@ -799,12 +925,9 @@ mod tests {
     fn a_fleets_roster_reads_back_and_follows_its_projects_on_or_off() {
         let (mut state, dir) = fresh("roster");
         let f = fleet("/c/app", &["/c/app"]);
-        let other = fleet("/c/blog", &["/c/blog"]);
-        let done = state.write(|w| {
-            w.create_fleet(&f, || Ok(()))?;
-            w.create_fleet(&other, || Ok(()))?;
-            w.set_roster(&f.directory, &roster(), &[])
-        });
+        create(&mut state, &f);
+        create(&mut state, &fleet("/c/blog", &["/c/blog"]));
+        let done = state.write(|w| w.set_roster(&f.directory, &roster()));
         assert!(done.is_ok(), "{done:?}");
         assert_eq!(state.roster(&f.directory).ok(), Some(roster()));
         let on: Vec<(PathBuf, bool, usize)> = state
@@ -831,7 +954,7 @@ mod tests {
         assert_eq!(on, [false, true]);
         assert!(
             state
-                .write(|w| w.set_roster(&f.directory, &Roster::default(), &[]))
+                .write(|w| w.set_roster(&f.directory, &Roster::default()))
                 .is_ok()
         );
         assert_eq!(state.roster(&f.directory).ok(), Some(Roster::default()));
@@ -839,10 +962,158 @@ mod tests {
     }
 
     #[test]
+    fn a_fleet_created_with_a_roster_records_its_roles_then_seats_then_itself() {
+        let (mut state, dir) = fresh("create-roster");
+        let f = fleet("/c/app", &["/c/app"]);
+        let done = state.write(|w| w.create_fleet(&f, &roster(), true, || Ok(())));
+        assert!(done.is_ok(), "{done:?}");
+        let fl = || "/c/app".to_owned();
+        assert_eq!(
+            recorded(&state),
+            [
+                Step::RoleAdded {
+                    fleet: fl(),
+                    role: "w".into()
+                },
+                Step::RoleAdded {
+                    fleet: fl(),
+                    role: "x".into()
+                },
+                Step::SeatAdded {
+                    fleet: fl(),
+                    seat: "critic".into(),
+                    role: "x".into()
+                },
+                Step::SeatAdded {
+                    fleet: fl(),
+                    seat: "scribe".into(),
+                    role: "w".into()
+                },
+                Step::FleetCreated {
+                    directory: fl(),
+                    projects: vec![fl()],
+                    adopted: true
+                }
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_roster_change_records_roles_around_their_seats_and_drops_a_removed_seats_messages() {
+        let (mut state, dir) = fresh("roster-diff");
+        let f = fleet("/c/app", &["/c/app"]);
+        let had = Roster {
+            roles: vec![role("w", "/a/w"), role("x", "/a/x")],
+            seats: vec![
+                seat("critic", "x"),
+                seat("scribe", "w"),
+                seat("tester", "w"),
+            ],
+        };
+        let done = state.write(|w| w.create_fleet(&f, &had, false, || Ok(())));
+        assert!(done.is_ok(), "{done:?}");
+        let to_critic = messages::MessageRow {
+            to: Recipient::Seat {
+                fleet: "/c/app".into(),
+                seat: "critic".into(),
+            },
+            ..to_session("s1", "m1")
+        };
+        let queued = state.write(|w| w.queue_message(&to_critic, Some(&f.directory)));
+        assert!(queued.is_ok(), "{queued:?}");
+        let from = recorded(&state).len();
+        // Role x goes with its seat critic, w changes, k comes with tester
+        // moved to it, and scribe stays as it was.
+        let has = Roster {
+            roles: vec![role("k", "/a/k"), role("w", "/a/w2")],
+            seats: vec![seat("scribe", "w"), seat("tester", "k")],
+        };
+        assert!(state.write(|w| w.set_roster(&f.directory, &has)).is_ok());
+        let fl = || "/c/app".to_owned();
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                Step::RoleAdded {
+                    fleet: fl(),
+                    role: "k".into()
+                },
+                Step::RoleChanged {
+                    fleet: fl(),
+                    role: "w".into()
+                },
+                Step::SeatChanged {
+                    fleet: fl(),
+                    seat: "tester".into(),
+                    role: "k".into()
+                },
+                Step::SeatRemoved {
+                    fleet: fl(),
+                    seat: "critic".into()
+                },
+                Step::RoleRemoved {
+                    fleet: fl(),
+                    role: "x".into()
+                },
+                dropped("m1", Dropped::SeatRemoved)
+            ]
+        );
+        let again = recorded(&state).len();
+        assert!(state.write(|w| w.set_roster(&f.directory, &has)).is_ok());
+        assert_eq!(recorded_from(&state, again), [], "nothing moved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_seat_is_wanted_while_its_fleet_is_on_and_its_role_exists() {
+        let (mut state, dir) = fresh("wanted");
+        let f = fleet("/c/app", &["/c/app"]);
+        let orphan = Roster {
+            seats: vec![seat("ghost", "nobody")],
+            ..roster()
+        };
+        let mut both = roster();
+        both.seats.extend(orphan.seats);
+        let done = state.write(|w| w.create_fleet(&f, &both, false, || Ok(())));
+        assert!(done.is_ok(), "{done:?}");
+        let key = |seat: &str| SeatKey {
+            fleet: "/c/app".into(),
+            seat: seat.into(),
+        };
+        let wanted = |state: &State| -> Vec<(String, String)> {
+            state
+                .wanted_seats()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|w| (w.key.seat, w.role.label))
+                .collect()
+        };
+        assert_eq!(
+            wanted(&state),
+            [
+                ("critic".to_owned(), "x".to_owned()),
+                ("scribe".to_owned(), "w".to_owned())
+            ],
+            "a seat of no role is not wanted"
+        );
+        let digest = roster().roles[0].digest();
+        let asked = |state: &mut State, seat: &str, digest: Option<&str>| {
+            state.write(|w| w.seat_wanted(&key(seat), digest)).ok()
+        };
+        assert_eq!(asked(&mut state, "scribe", Some(&digest)), Some(true));
+        assert_eq!(asked(&mut state, "scribe", Some("old")), Some(false));
+        assert_eq!(asked(&mut state, "scribe", None), Some(true));
+        assert_eq!(asked(&mut state, "ghost", None), Some(false));
+        assert!(state.write(|w: &mut Write<'_>| w.all_off()).is_ok());
+        assert_eq!(wanted(&state), []);
+        assert_eq!(asked(&mut state, "scribe", None), Some(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_wingman_fleet_is_on_while_any_of_its_projects_is() {
         let (mut state, dir) = fresh("roster-any");
-        let f = fleet("/w", &["/c/api", "/c/web"]);
-        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
+        create(&mut state, &fleet("/w", &["/c/api", "/c/web"]));
         assert!(
             state
                 .write(|w| w.set_active(Path::new("/c/api"), false))
@@ -859,34 +1130,39 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_fleet_takes_its_roster_but_not_its_seats_sessions() {
+    fn removing_a_fleet_takes_its_roster_and_its_seats_messages_but_not_their_sessions() {
         let (mut state, dir) = fresh("roster-rm");
         let f = fleet("/c/app", &["/c/app"]);
-        let seat_row = SessionRow {
-            fleet: Some("/c/app".into()),
-            seat: Some("scribe".into()),
-            role: Some("w".into()),
-            role_digest: Some("ab".into()),
-            ..row("s1")
-        };
-        let done = state.write(|w| {
-            w.create_fleet(&f, || Ok(()))?;
-            w.set_roster(&f.directory, &roster(), &[])?;
-            w.launch_session(&seat_row, || Ok("%1".into()))
-        });
+        let done = state.write(|w| w.create_fleet(&f, &roster(), false, || Ok(())));
         assert!(done.is_ok(), "{done:?}");
-        assert!(
-            state
-                .write(|w| w.remove_fleet(&f.directory, &forgotten("/c/app")))
-                .is_ok()
-        );
+        launch(&mut state, &seat_row("s1"));
+        let to_scribe = messages::MessageRow {
+            to: Recipient::Seat {
+                fleet: "/c/app".into(),
+                seat: "scribe".into(),
+            },
+            ..to_session("s1", "m1")
+        };
+        let queued = state.write(|w| w.queue_message(&to_scribe, Some(&f.directory)));
+        assert!(queued.is_ok(), "{queued:?}");
+        let from = recorded(&state).len();
+        assert!(state.write(|w| w.forget_fleet(&f.directory)).is_ok());
         assert_eq!(state.roster(&f.directory).ok(), Some(Roster::default()));
         assert_eq!(
             state.sessions().ok(),
             Some(vec![SessionRow {
                 pane: "%1".into(),
-                ..seat_row
+                ..seat_row("s1")
             }])
+        );
+        assert_eq!(
+            recorded_from(&state, from),
+            [
+                Step::FleetForgotten {
+                    directory: "/c/app".into()
+                },
+                dropped("m1", Dropped::FleetRemoved)
+            ]
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -900,11 +1176,7 @@ mod tests {
             role_digest: Some("ab".into()),
             ..row("s1")
         };
-        assert!(
-            state
-                .write(|w| w.launch_session(&spawned, || Ok("%1".into())))
-                .is_ok()
-        );
+        launch(&mut state, &spawned);
         assert_eq!(
             state.sessions().ok(),
             Some(vec![SessionRow {
@@ -935,7 +1207,7 @@ mod tests {
             },
         ];
         for r in &bad {
-            let written = state.write(|w| w.launch_session(r, || Ok("%1".into())));
+            let written = state.write(|w| w.launch_session(r, &launched(), || Ok("%1".into())));
             assert!(
                 matches!(written, Err(StateError::Sqlite(_))),
                 "{r:?}: {written:?}"
@@ -949,35 +1221,16 @@ mod tests {
     fn a_fleet_is_registered_until_it_is_removed() {
         let (mut state, dir) = fresh("registered");
         let f = fleet("/f/a", &["/c/app"]);
-        assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
+        create(&mut state, &f);
         assert_eq!(
             state.write(|w| w.fleet_registered(&f.directory)).ok(),
             Some(true)
         );
-        assert!(
-            state
-                .write(|w| w.remove_fleet(&f.directory, &forgotten("/f/a")))
-                .is_ok()
-        );
+        assert!(state.write(|w| w.forget_fleet(&f.directory)).is_ok());
         assert_eq!(
             state.write(|w| w.fleet_registered(&f.directory)).ok(),
             Some(false)
         );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn a_sessions_state_is_kept_on_its_row() {
-        let (mut state, dir) = fresh("row-state");
-        assert!(
-            state
-                .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
-                .is_ok()
-        );
-        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(None));
-        let idle = SessionState::Idle;
-        assert!(state.write(|w| w.set_state("s1", Some(idle), &[])).is_ok());
-        assert_eq!(state.sessions().ok().map(|r| r[0].state), Some(Some(idle)));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1041,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn steps_are_found_by_the_session_or_message_they_name() {
+    fn steps_are_found_by_the_message_they_name() {
         let (mut state, dir) = fresh("steps-with");
         assert!(
             state
@@ -1050,19 +1303,12 @@ mod tests {
                         message: "m1".into(),
                         session: "s1".into(),
                         fleet: None,
-                    })?;
-                    w.record(&Step::SessionEnded {
-                        session: "s2".into(),
-                        fleet: None,
-                        seat: None,
                     })
                 })
                 .is_ok()
         );
         let count = |e: Result<Vec<_>, _>| e.ok().map(|e| e.len());
         assert_eq!(count(state.steps_with_message("m1")), Some(1));
-        assert_eq!(count(state.steps_with_session("s1")), Some(1));
-        assert_eq!(count(state.steps_with_session("s2")), Some(1));
         assert_eq!(count(state.steps_with_message("m9")), Some(0));
         let _ = std::fs::remove_dir_all(dir);
     }

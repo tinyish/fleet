@@ -2,13 +2,15 @@
 //! (core.md § Primitives, Messages). Only held messages have a row: a
 //! delivery or a drop deletes it, and the record keeps the history.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fleet_core::messages::{self, Dropped, Recipient, Sender};
+use fleet_core::record::Step;
 use fleet_core::tools::ToolError;
 use rusqlite::{ToSql, params};
 
-use crate::{State, StateError, Step, Write, utf8};
+use crate::sessions::{fleet_of, row_in};
+use crate::{State, StateError, Write, shown, utf8};
 
 /// One held message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,13 +82,18 @@ fn sender(kind: &str, session: Option<String>) -> rusqlite::Result<Sender> {
 }
 
 impl Write<'_> {
-    /// Holds `row`.
+    /// Holds `row`, and records it queued under `fleet`, the fleet of who
+    /// it is for.
     ///
     /// # Errors
     ///
     /// When SQLite fails or a path is not UTF-8.
-    pub fn queue_message(&mut self, row: &MessageRow) -> Result<(), StateError> {
-        let (fleet, seat, session) = match &row.to {
+    pub fn queue_message(
+        &mut self,
+        row: &MessageRow,
+        fleet: Option<&Path>,
+    ) -> Result<(), StateError> {
+        let (to_fleet, seat, session) = match &row.to {
             Recipient::Seat { fleet, seat } => (Some(utf8(fleet)?), Some(seat.as_str()), None),
             Recipient::Session { session } => (None, None, Some(session.as_str())),
         };
@@ -101,7 +108,7 @@ impl Write<'_> {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 row.id,
-                fleet,
+                to_fleet,
                 seat,
                 session,
                 sender,
@@ -110,13 +117,21 @@ impl Write<'_> {
                 row.queue_time_millis
             ],
         )?;
-        Ok(())
+        self.record(&Step::MessageQueued {
+            message: row.id.clone(),
+            to: row.to.clone(),
+            sender: row.sender.clone(),
+            text: row.text.clone(),
+            fleet: fleet.map(shown),
+        })
     }
 
-    /// Delivers those of `ids` still held: deletes them, then runs
-    /// `type_in` with their texts as one batch, oldest first. Answers with
-    /// their ids; with none still held, runs nothing. If `type_in` fails,
-    /// the transaction fails with it, so they stay held.
+    /// Delivers those of `ids` still held into session `session`: deletes
+    /// them, then runs `type_in` with their texts as one batch, oldest
+    /// first, and records each delivered; then clears the session's
+    /// recorded state, so what it reads next is recorded afresh. Answers
+    /// with their ids; with none still held, runs and records nothing. If
+    /// `type_in` fails, the transaction fails with it, so they stay held.
     ///
     /// # Errors
     ///
@@ -124,6 +139,7 @@ impl Write<'_> {
     pub fn deliver(
         &mut self,
         ids: &[String],
+        session: &str,
         type_in: impl FnOnce(&str) -> Result<(), ToolError>,
     ) -> Result<Vec<String>, StateError> {
         let held: Vec<(String, String)> = {
@@ -148,7 +164,17 @@ impl Write<'_> {
             still.iter().map(|(_, text)| text.as_str()),
         ))
         .map_err(StateError::Tool)?;
-        Ok(still.into_iter().map(|(id, _)| id).collect())
+        let fleet = row_in(&self.tx, session)?.and_then(|row| fleet_of(&row));
+        let delivered: Vec<String> = still.into_iter().map(|(id, _)| id).collect();
+        for message in &delivered {
+            self.record(&Step::MessageDelivered {
+                message: message.clone(),
+                session: session.to_owned(),
+                fleet: fleet.clone(),
+            })?;
+        }
+        self.set_state(session, None)?;
+        Ok(delivered)
     }
 
     /// Drops the messages held for session `session`, of the fleet
@@ -273,9 +299,9 @@ mod tests {
             ..row("m0", to_seat(), "zero", 9)
         };
         let queued = state.write(|w| {
-            w.queue_message(&earlier)?;
-            w.queue_message(&later)?;
-            w.queue_message(&script)
+            w.queue_message(&earlier, None)?;
+            w.queue_message(&later, None)?;
+            w.queue_message(&script, None)
         });
         assert!(queued.is_ok(), "{queued:?}");
         assert_eq!(
@@ -290,14 +316,14 @@ mod tests {
     fn deliver_types_the_ids_still_held_as_one_batch() {
         let (mut state, dir) = fresh("deliver");
         let queued = state.write(|w| {
-            w.queue_message(&row("ma", to_seat(), "a\n", 1))?;
-            w.queue_message(&row("mb", to_seat(), "b", 2))?;
-            w.queue_message(&row("mc", to_seat(), "c", 3))
+            w.queue_message(&row("ma", to_seat(), "a\n", 1), None)?;
+            w.queue_message(&row("mb", to_seat(), "b", 2), None)?;
+            w.queue_message(&row("mc", to_seat(), "c", 3), None)
         });
         assert!(queued.is_ok());
         let typed = RefCell::new(String::new());
         let delivered = state.write(|w| {
-            w.deliver(&["mc".into(), "ma".into(), "mz".into()], |text| {
+            w.deliver(&["mc".into(), "ma".into(), "mz".into()], "s1", |text| {
                 typed.replace(text.to_owned());
                 Ok(())
             })
@@ -305,7 +331,7 @@ mod tests {
         assert_eq!(delivered.ok(), Some(vec!["ma".to_owned(), "mc".to_owned()]));
         assert_eq!(typed.into_inner(), "a\n\nc");
         assert_eq!(ids(&state), ["mb"]);
-        let none = state.write(|w| w.deliver(&["mz".into()], |_| Err(failed())));
+        let none = state.write(|w| w.deliver(&["mz".into()], "s1", |_| Err(failed())));
         assert_eq!(none.ok(), Some(vec![]), "nothing held: nothing typed");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -315,10 +341,10 @@ mod tests {
         let (mut state, dir) = fresh("deliver-fails");
         assert!(
             state
-                .write(|w| w.queue_message(&row("ma", to_seat(), "a", 1)))
+                .write(|w| w.queue_message(&row("ma", to_seat(), "a", 1), None))
                 .is_ok()
         );
-        let result = state.write(|w| w.deliver(&["ma".into()], |_| Err(failed())));
+        let result = state.write(|w| w.deliver(&["ma".into()], "s1", |_| Err(failed())));
         assert!(matches!(result, Err(StateError::Tool(_))), "{result:?}");
         assert_eq!(ids(&state), ["ma"]);
         let _ = std::fs::remove_dir_all(dir);

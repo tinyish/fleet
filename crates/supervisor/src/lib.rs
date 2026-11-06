@@ -35,7 +35,7 @@ use fleet_core::messages::Holds;
 use fleet_core::paths::{Os, state_dir};
 use fleet_core::protocol::{ProtocolError, Reply, Request, Response, Status, request, response};
 use fleet_core::tools::{AgentAdapters, Multiplexer, Network};
-use state::{State, Step};
+use state::State;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const TIMEOUT: Duration = Duration::from_secs(2);
@@ -143,11 +143,7 @@ fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
     let listener = UnixListener::bind(&socket).map_err(|e| Error::Io(Doing::BindingSocket, e))?;
 
     let mut state = State::open(state_dir)?;
-    let started = Step::SupervisorStarted {
-        version: VERSION.to_owned(),
-        pid: std::process::id(),
-    };
-    state.write(|w| w.record(&started))?;
+    state.write(|w| w.supervisor_started(VERSION, std::process::id()))?;
     let store = adapters::Store::new(
         state_dir,
         std::env::var(fleet_core::adapters::BASE_VAR).ok(),

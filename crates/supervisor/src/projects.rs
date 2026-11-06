@@ -6,15 +6,11 @@ use std::path::{Path, PathBuf};
 
 use fleet_core::fleets::{self, Fleet, conflicts};
 use fleet_core::protocol::{Reply, Response, Status, response};
-use fleet_core::seats::{self, Roster, RosterChange};
+use fleet_core::seats::Roster;
 use fleet_core::status;
-use state::{State, StateError, Step, Write};
+use state::{State, StateError, Write};
 
 use crate::{Error, Supervisor, canonical, repo_root_of};
-
-fn shown(path: &Path) -> String {
-    path.display().to_string()
-}
 
 /// The fleet as its config now describes it, and its roles and seats:
 /// read, parsed and resolved, but not yet checked against other fleets.
@@ -43,8 +39,8 @@ struct Reread {
     broken: Vec<(Fleet, Status)>,
     /// What each fleet that read gains and loses.
     changes: Vec<(PathBuf, fleets::Change)>,
-    /// Each fleet that read: its roles and seats, and what moved in them.
-    rosters: Vec<(PathBuf, Roster, RosterChange)>,
+    /// Each fleet that read: its roles and seats.
+    rosters: Vec<(PathBuf, Roster)>,
     /// Fleets whose directory no longer exists: they are forgotten. One that
     /// cannot be looked at (permission denied) is not gone; it is broken.
     gone: Vec<Fleet>,
@@ -84,8 +80,7 @@ fn reread_all(state: &State) -> Result<Reread, Error> {
         } else {
             let change = fleets::sync(&stored.projects, &wanted.projects);
             changes.push((stored.directory.clone(), change));
-            let moved = seats::diff(&state.roster(&stored.directory)?, &roster);
-            rosters.push((stored.directory.clone(), roster, moved));
+            rosters.push((stored.directory.clone(), roster));
             ok.push(wanted);
         }
     }
@@ -117,95 +112,23 @@ impl Reread {
             .collect()
     }
 
-    /// Writes the re-read and records its steps, inside the caller's
-    /// transaction. A project only added comes in off; a moved one keeps its
-    /// on or off. A fleet that read has its roles and seats replaced; a
-    /// broken one keeps the ones it had.
+    /// Writes the re-read, each write recording its steps, inside the
+    /// caller's transaction. A project only added comes in off; a moved one
+    /// keeps its on or off. A fleet that read has its roles and seats
+    /// replaced; a broken one keeps the ones it had.
     fn apply(&self, w: &mut Write<'_>) -> Result<(), StateError> {
         w.apply_reread(&self.changes)?;
-        for (fleet, change) in &self.changes {
-            for project in &change.removed {
-                w.record(&Step::ProjectRemoved {
-                    fleet: shown(fleet),
-                    project: shown(project),
-                })?;
-            }
-            for project in &change.added {
-                w.record(&Step::ProjectAdded {
-                    fleet: shown(fleet),
-                    project: shown(project),
-                })?;
-            }
-        }
-        for (fleet, roster, moved) in &self.rosters {
-            set_roster(w, fleet, roster, moved)?;
+        for (fleet, roster) in &self.rosters {
+            w.set_roster(fleet, roster)?;
         }
         for (fleet, why) in &self.broken {
-            w.record(&Step::FleetConfigBroken {
-                fleet: shown(&fleet.directory),
-                why: why.clone(),
-            })?;
+            w.config_broken(&fleet.directory, why)?;
         }
         for fleet in &self.gone {
-            let forgotten = Step::FleetForgotten {
-                directory: shown(&fleet.directory),
-            };
-            w.remove_fleet(&fleet.directory, &forgotten)?;
+            w.forget_fleet(&fleet.directory)?;
         }
         Ok(())
     }
-}
-
-/// Keeps `roster` as `fleet`'s roles and seats, recording what `moved`: a
-/// role before the seats that name it, and after the seats that leave it.
-/// State drops, and records, the messages held for a seat that leaves.
-pub(crate) fn set_roster(
-    w: &mut Write<'_>,
-    fleet: &Path,
-    roster: &Roster,
-    moved: &RosterChange,
-) -> Result<(), StateError> {
-    let f = shown(fleet);
-    let mut steps = Vec::new();
-    for role in &moved.roles_added {
-        steps.push(Step::RoleAdded {
-            fleet: f.clone(),
-            role: role.clone(),
-        });
-    }
-    for role in &moved.changed {
-        steps.push(Step::RoleChanged {
-            fleet: f.clone(),
-            role: role.clone(),
-        });
-    }
-    for seat in &moved.added {
-        steps.push(Step::SeatAdded {
-            fleet: f.clone(),
-            seat: seat.name.clone(),
-            role: seat.role.clone(),
-        });
-    }
-    for seat in &moved.moved {
-        steps.push(Step::SeatChanged {
-            fleet: f.clone(),
-            seat: seat.name.clone(),
-            role: seat.role.clone(),
-        });
-    }
-    for seat in &moved.removed {
-        steps.push(Step::SeatRemoved {
-            fleet: f.clone(),
-            seat: seat.clone(),
-        });
-    }
-    for role in &moved.roles_removed {
-        steps.push(Step::RoleRemoved {
-            fleet: f.clone(),
-            role: role.clone(),
-        });
-    }
-    w.set_roster(fleet, roster, &steps)
 }
 
 /// Re-reads every fleet's config and turns every project on. A fleet whose
@@ -214,15 +137,15 @@ pub(crate) fn set_roster(
 pub(crate) fn all_on(sup: &Supervisor) -> Result<Reply, Error> {
     let mut state = sup.lock();
     let reread = reread_all(&state)?;
+    let on: Vec<PathBuf> = reread.ok.iter().map(|f| f.directory.clone()).collect();
+    let off: Vec<PathBuf> = reread
+        .broken
+        .iter()
+        .map(|(f, _)| f.directory.clone())
+        .collect();
     state.write(|w| {
         reread.apply(w)?;
-        for fleet in &reread.ok {
-            w.set_fleet_active(&fleet.directory, true)?;
-        }
-        for (fleet, _) in &reread.broken {
-            w.set_fleet_active(&fleet.directory, false)?;
-        }
-        w.record(&Step::EveryFleetOn)
+        w.all_on(&on, &off)
     })?;
     let forgotten = reread.forgotten();
     let all_on = response::AllOn {
@@ -251,10 +174,7 @@ pub(crate) fn all_on(sup: &Supervisor) -> Result<Reply, Error> {
 /// Turns every project off.
 pub(crate) fn all_off(sup: &Supervisor) -> Result<Reply, Error> {
     let mut state = sup.lock();
-    state.write(|w| {
-        w.set_all_active(false)?;
-        w.record(&Step::EveryFleetOff)
-    })?;
+    state.write(|w: &mut Write<'_>| w.all_off())?;
     Ok(Reply::Response(Response::Stop(response::Stop::AllOff)))
 }
 
@@ -320,20 +240,9 @@ pub(crate) fn project_on(sup: &Supervisor, project: &Path) -> Result<Reply, Erro
             .collect();
         return Ok(Reply::Status(not_served(&all, &project)));
     }
-    let fleet = reread
-        .ok
-        .iter()
-        .find(|f| f.projects.contains(&project))
-        .map(|f| shown(&f.directory))
-        .unwrap_or_default();
-    let on = Step::ProjectOn {
-        project: shown(&project),
-        fleet,
-    };
     state.write(|w| {
         reread.apply(w)?;
-        w.set_active(&project, true)?;
-        w.record(&on)
+        w.set_active(&project, true)
     })?;
     Ok(Reply::Response(Response::Start(
         response::Start::ProjectOn(response::ProjectOn {
@@ -357,14 +266,7 @@ pub(crate) fn project_off(sup: &Supervisor, project: &Path) -> Result<Reply, Err
     else {
         return Ok(Reply::Status(not_served(&registered, &project)));
     };
-    let off = Step::ProjectOff {
-        project: shown(&project),
-        fleet: shown(&fleet.directory),
-    };
-    state.write(|w| {
-        w.set_active(&project, false)?;
-        w.record(&off)
-    })?;
+    state.write(|w| w.set_active(&project, false))?;
     let others = fleet
         .projects
         .iter()

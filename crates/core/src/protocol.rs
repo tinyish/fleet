@@ -402,8 +402,7 @@ pub mod response {
             #[serde(default, skip_serializing_if = "Option::is_none")]
             seat: Option<String>,
         },
-        /// The session was already ended, or cleared as gone: nothing
-        /// changed.
+        /// The session was already ended: nothing changed.
         AlreadyEnded {
             /// Its id.
             session: String,

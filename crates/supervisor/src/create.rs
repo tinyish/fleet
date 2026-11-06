@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 use fleet_core::config::{self, Config};
 use fleet_core::fleets::{self, CreateDecision, decide_create};
 use fleet_core::protocol::{Reply, Response, Status, request, response};
-use fleet_core::seats::{self, Roster};
+use fleet_core::seats::Roster;
 use fleet_core::status;
-use state::Step;
 
 use crate::{Error, Supervisor, repo_root_of};
 
@@ -56,17 +55,8 @@ pub(crate) fn create(sup: &Supervisor, ask: request::Create) -> Result<Reply, Er
         CreateDecision::Refuse(status) => return Ok(Reply::Status(status)),
     };
     let text = config::render(&Config::for_fleet(&fleet));
-    let created = Step::FleetCreated {
-        directory: directory.display().to_string(),
-        projects: fleet
-            .projects
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect(),
-        adopted: adopting,
-    };
     let written = state.write(|w| {
-        w.create_fleet(&fleet, || {
+        w.create_fleet(&fleet, &roster, adopting, || {
             if adopting {
                 return Ok(());
             }
@@ -75,10 +65,7 @@ pub(crate) fn create(sup: &Supervisor, ask: request::Create) -> Result<Reply, Er
                 .create_new(true)
                 .open(&path)?
                 .write_all(text.as_bytes())
-        })?;
-        let moved = seats::diff(&Roster::default(), &roster);
-        crate::projects::set_roster(w, &fleet.directory, &roster, &moved)?;
-        w.record(&created)
+        })
     });
     match written {
         Ok(()) => {}

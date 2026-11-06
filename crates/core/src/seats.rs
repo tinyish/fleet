@@ -221,7 +221,7 @@ pub struct Wanted {
     pub role: Role,
 }
 
-/// A session launched for a seat, and whether its pane is alive.
+/// A session launched for a seat, and whether it is live.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Held {
     /// The session's id.
@@ -230,7 +230,7 @@ pub struct Held {
     pub key: SeatKey,
     /// When it was launched.
     pub launch_time_millis: i64,
-    /// Whether its agent's pane is alive.
+    /// Whether it is live, as state last recorded it.
     pub alive: bool,
 }
 
@@ -242,9 +242,9 @@ pub enum Act {
         /// Whether it has lived ten minutes, so its backoff resets.
         steady: bool,
     },
-    /// Launch it, first clearing these ended sessions of it.
+    /// Launch it, first clearing these gone sessions of it.
     Launch {
-        /// Its sessions whose pane ended.
+        /// Its sessions held that are not live.
         clear: Vec<Held>,
     },
     /// It is backing off.
@@ -306,8 +306,8 @@ pub fn ended_early(launch_time_millis: i64, now_millis: i64) -> bool {
 
 /// What to do for each of `wanted`, given the seats' sessions `held` and
 /// their `backoff`: keep a seat whose session lives (adopting it, after a
-/// restart); launch one with none alive once its backoff allows, clearing
-/// its ended sessions; else wait. Sessions of seats not wanted are never
+/// restart); launch one with none live once its backoff allows, clearing
+/// its gone sessions; else wait. Sessions of seats not wanted are never
 /// acted on.
 #[must_use]
 pub fn tend(

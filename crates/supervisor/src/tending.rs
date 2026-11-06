@@ -1,20 +1,20 @@
 //! The tending loop (core.md § Primitives, Seats): one thread that keeps
 //! every seat of a fleet with a project on filled. It ticks every 2 s, and
-//! at once when start, create or a message pokes it; a tick reads what is
-//! wanted from state, asks tmux what is alive, and launches what is
-//! missing, backing a seat off when it keeps failing; then it reads every
-//! session once, records each state that changed, and delivers the
-//! messages waiting for idle agents from that reading. It never ends a
-//! session.
+//! at once when start, create or a message pokes it; a tick reads every
+//! live session once, records each state that changed, gone among them,
+//! and delivers the messages waiting for idle agents from that reading;
+//! then it launches each wanted seat with no live session, as state now
+//! says, backing a seat off when it keeps failing. It alone asks tmux
+//! whether a session lives, and it never ends one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fleet_core::agent::SessionState;
 use fleet_core::protocol::Status;
-use fleet_core::seats::{self, Act, Backoff, Held, SeatKey, Tended, Wanted};
-use state::{SessionRow, Step};
+use fleet_core::seats::{self, Act, Backoff, Held, SeatKey, Tended};
+use state::{Life, SessionRow};
 
 use crate::observe::Observed;
 
@@ -86,29 +86,31 @@ impl Tending {
     }
 }
 
-/// One tick at `now_millis`: the seats tended, then every session read
-/// once, the reading taken in by the paste holds, recorded, and what waits
-/// for an idle agent delivered, whatever is on or off. Delivery's clock is
-/// moved on by the time tending took, so a hold starts when its paste goes
-/// in.
+/// One tick at `now_millis`: every live session read once, the reading
+/// taken in by the paste holds and recorded, gone among it; then what
+/// waits for an idle agent delivered from that reading, whatever is on or
+/// off, so no paste waits on a launch; then the seats tended from what is
+/// recorded.
 pub(crate) fn tick(sup: &Supervisor, now_millis: i64) {
-    let started = Instant::now();
-    tend_seats(sup, now_millis);
-    let spent = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    let now_millis = now_millis.saturating_add(spent);
-    let rows = match sup.lock().sessions() {
-        Ok(rows) => rows,
+    let rows: Vec<SessionRow> = match sup.lock().sessions() {
+        Ok(rows) => rows.into_iter().filter(|r| r.life == Life::Live).collect(),
         Err(e) => return log(&words::tending_failed(&e.into())),
     };
     // tmux unable to list its panes: nothing is known, so nothing is
-    // recorded or typed; tend_seats has said so.
-    let Ok(observed) = crate::observe::observe(&sup.tools, &rows, now_millis) else {
-        return;
+    // recorded, launched or typed.
+    let observed = match crate::observe::observe(&sup.tools, &rows, now_millis) {
+        Ok(observed) => observed,
+        Err(e) => return blind(sup, &sessions::tool_status(e), now_millis),
     };
+    *sup.tending
+        .blind
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = false;
     let live = rows.iter().map(|r| r.id.as_str());
     sup.holds().saw(&observed.states, live, now_millis);
     record_states(sup, &rows, &observed, now_millis);
     crate::messages::deliver(sup, &rows, &observed, now_millis);
+    tend_seats(sup, now_millis);
 }
 
 /// Records each session whose state, as `observed`, differs from the one
@@ -129,53 +131,28 @@ fn record_states(sup: &Supervisor, rows: &[SessionRow], observed: &Observed, now
         return;
     }
     let written = sup.lock().write(|w| {
-        for (row, now) in &changed {
-            let step = Step::SessionStateChanged {
-                session: row.id.clone(),
-                fleet: row.fleet.as_ref().map(|f| f.display().to_string()),
-                seat: row.seat.clone(),
-                state: *now,
-            };
-            w.set_state(&row.id, Some(*now), &[step])?;
-        }
-        Ok(())
+        changed
+            .iter()
+            .try_for_each(|(row, now)| w.set_state(&row.id, Some(*now)))
     });
     if let Err(e) = written {
         log(&words::tending_failed(&e.into()));
     }
 }
 
-/// Every wanted seat at `now_millis` kept, launched or left waiting.
+/// Every wanted seat at `now_millis` kept, launched or left waiting, from
+/// the sessions as recorded: a seat with a live session keeps it.
 fn tend_seats(sup: &Supervisor, now_millis: i64) {
     let tending = &sup.tending;
     let read = {
         let s = sup.lock();
-        s.rosters().and_then(|r| s.sessions().map(|rows| (r, rows)))
+        s.wanted_seats()
+            .and_then(|wanted| s.sessions().map(|rows| (wanted, rows)))
     };
-    let (rosters, rows) = match read {
+    let (wanted, rows) = match read {
         Ok(read) => read,
         Err(e) => return log(&words::tending_failed(&e.into())),
     };
-    let wanted: Vec<Wanted> = rosters
-        .into_iter()
-        .filter(|f| f.on)
-        .flat_map(|f| {
-            let fleet = f.fleet;
-            f.roster
-                .seats
-                .iter()
-                .filter_map(|seat| {
-                    f.roster.role(&seat.role).map(|role| Wanted {
-                        key: SeatKey {
-                            fleet: fleet.clone(),
-                            seat: seat.name.clone(),
-                        },
-                        role: role.clone(),
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
     // A seat no longer wanted is not backing off: wanted again, it starts fresh.
     tending
         .down
@@ -185,11 +162,6 @@ fn tend_seats(sup: &Supervisor, now_millis: i64) {
     if wanted.is_empty() {
         return;
     }
-    let alive = match crate::observe::alive(&sup.tools, &rows) {
-        Ok(alive) => alive,
-        Err(e) => return blind(tending, &wanted, &sessions::tool_status(e), now_millis),
-    };
-    *tending.blind.lock().unwrap_or_else(PoisonError::into_inner) = false;
     let held: Vec<Held> = rows
         .iter()
         .filter_map(|r| {
@@ -200,7 +172,7 @@ fn tend_seats(sup: &Supervisor, now_millis: i64) {
                     seat: r.seat.clone()?,
                 },
                 launch_time_millis: r.launch_time_millis,
-                alive: alive.get(&r.id).copied().unwrap_or(false),
+                alive: r.life == Life::Live,
             })
         })
         .collect();
@@ -217,9 +189,14 @@ fn tend_seats(sup: &Supervisor, now_millis: i64) {
 /// tmux could not list its panes, so nothing is known to be alive and
 /// nothing is launched: launching blind could start a second session of a
 /// live seat. Each wanted seat shows down with `why`; the log says so once.
-fn blind(tending: &Tending, wanted: &[Wanted], why: &Status, now_millis: i64) {
+fn blind(sup: &Supervisor, why: &Status, now_millis: i64) {
+    let wanted = match sup.lock().wanted_seats() {
+        Ok(wanted) => wanted,
+        Err(e) => return log(&words::tending_failed(&e.into())),
+    };
+    let tending = &sup.tending;
     let mut down = tending.down.lock().unwrap_or_else(PoisonError::into_inner);
-    for w in wanted {
+    for w in &wanted {
         let mut d = down.get(&w.key).cloned().unwrap_or(Down {
             backoff: Backoff {
                 failures: 0,
@@ -293,12 +270,7 @@ fn act(sup: &Supervisor, tended: Tended, now_millis: i64) {
         // The next tick decides again, from what is wanted then.
         Ok(Started::Unwanted) => tending.set_down(&key, down),
         Ok(Started::Refused(why)) => {
-            let failed = Step::SeatLaunchFailed {
-                fleet: key.fleet.display().to_string(),
-                seat: key.seat.clone(),
-                why: why.clone(),
-            };
-            if let Err(e) = sup.lock().write(|w| w.record(&failed)) {
+            if let Err(e) = sup.lock().write(|w| w.seat_launch_failed(&key, &why)) {
                 log(&words::tending_failed(&e.into()));
             }
             let mut d = down.unwrap_or_default();

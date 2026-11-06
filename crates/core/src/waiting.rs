@@ -105,11 +105,6 @@ fn for_seat(fleet: &Path, seat: &str, states: &[StateName], step: &Step) -> Opti
             seat: Some(s),
             state,
         } if mine(f, s) => seat_state(session, states, *state),
-        Step::SessionGone {
-            session,
-            fleet: f,
-            seat: s,
-        } if mine(f, s) => seat_state(session, states, SessionState::Gone),
         Step::SeatRemoved { fleet: f, seat: s } if mine(f, s) => {
             Some(Verdict::Never(status::Wait::SeatRemoved {
                 fleet: fleet.to_path_buf(),
@@ -134,9 +129,6 @@ fn for_session(session: &str, states: &[StateName], step: &Step) -> Option<Verdi
         Step::SessionStateChanged {
             session: s, state, ..
         } if s == session => session_state(session, states, *state),
-        Step::SessionGone { session: s, .. } if s == session => {
-            session_state(session, states, SessionState::Gone)
-        }
         Step::SessionEnded { session: s, .. } if s == session => {
             Some(Verdict::Never(status::Wait::Ended {
                 session: session.to_owned(),
@@ -202,14 +194,6 @@ mod tests {
         }
     }
 
-    fn gone_seat(session: &str) -> Step {
-        Step::SessionGone {
-            session: session.into(),
-            fleet: "/c/app".into(),
-            seat: "scribe".into(),
-        }
-    }
-
     fn scribe() -> Waited {
         Waited::Seat {
             fleet: PathBuf::from("/c/app"),
@@ -258,9 +242,8 @@ mod tests {
     fn a_seat_is_followed_across_its_sessions() {
         let steps = [
             ev(1, changed("s1", Some("scribe"), SessionState::Gone)),
-            ev(2, gone_seat("s1")),
-            ev(3, changed("s2", Some("scribe"), SessionState::Starting)),
-            ev(4, changed("s2", Some("scribe"), SessionState::Idle)),
+            ev(2, changed("s2", Some("scribe"), SessionState::Starting)),
+            ev(3, changed("s2", Some("scribe"), SessionState::Idle)),
         ];
         assert_eq!(
             verdict(&scribe(), &[StateName::Idle], &steps),
@@ -270,7 +253,7 @@ mod tests {
 
     #[test]
     fn a_seats_gone_session_is_gone_reached_only_when_gone_is_wanted() {
-        let gone = [ev(1, gone_seat("s1"))];
+        let gone = [ev(1, changed("s1", Some("scribe"), SessionState::Gone))];
         assert_eq!(
             verdict(&scribe(), &[StateName::Gone], &gone),
             reached("s1", SessionState::Gone)

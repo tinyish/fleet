@@ -109,11 +109,6 @@ fn samples(kind: StepKind) -> Vec<Step> {
             fleet: s(APP),
             role: s("critic"),
         }],
-        K::SessionGone => vec![Step::SessionGone {
-            session: s("s1a2b3c4d5"),
-            fleet: s(APP),
-            seat: s("scribe"),
-        }],
         K::SeatLaunchFailed => vec![Step::SeatLaunchFailed {
             fleet: s(APP),
             seat: s("scribe"),

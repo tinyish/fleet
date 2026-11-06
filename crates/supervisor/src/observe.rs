@@ -80,29 +80,6 @@ pub(crate) fn observe(
     Ok(Observed { states, faults })
 }
 
-/// Whether the agent's pane of each of `sessions` is alive, by session id:
-/// tmux alone, for the tending loop, which never asks an adapter to read.
-///
-/// # Errors
-///
-/// When tmux cannot list its panes.
-pub(crate) fn alive(
-    tools: &Tools,
-    sessions: &[SessionRow],
-) -> Result<BTreeMap<String, bool>, ToolError> {
-    let panes = tools.mux.panes()?;
-    let by_id = by_id(&panes);
-    Ok(sessions
-        .iter()
-        .map(|row| {
-            (
-                row.id.clone(),
-                pane_of(&by_id, row).is_some_and(|p| !p.dead),
-            )
-        })
-        .collect())
-}
-
 /// `panes` by their ids.
 fn by_id(panes: &[Pane]) -> BTreeMap<&str, &Pane> {
     panes.iter().map(|p| (p.id.as_str(), p)).collect()

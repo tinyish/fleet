@@ -11,7 +11,7 @@ use fleet_core::protocol::request::{self, ConfigChoice};
 use fleet_core::protocol::response::{self, ConfigFate};
 use fleet_core::protocol::{Reply, Response, Status};
 use fleet_core::status;
-use state::{State, StateError, Step};
+use state::{State, StateError};
 
 use crate::{Error, Supervisor, canonical};
 
@@ -41,10 +41,6 @@ fn answer(remove: response::Remove) -> Reply {
     Reply::Response(Response::Remove(remove))
 }
 
-fn shown(paths: &[PathBuf]) -> Vec<String> {
-    paths.iter().map(|p| p.display().to_string()).collect()
-}
-
 /// The whole fleet goes; its config file too when `choice` says to delete
 /// it. Asked to ask first while the file is there, it changes nothing and
 /// answers `Ask`. The file is deleted inside the write, so a delete that
@@ -71,12 +67,7 @@ fn whole(state: &mut State, fleet: Fleet, choice: ConfigChoice) -> Result<Reply,
             },
             other => other,
         };
-        let removed = Step::FleetRemoved {
-            directory: fleet.directory.display().to_string(),
-            projects: shown(&fleet.projects),
-            config,
-        };
-        w.remove_fleet(&fleet.directory, &removed)?;
+        w.remove_fleet(&fleet.directory, config)?;
         Ok(config)
     });
     let config = match written {
@@ -115,12 +106,8 @@ fn take(state: &mut State, fleet: Fleet, taken: Vec<PathBuf>) -> Result<Reply, E
         }
     };
     let written = state.write(|w| {
-        w.remove_projects(&taken)?;
-        replace(&path, &edited).map_err(StateError::Config)?;
-        w.record(&Step::ProjectsTaken {
-            fleet: directory.display().to_string(),
-            projects: shown(&taken),
-        })
+        w.remove_projects(directory, &taken)?;
+        replace(&path, &edited).map_err(StateError::Config)
     });
     match written {
         Ok(()) => {}

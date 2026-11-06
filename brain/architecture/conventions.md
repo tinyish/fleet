@@ -30,3 +30,10 @@ however small. *(fleet-sibp.3: `client::ask_within` beside
 At most 100 lines per function and 600 lines per file, not counting a
 file's inline tests. No dead code and no unused dependencies. The build
 fails on these.
+
+## query-index
+
+A state query that runs every tick, or holds a correlated subquery, comes
+with an index that serves it, checked with `EXPLAIN QUERY PLAN`; rows that
+are never deleted make an unserved scan grow without end. *(fleet-1xy3:
+`sessions()`'s filter scanned every session row twice a tick.)*

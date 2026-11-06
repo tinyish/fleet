@@ -84,6 +84,8 @@ fn a_tick_fills_a_seat_from_its_role_and_a_second_tick_keeps_it() {
         [PathBuf::from("/a/claude")]
     );
     assert_eq!(panes(&r), 1);
+    r.tick(2_000);
+    assert_eq!(launches(&r), 1, "a second tick keeps it");
     assert_eq!(reads(&r), 1, "every live session is read once a tick");
     let seat = scribe(&r);
     assert_eq!(seat.session.map(|s| s.state), Some(SessionState::Idle));
@@ -100,21 +102,27 @@ fn a_tick_fills_a_seat_from_its_role_and_a_second_tick_keeps_it() {
         woken,
         [(Some("scribe".into()), Some("You write the notes.".into()))]
     );
-    r.tick(2_000);
-    assert_eq!(launches(&r), 1, "a second tick keeps it");
 }
 
 #[test]
-fn a_seat_whose_pane_ended_is_cleared_then_launched_again() {
+fn a_seat_whose_agent_died_is_recorded_gone_then_launched_again_in_the_same_tick() {
     let r = rig("seat-revive");
     r.tick(1_000);
+    let old = r.seated().id;
     kill_all(&r.mux);
     r.tick(2_000);
+    assert_eq!(launches(&r), 2);
     assert_eq!(panes(&r), 1, "the dead session's tmux session ended");
-    let s = r.kinds();
-    let gone = s.iter().position(|x| x == "SESSION_GONE");
-    let again = s.iter().rposition(|x| x == "SESSION_LAUNCHED");
+    let s = r.record();
+    let gone = s.iter().position(|step| {
+        matches!(step, Step::SessionStateChanged { session, state: SessionState::Gone, .. }
+            if *session == old)
+    });
+    let again = s
+        .iter()
+        .rposition(|step| matches!(step, Step::SessionLaunched { .. }));
     assert!(gone.is_some() && gone < again, "{s:?}");
+    assert_ne!(r.seated().id, old, "its gone session is no longer its own");
 }
 
 #[test]
@@ -178,7 +186,7 @@ fn off_launches_nothing_and_ends_nothing() {
     assert_eq!(
         scribe(&r).session.map(|s| s.state),
         Some(SessionState::Gone),
-        "nothing cleared"
+        "its gone session is kept"
     );
 }
 
@@ -305,19 +313,20 @@ fn a_request_that_leaves_work_wakes_the_tending_loop_before_its_tick() {
 #[test]
 fn a_state_is_recorded_once_when_it_changes() {
     let r = rig("seat-record");
-    r.tick(1_000);
-    r.tick(2_000);
+    for now in [1_000, 2_000, 3_000] {
+        r.tick(now);
+    }
     let id = r.seated().id;
     assert_eq!(states(&r), [(id.clone(), SessionState::Idle)]);
-    kill_all(&r.mux);
-    r.tick(3_000);
-    // The seat's gone session is cleared and relaunched in the same tick
-    // (SESSION_GONE), so no gone state is recorded for it; the new one's
-    // idle is.
-    let after = states(&r);
-    assert_eq!(after.len(), 2, "{after:?}");
-    assert_ne!(after[1].0, id);
-    assert_eq!(after[1].1, SessionState::Idle);
+    r.agents.read_as(Activity::Working);
+    r.tick(4_000);
+    assert_eq!(
+        states(&r),
+        [
+            (id.clone(), SessionState::Idle),
+            (id, SessionState::Working)
+        ]
+    );
 }
 
 #[test]
@@ -601,25 +610,14 @@ fn a_spawned_session_ends_by_its_id_and_a_second_end_changes_nothing() {
 }
 
 #[test]
-fn a_gone_session_ends_and_is_cleared() {
-    let r = rig("end-gone");
-    let id = r.spawn();
-    kill_all(&r.mux);
-    assert!(matches!(
-        r.end(&r.app, &id),
-        Reply::Response(Response::End(_))
-    ));
-    assert!(r.status(&r.app).fleets.iter().all(|f| f.spawned.is_empty()));
-}
-
-#[test]
 fn ending_a_seat_session_nothing_revives_names_no_seat() {
-    let changes: [(&str, Change); 2] = [
+    let changes: [(&str, Change); 3] = [
         ("orphaned", |r| {
             assert!(std::fs::write(r.app.join("fleet.toml"), roles_only()).is_ok());
             r.start_all()
         }),
         ("loose", |r| r.remove(&r.app, &[], ConfigChoice::Keep)),
+        ("off", |r| r.stop_all()),
     ];
     for (what, change) in changes {
         let r = rig(&format!("end-unrevived-{what}"));
@@ -635,6 +633,28 @@ fn ending_a_seat_session_nothing_revives_names_no_seat() {
             "{what}"
         );
     }
+}
+
+#[test]
+fn ending_a_seats_old_gone_session_records_it_and_names_no_seat() {
+    let r = rig("end-old-gone");
+    r.tick(1_000);
+    let old = r.seated().id;
+    kill_all(&r.mux);
+    r.tick(2_000);
+    assert_ne!(r.seated().id, old, "revived");
+    assert_eq!(
+        r.end(&r.root, &old),
+        Reply::Response(Response::End(response::End::Ended {
+            session: old.clone(),
+            seat: None,
+        }))
+    );
+    let last = r.record().pop();
+    assert!(
+        matches!(&last, Some(Step::SessionEnded { session, .. }) if *session == old),
+        "{last:?}"
+    );
 }
 
 #[test]
@@ -662,40 +682,6 @@ fn a_tmux_that_fails_to_end_changes_nothing() {
     assert_eq!(listed.count(), 1);
     let s = r.kinds();
     assert!(!s.iter().any(|s| s == "SESSION_ENDED"), "{s:?}");
-}
-
-#[test]
-fn end_and_message_ask_tmux_alone_and_a_pane_another_session_now_holds_is_not_theirs() {
-    let r = rig("end-alive");
-    r.tick(1_000);
-    let id = r.seated().id;
-    r.agents
-        .reads
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
-    // tmux's server restarted: the seat's pane id is another session's now.
-    for p in r
-        .mux
-        .panes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter_mut()
-    {
-        p.session = "other".into();
-    }
-    assert_eq!(
-        r.end(&r.app, "scribe"),
-        Reply::Status(Status::Session(status::Session::SeatNotRunning {
-            seat: "scribe".into(),
-            fleet: r.app.clone(),
-        }))
-    );
-    assert_eq!(
-        r.send_reply(&id, "hi"),
-        Reply::Status(status::Message::SessionEnded { session: id }.into())
-    );
-    assert_eq!(reads(&r), 0, "no adapter was asked");
 }
 
 #[test]

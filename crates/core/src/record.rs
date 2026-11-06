@@ -186,16 +186,6 @@ pub enum Step {
         /// The role's label.
         role: String,
     },
-    /// A seat's session whose pane had ended was cleared, before it was
-    /// launched again.
-    SessionGone {
-        /// tinyfleet's id for it.
-        session: String,
-        /// The fleet's directory.
-        fleet: String,
-        /// The seat.
-        seat: String,
-    },
     /// Launching a seat failed; it backs off.
     SeatLaunchFailed {
         /// The fleet's directory.
@@ -306,7 +296,6 @@ impl Step {
             | Step::SeatChanged { fleet, .. }
             | Step::RoleAdded { fleet, .. }
             | Step::RoleRemoved { fleet, .. }
-            | Step::SessionGone { fleet, .. }
             | Step::SeatLaunchFailed { fleet, .. } => Some(fleet),
             Step::SessionLaunched { fleet, .. }
             | Step::SessionEnded { fleet, .. }
@@ -428,11 +417,6 @@ mod tests {
                 fleet: "/c/app".into(),
                 role: "writer".into(),
             },
-            Step::SessionGone {
-                session: "s1".into(),
-                fleet: "/c/app".into(),
-                seat: "scribe".into(),
-            },
             Step::SeatLaunchFailed {
                 fleet: "/c/app".into(),
                 seat: "scribe".into(),
@@ -506,7 +490,6 @@ mod tests {
                 "SEAT_CHANGED",
                 "ROLE_ADDED",
                 "ROLE_REMOVED",
-                "SESSION_GONE",
                 "SEAT_LAUNCH_FAILED",
                 "SESSION_STATE_CHANGED",
                 "MESSAGE_QUEUED",

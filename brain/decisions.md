@@ -26,3 +26,15 @@ one process for every project, so it never drifts between them. In:
 beads keep their design fields until it lands. The old-code specs were
 renamed `brain/old-specs/` so they can't be mistaken for `brain/spec/`.
 Why: the process keeps specs as files. In: `brain/old-specs/`.
+
+## session-life
+
+2026-11-06. A session's life (live, gone or ended) is kept on its row,
+which outlives the session. Live is as state last recorded it, not what
+tmux says now: only the tending tick reads tmux, and it settles a dead
+pane within a tick. Every session whose pane ends is recorded gone first,
+a seat's too, before its revival. So a message sent within a tick of an
+agent dying is taken, then dropped as its session gone; don't "fix" that
+by asking tmux again. Why: every command gets one answer from one place,
+with no tmux in the rule (fleet-p6c5 was a command that read gone its own
+way). In: `spec/session-life/`, then `architecture/core.md` once it lands.

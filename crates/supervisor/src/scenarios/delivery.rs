@@ -2,8 +2,10 @@
 //! the paste hold, and dropped with what ends their session or seat.
 
 use std::path::Path;
+use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use fleet_core::agent::{Activity, SessionState, StateName};
 use fleet_core::messages::{Dropped, HOLD_MILLIS, MAX_TEXT_BYTES, Recipient, Sender};
@@ -97,27 +99,52 @@ fn an_agent_still_idle_after_a_paste_answers_once_the_hold_has_passed() {
 }
 
 #[test]
-fn a_hold_starts_when_the_paste_goes_in_not_when_the_tick_began() {
-    // The tick's revival takes 300 ms before delivery runs.
+fn a_paste_goes_in_from_the_ticks_reading_before_any_launch() {
+    // The seat's revival takes half a second, after the spawned session
+    // was read idle.
     let r = rig_with(
         "sc-late",
         Fakes {
             mux: FakeMux {
-                launch_delay: Duration::from_millis(300),
+                launch_delay: Duration::from_millis(500),
                 ..FakeMux::default()
             },
             ..Fakes::default()
         },
     );
+    let id = r.spawn();
     r.tick(1_000);
-    let _ = r.send("scribe", "hi");
-    kill_all(&r.mux);
-    r.tick(10_000);
-    assert_eq!(typed(&r.mux).len(), 1);
-    // Held from 10 300 at the earliest, so still held 30 s after the tick
-    // began.
-    let _ = r.send("scribe", "again");
-    r.tick(10_000 + HOLD_MILLIS);
+    let _ = r.send(&id, "hi");
+    let seat = r.seated().id;
+    for p in r
+        .mux
+        .panes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter_mut()
+        .filter(|p| p.session == seat)
+    {
+        p.dead = true;
+    }
+    let launched = || {
+        r.mux
+            .launched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    };
+    let before = launched();
+    thread::scope(|s| {
+        s.spawn(|| r.tick(2_000));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while launched() == before && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(typed(&r.mux).len(), 1, "typed before the revival runs");
+    });
+    // Held from the reading that saw it idle.
+    let _ = r.send(&id, "again");
+    r.tick(2_000 + HOLD_MILLIS - 1);
     assert_eq!(typed(&r.mux).len(), 1, "still held");
 }
 
@@ -186,12 +213,10 @@ fn a_seat_message_stays_held_while_its_seat_backs_off_and_its_gone_sessions_drop
             why: Dropped::SessionGone
         })
     );
-    assert_eq!(
-        r.dropped_after(&to_session),
-        Some(r.in_fleet("SESSION_STATE_CHANGED"))
-    );
     assert!(waiting_on(&r.wait(&m, &[])).is_some());
+    // Revived at 8 s, read idle and typed into at the next tick.
     r.tick(8_000);
+    r.tick(9_000);
     let new = r.seated();
     assert_eq!(typed(&r.mux), [(new.pane, "hi".to_owned())]);
 }
@@ -203,8 +228,9 @@ fn a_seat_message_waits_for_the_revived_session() {
     let old = r.seated().id;
     kill_all(&r.mux);
     let m = r.send("scribe", "hi");
-    // The tick revives the seat, then delivers to the new session.
+    // The tick revives the seat; the next delivers to the new session.
     r.tick(2_000);
+    r.tick(3_000);
     let new = r.seated();
     assert_ne!(new.id, old);
     assert_eq!(typed(&r.mux), [(new.pane, "hi".to_owned())]);
@@ -218,7 +244,7 @@ fn a_seat_message_waits_for_the_revived_session() {
 }
 
 #[test]
-fn a_gone_seat_sessions_messages_drop_at_its_revival() {
+fn a_gone_seat_sessions_messages_drop_and_never_follow_its_seat() {
     let r = rig("sc-drop-gone");
     r.tick(1_000);
     let id = r.seated().id;
@@ -238,7 +264,6 @@ fn a_gone_seat_sessions_messages_drop_at_its_revival() {
             why: Dropped::SessionGone
         })
     );
-    assert_eq!(r.dropped_after(&m), Some(r.in_fleet("SESSION_GONE")));
 }
 
 #[test]
@@ -259,10 +284,6 @@ fn a_spawned_sessions_messages_drop_once_it_is_gone_and_their_wait_ends() {
     assert_eq!(r.wait_on(on, &[], next_of(&w)), dropped);
     assert_eq!(r.wait(&m, &[]), dropped);
     assert_eq!(
-        r.dropped_after(&m),
-        Some(r.in_fleet("SESSION_STATE_CHANGED"))
-    );
-    assert_eq!(
         r.end(&r.app, &id),
         Reply::Response(Response::End(response::End::Ended {
             session: id.clone(),
@@ -274,6 +295,26 @@ fn a_spawned_sessions_messages_drop_once_it_is_gone_and_their_wait_ends() {
         .filter(|s| *s == "MESSAGE_DROPPED")
         .count();
     assert_eq!(drops, 1, "ending it later drops nothing more");
+}
+
+#[test]
+fn a_message_to_a_session_dead_since_the_last_tick_is_taken_then_dropped_at_the_next() {
+    let r = rig("sc-died-since");
+    let id = r.spawn();
+    r.tick(1_000);
+    kill_all(&r.mux);
+    let m = r.send(&id, "hi");
+    assert_ne!(m, "", "live as last recorded, so taken");
+    r.tick(2_000);
+    assert_eq!(held(&r.sup), []);
+    assert_eq!(typed(&r.mux), []);
+    assert_eq!(
+        r.wait(&m, &[]),
+        refused(status::Wait::Dropped {
+            message: m.clone(),
+            why: Dropped::SessionGone
+        })
+    );
 }
 
 #[test]
@@ -295,6 +336,7 @@ fn ending_a_seat_revives_it_fresh_and_keeps_the_seats_messages() {
         let left: Vec<String> = held(&r.sup).into_iter().map(|m| m.text).collect();
         assert_eq!(left, ["for the seat"], "end {n}");
         r.tick(now);
+        r.tick(now + 500);
         let new = r.seated();
         assert_ne!(new.id, first, "end {n}: a fresh session");
         assert!(r.sup.tending.down().is_empty(), "end {n}: no backoff");
@@ -327,7 +369,7 @@ fn queued(reply: &Reply) -> Option<&Recipient> {
 }
 
 #[test]
-fn a_seat_here_is_queued_for_and_recorded() {
+fn a_seat_here_is_queued_for() {
     let r = rig("msg-seat");
     let src = r.app.join("src");
     assert!(std::fs::create_dir_all(&src).is_ok());
@@ -343,10 +385,6 @@ fn a_seat_here_is_queued_for_and_recorded() {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].text, "hi");
     assert_eq!(held[0].sender, Sender::Person);
-    assert_eq!(
-        steps(&r.sup).last().map(String::as_str),
-        Some("MESSAGE_QUEUED")
-    );
 }
 
 #[test]
@@ -356,25 +394,6 @@ fn an_id_reaches_a_session_from_outside_every_fleet() {
     let id = r.seated().id;
     let reply = sent(&r, &r.root.join("wing"), &id, "hi");
     assert_eq!(queued(&reply), Some(&Recipient::Session { session: id }));
-}
-
-#[test]
-fn a_tmux_that_cannot_list_refuses_a_session_message() {
-    let r = rig("msg-notmux");
-    r.tick(1_000);
-    let id = r.seated().id;
-    r.mux.missing.store(true, Ordering::Relaxed);
-    let reply = r.send_reply(&id, "hi");
-    assert!(
-        matches!(
-            reply,
-            Reply::Status(Status::Session(
-                status::Session::MultiplexerCouldNotRun { .. }
-            ))
-        ),
-        "{reply:?}"
-    );
-    assert_eq!(held(&r.sup), []);
 }
 
 #[test]

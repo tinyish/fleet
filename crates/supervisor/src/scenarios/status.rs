@@ -386,5 +386,9 @@ fn a_seat_shows_down_only_while_none_of_its_sessions_lives() {
     assert_eq!(seat.down, None);
     kill_all(&r.mux);
     let seat = &r.status(&r.app).fleets[0].seats[0];
-    assert_eq!(seat.down.as_ref().map(|d| d.next_try_millis), Some(2_000));
+    assert_eq!(seat.down, None, "live until a tick reads it gone");
+    // A second quick end: gone, and its seat waits 5 s.
+    r.tick(3_000);
+    let seat = &r.status(&r.app).fleets[0].seats[0];
+    assert_eq!(seat.down.as_ref().map(|d| d.next_try_millis), Some(8_000));
 }

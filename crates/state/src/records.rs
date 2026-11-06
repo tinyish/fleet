@@ -6,9 +6,10 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use fleet_core::protocol::Event;
+use fleet_core::record::Step;
 use rusqlite::params;
 
-use crate::{State, StateError, Step, Write, now_millis, utf8};
+use crate::{State, StateError, Write, now_millis, utf8};
 
 /// How many rows one read of the record takes at most, before the budget.
 const ROWS: i64 = 500;
@@ -106,30 +107,17 @@ impl State {
         Ok(events)
     }
 
-    /// Every step whose `session` field is `session`, oldest first.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails, or a row is not a step this code knows.
-    pub fn steps_with_session(&self, session: &str) -> Result<Vec<Event>, StateError> {
-        self.steps_with("$.session", session)
-    }
-
     /// Every step whose `message` field is `message`, oldest first.
     ///
     /// # Errors
     ///
     /// When SQLite fails, or a row is not a step this code knows.
     pub fn steps_with_message(&self, message: &str) -> Result<Vec<Event>, StateError> {
-        self.steps_with("$.message", message)
-    }
-
-    fn steps_with(&self, field: &str, value: &str) -> Result<Vec<Event>, StateError> {
         let mut query = self.conn.prepare(
             "SELECT id, occur_time_millis, step, detail FROM records
-             WHERE json_extract(detail, ?1) = ?2 ORDER BY id",
+             WHERE json_extract(detail, '$.message') = ?1 ORDER BY id",
         )?;
-        let rows = query.query_map(params![field, value], row_parts)?;
+        let rows = query.query_map(params![message], row_parts)?;
         rows.map(|row| {
             let (id, occur_time_millis, name, detail) = row?;
             event(id, occur_time_millis, &name, &detail)
@@ -163,12 +151,9 @@ impl State {
 }
 
 impl Write<'_> {
-    /// Appends one step to the record, with the fleet it is about.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the step cannot be stored.
-    pub fn record(&mut self, step: &Step) -> Result<(), StateError> {
+    /// Appends one step to the record, with the fleet it is about. Only
+    /// state's own writes record, each its own steps.
+    pub(crate) fn record(&mut self, step: &Step) -> Result<(), StateError> {
         let (name, detail) = step.to_row().map_err(StateError::Step)?;
         self.tx.execute(
             "INSERT INTO records (occur_time_millis, step, detail, fleet)

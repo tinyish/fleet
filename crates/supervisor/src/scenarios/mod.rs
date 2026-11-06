@@ -197,29 +197,6 @@ impl Rig {
         }
     }
 
-    /// The kind of the step recorded just before `message`'s drop, and the
-    /// fleet the drop was recorded under; none when it was not dropped.
-    fn dropped_after(&self, message: &str) -> Option<(String, Option<String>)> {
-        self.record().windows(2).find_map(|pair| match pair {
-            [
-                before,
-                Step::MessageDropped {
-                    message: m, fleet, ..
-                },
-            ] if m == message => {
-                let kind = before.to_row().map(|(kind, _)| kind).unwrap_or_default();
-                Some((kind, fleet.clone()))
-            }
-            _ => None,
-        })
-    }
-
-    /// What [`Rig::dropped_after`] finds for a drop recorded right after a
-    /// step of `kind`, under the rig's fleet.
-    fn in_fleet(&self, kind: &str) -> (String, Option<String>) {
-        (kind.to_owned(), Some(self.app.display().to_string()))
-    }
-
     /// What status shows from `from`; an empty overview, after failing the
     /// test, for any other reply.
     fn status(&self, from: &Path) -> response::Overview {

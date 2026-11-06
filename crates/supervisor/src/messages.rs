@@ -13,11 +13,11 @@ use fleet_core::messages::{self, Recipient};
 use fleet_core::protocol::{Reply, Response, Status, request, response};
 use fleet_core::seats::SeatKey;
 use fleet_core::status::{self, Takes};
-use state::{MessageRow, SessionRow, State, StateError, Step, now_millis};
+use state::{Life, MessageRow, Named, SessionRow, State, StateError, now_millis};
 
-use crate::names::{self, Named};
+use crate::names;
 use crate::observe::Observed;
-use crate::{Error, Supervisor, Tools, log, words};
+use crate::{Error, Supervisor, log, words};
 
 /// Queues `ask`'s text for its recipient, with its step, or says why not.
 /// The state lock is held from finding the recipient to queuing, so it
@@ -33,7 +33,7 @@ pub(crate) fn send(sup: &Supervisor, ask: request::Message) -> Result<Reply, Err
         return Ok(Reply::Status(refusal.into()));
     }
     let mut state = sup.lock();
-    let (to, fleet) = match recipient(&state, &sup.tools, &directory, &to)? {
+    let (to, fleet) = match recipient(&state, &directory, &to)? {
         Ok(found) => found,
         Err(status) => return Ok(Reply::Status(status)),
     };
@@ -44,17 +44,7 @@ pub(crate) fn send(sup: &Supervisor, ask: request::Message) -> Result<Reply, Err
         text,
         queue_time_millis: now_millis(),
     };
-    let step = Step::MessageQueued {
-        message: row.id.clone(),
-        to: to.clone(),
-        sender: row.sender.clone(),
-        text: row.text.clone(),
-        fleet: fleet.map(|f| f.display().to_string()),
-    };
-    state.write(|w| {
-        w.queue_message(&row)?;
-        w.record(&step)
-    })?;
+    state.write(|w| w.queue_message(&row, fleet.as_deref()))?;
     Ok(Reply::Response(Response::Message(
         response::Message::Queued {
             message: row.id,
@@ -64,39 +54,27 @@ pub(crate) fn send(sup: &Supervisor, ask: request::Message) -> Result<Reply, Err
 }
 
 /// Who `to`, sent from `directory`, is, and their fleet: a seat of the
-/// fleet here, else a session whose pane is alive.
+/// fleet here, else a live session.
 fn recipient(
     state: &State,
-    tools: &Tools,
     directory: &Path,
     to: &str,
 ) -> Result<Result<(Recipient, Option<PathBuf>), Status>, Error> {
     let resolved = names::resolve(state, directory, to, Takes::SeatOrSession)?;
-    let row = match resolved.named {
-        Some(Named::Seat(SeatKey { fleet, seat })) => {
-            return Ok(Ok((
-                Recipient::Seat {
-                    fleet: fleet.clone(),
-                    seat,
-                },
-                Some(fleet),
-            )));
+    Ok(match resolved.named {
+        Some(Named::Seat(SeatKey { fleet, seat })) => Ok((
+            Recipient::Seat {
+                fleet: fleet.clone(),
+                seat,
+            },
+            Some(fleet),
+        )),
+        Some(Named::Session(row)) if row.life == Life::Live => {
+            Ok((Recipient::Session { session: row.id }, row.fleet))
         }
-        Some(Named::Session(row)) => row,
-        Some(Named::Ended(session)) => {
-            return Ok(Err(status::Message::SessionEnded { session }.into()));
-        }
-        Some(Named::Message(_)) | None => return Ok(Err(resolved.unknown().into())),
-    };
-    Ok(
-        match crate::observe::alive(tools, std::slice::from_ref(&row)) {
-            Ok(alive) if alive.get(&row.id).copied().unwrap_or(false) => {
-                Ok((Recipient::Session { session: row.id }, row.fleet))
-            }
-            Ok(_) => Err(status::Message::SessionEnded { session: row.id }.into()),
-            Err(e) => Err(crate::sessions::tool_status(e)),
-        },
-    )
+        Some(Named::Session(row)) => Err(status::Message::SessionEnded { session: row.id }.into()),
+        Some(Named::Message(_)) | None => Err(resolved.unknown().into()),
+    })
 }
 
 /// Delivers what waits for each idle agent at `now_millis`, from the
@@ -134,25 +112,12 @@ fn waiting_for(held: &[MessageRow], row: &SessionRow) -> Vec<String> {
         .collect()
 }
 
-/// Types the messages `ids` still held into `row`'s pane as one paste, with
-/// a step for each, in one transaction. Whether any went in.
+/// Types the messages `ids` still held into `row`'s pane as one paste, in
+/// one transaction with their steps. Whether any went in.
 fn type_in(sup: &Supervisor, row: &SessionRow, ids: &[String]) -> bool {
-    let written = sup.lock().write(|w| {
-        let delivered = w.deliver(ids, |text| sup.tools.mux.type_in(&row.pane, text))?;
-        // What it reads next is recorded afresh: after a paste, idle again
-        // is the agent's answer.
-        if !delivered.is_empty() {
-            w.set_state(&row.id, None, &[])?;
-        }
-        for message in &delivered {
-            w.record(&Step::MessageDelivered {
-                message: message.clone(),
-                session: row.id.clone(),
-                fleet: row.fleet.as_ref().map(|f| f.display().to_string()),
-            })?;
-        }
-        Ok(delivered)
-    });
+    let written = sup
+        .lock()
+        .write(|w| w.deliver(ids, &row.id, |text| sup.tools.mux.type_in(&row.pane, text)));
     match written {
         Ok(delivered) => !delivered.is_empty(),
         // tmux failed: the messages wait for the next tick.

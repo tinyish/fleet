@@ -8,9 +8,9 @@ use fleet_core::protocol::{Reply, Response, Status, request, response};
 use fleet_core::seats::{Role, SeatKey};
 use fleet_core::status::{self, Takes};
 use fleet_core::tools::ToolError;
-use state::{SessionRow, State, StateError, Step, Write, now_millis};
+use state::{Launched, Life, Named, SessionRow, State, StateError, Write, now_millis};
 
-use crate::names::{self, Named};
+use crate::names;
 use crate::{Error, Supervisor, Tools, adapters};
 
 /// What a launch asks for.
@@ -33,7 +33,7 @@ pub(crate) struct ForSeat {
     pub(crate) role: String,
     /// The digest of the role it is launched from.
     pub(crate) role_digest: String,
-    /// Its sessions whose pane ended, forgotten and ended first.
+    /// Its newest session, gone, whose tmux session is stopped first.
     pub(crate) clear: Vec<String>,
 }
 
@@ -64,18 +64,18 @@ pub(crate) enum Started {
     Unwanted,
 }
 
-/// An agent its adapter said how to run, with its row and step, not yet in
-/// tmux.
+/// An agent its adapter said how to run, with its row and what it was
+/// asked, not yet in tmux.
 struct Prepared {
     row: SessionRow,
-    step: Step,
+    asked: Launched,
     launched: agent::Launched,
 }
 
 /// Launches `seat`'s session from `ask`: the adapter resolved and asked
 /// what to run, without the state lock; then, in one transaction, the seat
-/// checked to be still wanted, its `clear`ed sessions forgotten and ended,
-/// tmux run, and the row and its steps written, or none of it.
+/// checked to be still wanted, the tmux session of its `clear`ed session
+/// stopped, tmux run, and the row and its steps written, or none of it.
 pub(crate) fn start_seat(sup: &Supervisor, ask: &Ask, seat: &ForSeat) -> Result<Started, Error> {
     let tools = &sup.tools;
     let p = match prepare(sup, ask, &For::Seat(seat)) {
@@ -85,16 +85,11 @@ pub(crate) fn start_seat(sup: &Supervisor, ask: &Ask, seat: &ForSeat) -> Result<
     let written = sup.lock().write(|w| {
         // A fetch or the adapter may have taken long: what was wanted then
         // may not be now.
-        if !w.seat_wanted(&seat.key.fleet, &seat.key.seat, &seat.role_digest)? {
+        if !w.seat_wanted(&seat.key, Some(&seat.role_digest))? {
             return Ok(false);
         }
         for gone in &seat.clear {
-            let step = Step::SessionGone {
-                session: gone.clone(),
-                fleet: seat.key.fleet.display().to_string(),
-                seat: seat.key.seat.clone(),
-            };
-            w.end_session(gone, &step, || tools.mux.stop(gone))?;
+            tools.mux.stop(gone).map_err(StateError::Tool)?;
         }
         launch_in(w, tools, &p)?;
         Ok(true)
@@ -253,21 +248,16 @@ fn prepare(sup: &Supervisor, ask: &Ask, launch: &For<'_>) -> Result<Prepared, St
         role: Some(role.clone()),
         role_digest: Some(digest.clone()),
         state: None,
+        life: Life::Live,
     };
-    let step = Step::SessionLaunched {
-        session: row.id.clone(),
+    let asked = Launched {
         adapter: ask.adapter.clone(),
-        program: row.adapter.display().to_string(),
-        directory: ask.directory.display().to_string(),
         model: ask.model.clone(),
         prompt: ask.prompt.clone(),
-        fleet: Some(fleet.display().to_string()),
-        seat: seat.cloned(),
-        role: Some(role.clone()),
     };
     Ok(Prepared {
         row,
-        step,
+        asked,
         launched,
     })
 }
@@ -275,10 +265,9 @@ fn prepare(sup: &Supervisor, ask: &Ask, launch: &For<'_>) -> Result<Prepared, St
 /// Runs `p`'s agent in tmux and writes its row and step, inside the
 /// caller's transaction.
 fn launch_in(w: &mut Write<'_>, tools: &Tools, p: &Prepared) -> Result<(), StateError> {
-    w.launch_session(&p.row, || {
+    w.launch_session(&p.row, &p.asked, || {
         tools.mux.launch(&p.row.id, &p.row.directory, &p.launched)
-    })?;
-    w.record(&p.step)
+    })
 }
 
 /// What a launch's transaction came to: done, refused because tmux failed,
@@ -300,32 +289,38 @@ fn settle<T>(
 }
 
 /// Ends `name`: a seat of the fleet holding `directory`, its live session,
-/// else a session by its id. In one transaction the session is forgotten,
-/// its tmux session ended, its step recorded and the messages held for it
-/// dropped, or nothing changes; a session already ended changes nothing.
+/// else a session by its id, live or gone. In one transaction the session
+/// is ended, its tmux session stopped, its step recorded and the messages
+/// held for it dropped, or nothing changes; a session already ended
+/// changes nothing.
 /// The state lock is held from finding the session to ending it.
 pub(crate) fn end(sup: &Supervisor, ask: request::End) -> Result<Reply, Error> {
     let request::End::Session { directory, name } = ask;
     let tools = &sup.tools;
     let mut state = sup.lock();
-    let row = match endable(&state, tools, &directory, &name)? {
+    let row = match endable(&state, &directory, &name)? {
         Ok(row) => row,
         Err(reply) => return Ok(reply),
     };
-    let step = Step::SessionEnded {
-        session: row.id.clone(),
-        fleet: row.fleet.as_ref().map(|f| f.display().to_string()),
-        seat: row.seat.clone(),
-    };
-    // Only a seat still in its fleet's config comes back: an orphan's or a
-    // removed fleet's does not.
-    let revives = match (&row.fleet, &row.seat) {
-        (Some(fleet), Some(seat)) => state.roster(fleet)?.seats.iter().any(|s| s.name == *seat),
-        _ => false,
-    };
-    let written = state.write(|w| w.end_session(&row.id, &step, || tools.mux.stop(&row.id)));
+    let written = state.write(|w| {
+        // Only a seat whose live session ended, and that is still wanted,
+        // comes back: an old gone session's, an orphan's, a removed
+        // fleet's or one whose fleet is off does not.
+        let revives = match (&row.fleet, &row.seat) {
+            (Some(fleet), Some(seat)) if row.life == Life::Live => {
+                let key = SeatKey {
+                    fleet: fleet.clone(),
+                    seat: seat.clone(),
+                };
+                w.seat_wanted(&key, None)?
+            }
+            _ => false,
+        };
+        w.end_session(&row.id, || tools.mux.stop(&row.id))?;
+        Ok(revives)
+    });
     match written {
-        Ok(_) => Ok(Reply::Response(Response::End(response::End::Ended {
+        Ok(revives) => Ok(Reply::Response(Response::End(response::End::Ended {
             session: row.id,
             seat: row.seat.filter(|_| revives),
         }))),
@@ -335,45 +330,36 @@ pub(crate) fn end(sup: &Supervisor, ask: request::End) -> Result<Reply, Error> {
 }
 
 /// The session `name` names from `directory`: a seat of the fleet here,
-/// its session whose pane is alive; else the session with that id. What
-/// to answer instead when there is none to end.
+/// its live session; else the session with that id, unless it is ended.
+/// What to answer instead when there is none to end.
 fn endable(
     state: &State,
-    tools: &Tools,
     directory: &Path,
     name: &str,
 ) -> Result<Result<SessionRow, Reply>, Error> {
     let resolved = names::resolve(state, directory, name, Takes::SeatOrSession)?;
     let key = match resolved.named {
         Some(Named::Seat(key)) => key,
-        Some(Named::Session(row)) => return Ok(Ok(row)),
-        Some(Named::Ended(session)) => {
+        Some(Named::Session(row)) if row.life == Life::Ended => {
             return Ok(Err(Reply::Response(Response::End(
-                response::End::AlreadyEnded { session },
+                response::End::AlreadyEnded { session: row.id },
             ))));
         }
+        Some(Named::Session(row)) => return Ok(Ok(row)),
         Some(Named::Message(_)) | None => {
             return Ok(Err(Reply::Status(resolved.unknown().into())));
         }
     };
-    let seats: Vec<SessionRow> = state
+    let live = state
         .sessions()?
         .into_iter()
-        .filter(|r| names::of_seat(r, &key.fleet, &key.seat))
-        .collect();
-    let alive = match crate::observe::alive(tools, &seats) {
-        Ok(alive) => alive,
-        Err(e) => return Ok(Err(Reply::Status(tool_status(e)))),
-    };
-    Ok(seats
-        .into_iter()
-        .find(|r| alive.get(&r.id).copied().unwrap_or(false))
-        .ok_or(Reply::Status(Status::Session(
-            status::Session::SeatNotRunning {
-                seat: key.seat,
-                fleet: key.fleet,
-            },
-        ))))
+        .find(|r| r.life == Life::Live && names::of_seat(r, &key.fleet, &key.seat));
+    Ok(live.ok_or(Reply::Status(Status::Session(
+        status::Session::SeatNotRunning {
+            seat: key.seat,
+            fleet: key.fleet,
+        },
+    ))))
 }
 
 /// What tmux failing comes to, as the facts the CLI words.

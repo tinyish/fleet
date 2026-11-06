@@ -145,7 +145,9 @@ top of these by users, through the supervisor's socket.
 
 **Seats, roles and sessions.** A seat is one individual, like a coworker:
 the supervisor keeps exactly one session of it running while any project of
-its fleet is on, revives it when it is gone, and adopts it on start. Every
+its fleet is on, revives it when it is gone, and adopts it on start. A
+seat's session that dies is recorded gone first, like any session, and
+stays gone; its revival comes after, in the same tick. Every
 revival starts fresh, with its role's wake-up prompt; what an agent remembers
 between lives is its user's to arrange. It runs in the directory its role
 names, by default the fleet directory. Off only stops the reviving: nothing
@@ -198,6 +200,14 @@ tell). Needs you carries its reason when the adapter knows it: a permission,
 a question, logged out, or a usage limit. tinyfleet leaves a session it
 cannot read alone.
 
+**Life.** Apart from its state, every session has a life, kept with it in
+state, which outlives it: *live* from its launch, *gone* once its pane is
+read ended, and *ended* once it is told to end. Live is as state last
+recorded it: the tending loop records a pane that died within a tick, and
+every command reads whether a session is live from state, never from tmux
+(status still reads each live session's state as it is now). Something sent to a session in the tick
+after its agent died is taken, then dropped as its session gone.
+
 The supervisor learns a state by polling. tmux says whether each session's
 pane is alive; the agent's adapter reads the agent's own record of itself,
 such as Claude Code's list of its sessions, never the screen and never
@@ -205,7 +215,7 @@ through hooks. The supervisor puts the two together, and when they disagree
 the state is unknown. An adapter whose agent keeps no record of itself may
 read the screen instead.
 
-Every tick, the tending loop reads every
+Every tick, the tending loop reads every live
 session once, one adapter run per adapter, and records a step when a
 session's state differs from the one last recorded; a session keeps its
 last recorded state, so a restart records nothing that did not change. A
@@ -276,7 +286,7 @@ file.
 | `supervisor` | the socket server, and tending each project that is on |
 | `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle), the protocol the CLI and the supervisor speak (`core::protocol`: the requests and replies, and how they go on a stream), and the tool interfaces; no I/O except through them, and the protocol reads and writes only the stream it is handed |
 | `adapter-sdk` (package `fleet-adapter-sdk`) | the adapter protocols (agents now; task trackers and forges with theirs), which `core` re-exports to the rest of tinyfleet; and, behind its `kit` feature, which tinyfleet never turns on, what anyone writing an adapter in Rust needs: the run loop, helpers, a test kit and the conformance checks |
-| `state` | the SQLite schema, its queries, and the drops a change makes |
+| `state` | the SQLite schema, its queries, and every write's steps and drops |
 | `service`, `git` | the drivers |
 | `tmux` | the multiplexer's driver |
 | `adapter-host` | the driver that runs adapter programs: one request on stdin, one answer on stdout, with a time limit |
@@ -338,8 +348,7 @@ in one transaction, checks the fleet is still there, runs the agent in tmux,
 writes the session with its fleet and role and records the step; it answers
 with the session's id once the agent runs. End sends the directory and a
 name: a seat of the fleet holding the directory, else a session's id; a
-session already ended, found only in the record, is answered as already
-ended, and nothing changes. Otherwise, in one transaction the supervisor
+session already ended is answered as already ended, and nothing changes. Otherwise, in one transaction the supervisor
 forgets the session, ends its tmux session, drops the messages held for it and
 records both; a seat's ended session is then revived at once, as the tending
 loop revives any seat with none. Neither starts the supervisor.
@@ -427,7 +436,8 @@ contract's (see Boundaries).
    its own.
    How that works: [cli-output.md](cli-output.md).
 10. Every change to state commits in one transaction with the steps that
-    record it: the supervisor writes only inside `State::write`, so a change
+    record it: the supervisor writes only through `State::write`'s writes,
+    each recording its own steps, so a change
     and its record never part, and a failure part way changes nothing.
 11. tinyfleet never removes a workspace on its own: only whoever made it
     does, or uninstall, which takes every workspace with it, landed or not
@@ -533,6 +543,7 @@ release whose binary accepts `fleet specimen`.
 | role | an entry in a fleet's config saying how to run an agent: its label, its adapter, its model, its wake-up prompt and its directory |
 | seat | a named agent of a fleet, running as its role says, that the supervisor keeps one session of running, revived fresh when it is gone |
 | session | a tmux session on tinyfleet's socket, running one agent; a spawned session ends only when told to end |
+| life | a session's live, gone (its pane ended) or ended (told to end), as state last recorded it |
 | workspace | a git worktree on its own branch, under the state directory |
 | message | text for a seat or a session, held by the supervisor until its agent is idle, then typed in |
 | event | a recorded step, as wait and events see it |

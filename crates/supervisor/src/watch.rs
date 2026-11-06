@@ -10,13 +10,12 @@ use fleet_core::agent::{SessionState, StateName};
 use fleet_core::protocol::{
     BATCH_BYTES, MAX_HOLD_MILLIS, Reply, Response, Status, Waited, request, response,
 };
-use fleet_core::record::Step;
 use fleet_core::seats::SeatKey;
 use fleet_core::status::{self, Takes};
 use fleet_core::waiting::{self, Verdict};
-use state::{SessionRow, State};
+use state::{Life, Named, SessionRow, State};
 
-use crate::names::{self, Named};
+use crate::names;
 use crate::{Error, Supervisor};
 
 /// `hold_millis`, at most the longest hold.
@@ -132,22 +131,16 @@ fn first_poll(
                 .collect();
             already(Waited::Seat { fleet, seat }, mine)
         }
+        // Ended: never a state it had before.
+        Named::Session(row) if row.life == Life::Ended => {
+            return refuse(status::Wait::Ended { session: row.id }.into());
+        }
         Named::Session(row) => already(
             Waited::Session {
                 session: row.id.clone(),
             },
             vec![row],
         ),
-        Named::Ended(session) => {
-            // Ended, or cleared as gone: only what ended it counts, never a
-            // state it had before.
-            let endings: Vec<_> = s
-                .steps_with_session(&session)?
-                .into_iter()
-                .filter(|e| ends(&e.step))
-                .collect();
-            waiting::judge(&Waited::Session { session }, states, &endings)
-        }
         Named::Message(message) => {
             let queued = s.steps_with_message(&message)?.first().map(|e| e.id);
             return Ok(First::From(
@@ -160,19 +153,6 @@ fn first_poll(
         Verdict::Keep => First::From(on, next),
         decided => First::Decided(answer(on, decided)),
     })
-}
-
-/// Whether `step` ends a session: ended, cleared as gone, or read gone.
-fn ends(step: &Step) -> bool {
-    matches!(
-        step,
-        Step::SessionEnded { .. }
-            | Step::SessionGone { .. }
-            | Step::SessionStateChanged {
-                state: SessionState::Gone,
-                ..
-            }
-    )
 }
 
 /// Judges the steps from `from` as they come, held up to `hold`; with
@@ -253,8 +233,8 @@ fn name_of(on: &Waited) -> String {
 }
 
 /// The live session of what is waited on, and its recorded state: a seat's
-/// session that is not gone, else its newest; a session's own row; none
-/// for a message.
+/// live session, else its newest; a session's own row; none for a
+/// message.
 fn live(rows: &[SessionRow], on: &Waited) -> (Option<String>, Option<SessionState>) {
     let pick = |r: &SessionRow| (Some(r.id.clone()), r.state);
     match on {
@@ -264,7 +244,7 @@ fn live(rows: &[SessionRow], on: &Waited) -> (Option<String>, Option<SessionStat
                 .filter(|r| names::of_seat(r, fleet, seat))
                 .collect();
             mine.iter()
-                .find(|r| r.state != Some(SessionState::Gone))
+                .find(|r| r.life == Life::Live)
                 .or(mine.last())
                 .map_or((None, None), |r| pick(r))
         }
