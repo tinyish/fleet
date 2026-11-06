@@ -229,6 +229,7 @@ fn a_gone_seat_sessions_messages_drop_at_its_revival() {
             why: Dropped::SessionEnded
         })
     );
+    assert_eq!(r.dropped_after(&m), Some(r.in_fleet("SESSION_GONE")));
 }
 
 #[test]

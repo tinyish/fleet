@@ -63,7 +63,6 @@ fn whole(state: &mut State, fleet: Fleet, choice: ConfigChoice) -> Result<Reply,
     }
     let delete_config = choice == ConfigChoice::Delete;
     let written = state.write(|w| {
-        w.remove_fleet(&fleet.directory)?;
         let config = match found {
             ConfigFate::Kept if delete_config => match fs::remove_file(&path) {
                 Ok(()) => ConfigFate::Deleted,
@@ -72,12 +71,12 @@ fn whole(state: &mut State, fleet: Fleet, choice: ConfigChoice) -> Result<Reply,
             },
             other => other,
         };
-        w.record(&Step::FleetRemoved {
+        let removed = Step::FleetRemoved {
             directory: fleet.directory.display().to_string(),
             projects: shown(&fleet.projects),
             config,
-        })?;
-        crate::messages::fleet_leaves(w, &fleet.directory)?;
+        };
+        w.remove_fleet(&fleet.directory, &removed)?;
         Ok(config)
     });
     let config = match written {

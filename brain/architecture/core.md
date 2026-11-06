@@ -276,7 +276,7 @@ file.
 | `supervisor` | the socket server, and tending each project that is on |
 | `core` (package `fleet-core`: `core` is Rust's own) | the rules (what a fleet is, when a create is refused, a fleet's lifecycle), the protocol the CLI and the supervisor speak (`core::protocol`: the requests and replies, and how they go on a stream), and the tool interfaces; no I/O except through them, and the protocol reads and writes only the stream it is handed |
 | `adapter-sdk` (package `fleet-adapter-sdk`) | the adapter protocols (agents now; task trackers and forges with theirs), which `core` re-exports to the rest of tinyfleet; and, behind its `kit` feature, which tinyfleet never turns on, what anyone writing an adapter in Rust needs: the run loop, helpers, a test kit and the conformance checks |
-| `state` | the SQLite schema and its queries |
+| `state` | the SQLite schema, its queries, and the drops a change makes |
 | `service`, `git` | the drivers |
 | `tmux` | the multiplexer's driver |
 | `adapter-host` | the driver that runs adapter programs: one request on stdin, one answer on stdout, with a time limit |

@@ -291,12 +291,20 @@ impl Write<'_> {
             .is_some_and(|role| role.digest() == role_digest))
     }
 
-    /// Replaces the roles and seats of the fleet in `fleet` with `roster`'s.
+    /// Replaces the roles and seats of the fleet in `fleet` with `roster`'s
+    /// and records `steps`, the change's; then drops the messages held for
+    /// each seat that left, recording each dropped.
     ///
     /// # Errors
     ///
     /// When SQLite fails or a path is not UTF-8.
-    pub fn set_roster(&mut self, fleet: &Path, roster: &Roster) -> Result<(), StateError> {
+    pub fn set_roster(
+        &mut self,
+        fleet: &Path,
+        roster: &Roster,
+        steps: &[Step],
+    ) -> Result<(), StateError> {
+        let had = roster_in(&self.tx, fleet)?.seats;
         let fleet = utf8(fleet)?;
         self.tx
             .execute("DELETE FROM roles WHERE fleet = ?1", params![fleet])?;
@@ -322,21 +330,27 @@ impl Write<'_> {
                 params![fleet, seat.name, seat.role],
             )?;
         }
-        Ok(())
+        steps.iter().try_for_each(|step| self.record(step))?;
+        had.iter()
+            .filter(|old| !roster.seats.iter().any(|s| s.name == old.name))
+            .try_for_each(|seat| self.drop_for_seat(fleet, &seat.name))
     }
 
-    /// Removes the fleet in `directory`; its projects, roles and seats go
-    /// with it, and its seats' sessions stay.
+    /// Removes the fleet in `directory`, records `step`, the removal's, and
+    /// drops the messages held for its seats, recording each dropped. Its
+    /// projects, roles and seats go with it, and its seats' sessions stay.
     ///
     /// # Errors
     ///
     /// When SQLite fails or the path is not UTF-8.
-    pub fn remove_fleet(&mut self, directory: &Path) -> Result<(), StateError> {
+    pub fn remove_fleet(&mut self, directory: &Path, step: &Step) -> Result<(), StateError> {
+        let directory = utf8(directory)?;
         self.tx.execute(
             "DELETE FROM fleets WHERE directory = ?1",
-            params![utf8(directory)?],
+            params![directory],
         )?;
-        Ok(())
+        self.record(step)?;
+        self.drop_for_fleet(directory)
     }
 
     /// Takes `projects` out of the fleet that serves them.
@@ -581,7 +595,11 @@ mod tests {
         let (mut state, dir) = fresh("remove");
         let f = fleet("/f/a", &["/c/api", "/c/app"]);
         assert!(state.write(|w| w.create_fleet(&f, || Ok(()))).is_ok());
-        assert!(state.write(|w| w.remove_fleet(Path::new("/f/a"))).is_ok());
+        assert!(
+            state
+                .write(|w| w.remove_fleet(Path::new("/f/a"), &forgotten("/f/a")))
+                .is_ok()
+        );
         assert_eq!(state.fleets().ok(), Some(vec![]));
         assert_eq!(active(&state, "/c/app"), None);
         let _ = std::fs::remove_dir_all(dir);
@@ -624,6 +642,20 @@ mod tests {
         let rows = state.sessions().unwrap_or_default();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pane, "%7");
+    }
+
+    fn ended(id: &str) -> Step {
+        Step::SessionEnded {
+            session: id.into(),
+            fleet: None,
+            seat: None,
+        }
+    }
+
+    fn forgotten(directory: &str) -> Step {
+        Step::FleetForgotten {
+            directory: directory.into(),
+        }
     }
 
     fn launched(id: &str) -> Step {
@@ -696,11 +728,19 @@ mod tests {
             ran.set(ran.get() + 1);
             Ok(())
         };
-        let first = state.write(|w| w.end_session("s1", stop)).ok();
+        let first = state
+            .write(|w| w.end_session("s1", &ended("s1"), stop))
+            .ok();
         assert_eq!(first.flatten().map(|r| r.id), Some("s1".to_owned()));
         assert_eq!(state.sessions().ok(), Some(vec![]));
-        assert_eq!(state.write(|w| w.end_session("s1", stop)).ok(), Some(None));
+        assert_eq!(
+            state
+                .write(|w| w.end_session("s1", &ended("s1"), stop))
+                .ok(),
+            Some(None)
+        );
         assert_eq!(ran.get(), 1, "end runs only for a session that was there");
+        assert_eq!(steps(&state), ["SESSION_ENDED"], "and records only then");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -712,7 +752,7 @@ mod tests {
                 .write(|w| w.launch_session(&row("s1"), || Ok("%1".into())))
                 .is_ok()
         );
-        let failed = state.write(|w| w.end_session("s1", || Err(tmux_said_no())));
+        let failed = state.write(|w| w.end_session("s1", &ended("s1"), || Err(tmux_said_no())));
         assert!(matches!(failed, Err(StateError::Tool(_))), "{failed:?}");
         assert_eq!(
             state.sessions().ok(),
@@ -763,7 +803,7 @@ mod tests {
         let done = state.write(|w| {
             w.create_fleet(&f, || Ok(()))?;
             w.create_fleet(&other, || Ok(()))?;
-            w.set_roster(&f.directory, &roster())
+            w.set_roster(&f.directory, &roster(), &[])
         });
         assert!(done.is_ok(), "{done:?}");
         assert_eq!(state.roster(&f.directory).ok(), Some(roster()));
@@ -791,7 +831,7 @@ mod tests {
         assert_eq!(on, [false, true]);
         assert!(
             state
-                .write(|w| w.set_roster(&f.directory, &Roster::default()))
+                .write(|w| w.set_roster(&f.directory, &Roster::default(), &[]))
                 .is_ok()
         );
         assert_eq!(state.roster(&f.directory).ok(), Some(Roster::default()));
@@ -831,11 +871,15 @@ mod tests {
         };
         let done = state.write(|w| {
             w.create_fleet(&f, || Ok(()))?;
-            w.set_roster(&f.directory, &roster())?;
+            w.set_roster(&f.directory, &roster(), &[])?;
             w.launch_session(&seat_row, || Ok("%1".into()))
         });
         assert!(done.is_ok(), "{done:?}");
-        assert!(state.write(|w| w.remove_fleet(&f.directory)).is_ok());
+        assert!(
+            state
+                .write(|w| w.remove_fleet(&f.directory, &forgotten("/c/app")))
+                .is_ok()
+        );
         assert_eq!(state.roster(&f.directory).ok(), Some(Roster::default()));
         assert_eq!(
             state.sessions().ok(),
@@ -910,7 +954,11 @@ mod tests {
             state.write(|w| w.fleet_registered(&f.directory)).ok(),
             Some(true)
         );
-        assert!(state.write(|w| w.remove_fleet(&f.directory)).is_ok());
+        assert!(
+            state
+                .write(|w| w.remove_fleet(&f.directory, &forgotten("/f/a")))
+                .is_ok()
+        );
         assert_eq!(
             state.write(|w| w.fleet_registered(&f.directory)).ok(),
             Some(false)

@@ -6,7 +6,7 @@ use fleet_core::agent::SessionState;
 use fleet_core::tools::ToolError;
 use rusqlite::{OptionalExtension, params};
 
-use crate::{State, StateError, Write, utf8};
+use crate::{State, StateError, Step, Write, utf8};
 
 /// One session tinyfleet launched and has not ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,9 +112,10 @@ impl Write<'_> {
         Ok(())
     }
 
-    /// Forgets session `id`, then runs `end`: if it fails, the session
-    /// stays. The row it forgot; none, running nothing, when there is no
-    /// such session.
+    /// Forgets session `id` and runs `end`, then records `step`, the
+    /// end's, and drops the messages held for the session, recording each
+    /// dropped. If `end` fails, the session stays. The row it forgot; none,
+    /// running and recording nothing, when there is no such session.
     ///
     /// # Errors
     ///
@@ -122,6 +123,7 @@ impl Write<'_> {
     pub fn end_session(
         &mut self,
         id: &str,
+        step: &Step,
         end: impl FnOnce() -> Result<(), ToolError>,
     ) -> Result<Option<SessionRow>, StateError> {
         let row = self
@@ -132,10 +134,12 @@ impl Write<'_> {
                 row_of,
             )
             .optional()?;
-        if row.is_some() {
+        if let Some(row) = &row {
             self.tx
                 .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
             end().map_err(StateError::Tool)?;
+            self.record(step)?;
+            self.drop_for_session(id, row.fleet.as_deref().map(utf8).transpose()?)?;
         }
         Ok(row)
     }

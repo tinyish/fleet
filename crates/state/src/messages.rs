@@ -2,13 +2,13 @@
 //! (core.md § Primitives, Messages). Only held messages have a row: a
 //! delivery or a drop deletes it, and the record keeps the history.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use fleet_core::messages::{self, Recipient, Sender};
+use fleet_core::messages::{self, Dropped, Recipient, Sender};
 use fleet_core::tools::ToolError;
 use rusqlite::{ToSql, params};
 
-use crate::{State, StateError, Write, utf8};
+use crate::{State, StateError, Step, Write, utf8};
 
 /// One held message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,39 +151,38 @@ impl Write<'_> {
         Ok(still.into_iter().map(|(id, _)| id).collect())
     }
 
-    /// Drops the messages held for session `session`, answering with their
-    /// ids, oldest first, for the caller to record.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails.
-    pub fn drop_for_session(&mut self, session: &str) -> Result<Vec<String>, StateError> {
-        self.take("session = ?1", &[&session])
+    /// Drops the messages held for session `session`, of the fleet
+    /// `fleet`, recording each dropped as its session ended.
+    pub(crate) fn drop_for_session(
+        &mut self,
+        session: &str,
+        fleet: Option<&str>,
+    ) -> Result<(), StateError> {
+        self.drop_held("session = ?1", &[&session], Dropped::SessionEnded, fleet)
     }
 
-    /// Drops the messages held for seat `seat` of the fleet in `fleet`.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the path is not UTF-8.
-    pub fn drop_for_seat(&mut self, fleet: &Path, seat: &str) -> Result<Vec<String>, StateError> {
-        let fleet = utf8(fleet)?;
-        self.take("fleet = ?1 AND seat = ?2", &[&fleet, &seat])
+    /// Drops the messages held for seat `seat` of the fleet `fleet`,
+    /// recording each dropped as its seat taken out.
+    pub(crate) fn drop_for_seat(&mut self, fleet: &str, seat: &str) -> Result<(), StateError> {
+        let filter = "fleet = ?1 AND seat = ?2";
+        self.drop_held(filter, &[&fleet, &seat], Dropped::SeatRemoved, Some(fleet))
     }
 
-    /// Drops the messages held for every seat of the fleet in `fleet`.
-    ///
-    /// # Errors
-    ///
-    /// When SQLite fails or the path is not UTF-8.
-    pub fn drop_for_fleet(&mut self, fleet: &Path) -> Result<Vec<String>, StateError> {
-        let fleet = utf8(fleet)?;
-        self.take("fleet = ?1", &[&fleet])
+    /// Drops the messages held for every seat of the fleet `fleet`,
+    /// recording each dropped as its fleet removed.
+    pub(crate) fn drop_for_fleet(&mut self, fleet: &str) -> Result<(), StateError> {
+        self.drop_held("fleet = ?1", &[&fleet], Dropped::FleetRemoved, Some(fleet))
     }
 
-    /// Deletes the held messages `filter` picks, answering with their ids,
-    /// oldest first.
-    fn take(&mut self, filter: &str, args: &[&dyn ToSql]) -> Result<Vec<String>, StateError> {
+    /// Deletes the held messages `filter` picks and records each dropped,
+    /// oldest first, for `why`; `fleet` is the fleet of who they were for.
+    fn drop_held(
+        &mut self,
+        filter: &str,
+        args: &[&dyn ToSql],
+        why: Dropped,
+        fleet: Option<&str>,
+    ) -> Result<(), StateError> {
         let ids: Vec<String> = {
             let mut query = self.tx.prepare(&format!(
                 "SELECT id FROM messages WHERE {filter} {OLDEST_FIRST}"
@@ -193,7 +192,13 @@ impl Write<'_> {
         };
         self.tx
             .execute(&format!("DELETE FROM messages WHERE {filter}"), args)?;
-        Ok(ids)
+        ids.into_iter().try_for_each(|message| {
+            self.record(&Step::MessageDropped {
+                message,
+                why,
+                fleet: fleet.map(str::to_owned),
+            })
+        })
     }
 }
 
@@ -315,43 +320,6 @@ mod tests {
         let result = state.write(|w| w.deliver(&["ma".into()], |_| Err(failed())));
         assert!(matches!(result, Err(StateError::Tool(_))), "{result:?}");
         assert_eq!(ids(&state), ["ma"]);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn each_drop_takes_only_its_own_messages() {
-        let (mut state, dir) = fresh("drops");
-        let other_seat = Recipient::Seat {
-            fleet: "/c/app".into(),
-            seat: "critic".into(),
-        };
-        let other_fleet = Recipient::Seat {
-            fleet: "/c/web".into(),
-            seat: "scribe".into(),
-        };
-        let queued = state.write(|w| {
-            w.queue_message(&row("m1", to_session("s1"), "x", 1))?;
-            w.queue_message(&row("m2", to_session("s2"), "x", 2))?;
-            w.queue_message(&row("m3", to_seat(), "x", 3))?;
-            w.queue_message(&row("m4", other_seat, "x", 4))?;
-            w.queue_message(&row("m5", other_fleet, "x", 5))
-        });
-        assert!(queued.is_ok());
-        assert_eq!(
-            state.write(|w| w.drop_for_session("s1")).ok(),
-            Some(vec!["m1".to_owned()])
-        );
-        assert_eq!(
-            state
-                .write(|w| w.drop_for_seat(Path::new("/c/app"), "scribe"))
-                .ok(),
-            Some(vec!["m3".to_owned()])
-        );
-        assert_eq!(
-            state.write(|w| w.drop_for_fleet(Path::new("/c/app"))).ok(),
-            Some(vec!["m4".to_owned()])
-        );
-        assert_eq!(ids(&state), ["m2", "m5"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

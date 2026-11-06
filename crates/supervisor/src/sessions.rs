@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 
 use fleet_core::agent::{self, Verb};
-use fleet_core::messages::Dropped;
 use fleet_core::protocol::{Reply, Response, Status, request, response};
 use fleet_core::seats::{Role, SeatKey};
 use fleet_core::status::{self, Takes};
@@ -90,15 +89,12 @@ pub(crate) fn start_seat(sup: &Supervisor, ask: &Ask, seat: &ForSeat) -> Result<
             return Ok(false);
         }
         for gone in &seat.clear {
-            if w.end_session(gone, || tools.mux.stop(gone))?.is_some() {
-                w.record(&Step::SessionGone {
-                    session: gone.clone(),
-                    fleet: seat.key.fleet.display().to_string(),
-                    seat: seat.key.seat.clone(),
-                })?;
-                let ids = w.drop_for_session(gone)?;
-                crate::messages::dropped(w, &ids, Dropped::SessionEnded, Some(&seat.key.fleet))?;
-            }
+            let step = Step::SessionGone {
+                session: gone.clone(),
+                fleet: seat.key.fleet.display().to_string(),
+                seat: seat.key.seat.clone(),
+            };
+            w.end_session(gone, &step, || tools.mux.stop(gone))?;
         }
         launch_in(w, tools, &p)?;
         Ok(true)
@@ -327,18 +323,9 @@ pub(crate) fn end(sup: &Supervisor, ask: request::End) -> Result<Reply, Error> {
         (Some(fleet), Some(seat)) => state.roster(fleet)?.seats.iter().any(|s| s.name == *seat),
         _ => false,
     };
-    let written = state.write(|w| {
-        if w.end_session(&row.id, || tools.mux.stop(&row.id))?
-            .is_some()
-        {
-            w.record(&step)?;
-            let ids = w.drop_for_session(&row.id)?;
-            crate::messages::dropped(w, &ids, Dropped::SessionEnded, row.fleet.as_deref())?;
-        }
-        Ok(())
-    });
+    let written = state.write(|w| w.end_session(&row.id, &step, || tools.mux.stop(&row.id)));
     match written {
-        Ok(()) => Ok(Reply::Response(Response::End(response::End::Ended {
+        Ok(_) => Ok(Reply::Response(Response::End(response::End::Ended {
             session: row.id,
             seat: row.seat.filter(|_| revives),
         }))),

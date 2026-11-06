@@ -46,6 +46,7 @@ fn ending_a_session_while_waited_on_refuses_the_wait_and_drops_its_messages() {
             why: Dropped::SessionEnded
         })
     );
+    assert_eq!(r.dropped_after(&m), Some(r.in_fleet("SESSION_ENDED")));
     assert_eq!(
         r.send_reply(&id, "again"),
         Reply::Status(status::Message::SessionEnded { session: id }.into())
@@ -79,6 +80,7 @@ fn a_seat_taken_out_while_waited_on_refuses_the_wait_and_drops_its_messages() {
             why: Dropped::SeatRemoved
         })
     );
+    assert_eq!(r.dropped_after(&m), Some(r.in_fleet("SEAT_REMOVED")));
     assert_eq!(held(&r.sup), []);
 }
 
@@ -87,20 +89,20 @@ type Change = fn(&Rig) -> Reply;
 
 #[test]
 fn a_fleet_removed_or_forgotten_refuses_a_seat_wait_and_drops_its_messages() {
-    let changes: [(&str, Change); 2] = [
-        ("removed", |r| {
+    let changes: [(&str, &str, Change); 2] = [
+        ("removed", "FLEET_REMOVED", |r| {
             r.ask(Request::Remove(request::Remove::Fleet {
                 directory: r.app.clone(),
                 projects: vec![],
                 config: ConfigChoice::Keep,
             }))
         }),
-        ("forgotten", |r| {
+        ("forgotten", "FLEET_FORGOTTEN", |r| {
             let _ = std::fs::remove_dir_all(&r.app);
             r.ask(Request::Start(request::Start::All))
         }),
     ];
-    for (what, change) in changes {
+    for (what, kind, change) in changes {
         let r = rig(&format!("sc-fleet-{what}"));
         r.tick(1_000);
         let m = r.send("scribe", "hi");
@@ -116,11 +118,12 @@ fn a_fleet_removed_or_forgotten_refuses_a_seat_wait_and_drops_its_messages() {
         assert_eq!(
             r.wait(&m, &[]),
             refused(status::Wait::Dropped {
-                message: m,
+                message: m.clone(),
                 why: Dropped::FleetRemoved
             }),
             "{what}"
         );
+        assert_eq!(r.dropped_after(&m), Some(r.in_fleet(kind)), "{what}");
         assert_eq!(held(&r.sup), [], "{what}");
     }
 }

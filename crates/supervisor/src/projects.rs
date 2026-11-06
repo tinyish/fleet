@@ -5,7 +5,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use fleet_core::fleets::{self, Fleet, conflicts};
-use fleet_core::messages::Dropped;
 use fleet_core::protocol::{Reply, Response, Status, response};
 use fleet_core::seats::{self, Roster, RosterChange};
 use fleet_core::status;
@@ -148,11 +147,10 @@ impl Reread {
             })?;
         }
         for fleet in &self.gone {
-            w.remove_fleet(&fleet.directory)?;
-            w.record(&Step::FleetForgotten {
+            let forgotten = Step::FleetForgotten {
                 directory: shown(&fleet.directory),
-            })?;
-            crate::messages::fleet_leaves(w, &fleet.directory)?;
+            };
+            w.remove_fleet(&fleet.directory, &forgotten)?;
         }
         Ok(())
     }
@@ -160,14 +158,13 @@ impl Reread {
 
 /// Keeps `roster` as `fleet`'s roles and seats, recording what `moved`: a
 /// role before the seats that name it, and after the seats that leave it.
-/// The messages held for a seat that leaves are dropped, and recorded.
+/// State drops, and records, the messages held for a seat that leaves.
 pub(crate) fn set_roster(
     w: &mut Write<'_>,
     fleet: &Path,
     roster: &Roster,
     moved: &RosterChange,
 ) -> Result<(), StateError> {
-    w.set_roster(fleet, roster)?;
     let f = shown(fleet);
     let mut steps = Vec::new();
     for role in &moved.roles_added {
@@ -208,12 +205,7 @@ pub(crate) fn set_roster(
             role: role.clone(),
         });
     }
-    steps.iter().try_for_each(|step| w.record(step))?;
-    for seat in &moved.removed {
-        let ids = w.drop_for_seat(fleet, seat)?;
-        crate::messages::dropped(w, &ids, Dropped::SeatRemoved, Some(fleet))?;
-    }
-    Ok(())
+    w.set_roster(fleet, roster, &steps)
 }
 
 /// Re-reads every fleet's config and turns every project on. A fleet whose

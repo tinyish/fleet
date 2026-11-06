@@ -8,11 +8,11 @@
 use std::path::{Path, PathBuf};
 
 use fleet_core::agent::SessionState;
-use fleet_core::messages::{self, Dropped, Hold, Recipient};
+use fleet_core::messages::{self, Hold, Recipient};
 use fleet_core::protocol::{Reply, Response, Status, request, response};
 use fleet_core::seats::SeatKey;
 use fleet_core::status::{self, Takes};
-use state::{MessageRow, SessionRow, State, StateError, Step, Write, now_millis};
+use state::{MessageRow, SessionRow, State, StateError, Step, now_millis};
 
 use crate::names::{self, Named};
 use crate::observe::Observed;
@@ -173,29 +173,4 @@ fn type_in(sup: &Supervisor, row: &SessionRow, ids: &[String]) -> bool {
             false
         }
     }
-}
-
-/// Records each of `ids` dropped, for `why`, inside the caller's
-/// transaction: the one whose change dropped them. `fleet` is the fleet of
-/// who they were for.
-pub(crate) fn dropped(
-    w: &mut Write<'_>,
-    ids: &[String],
-    why: Dropped,
-    fleet: Option<&Path>,
-) -> Result<(), StateError> {
-    ids.iter().try_for_each(|message| {
-        w.record(&Step::MessageDropped {
-            message: message.clone(),
-            why,
-            fleet: fleet.map(|f| f.display().to_string()),
-        })
-    })
-}
-
-/// Drops, and records, every message held for a seat of the fleet in
-/// `fleet`, which is leaving: removed, or forgotten.
-pub(crate) fn fleet_leaves(w: &mut Write<'_>, fleet: &Path) -> Result<(), StateError> {
-    let ids = w.drop_for_fleet(fleet)?;
-    dropped(w, &ids, Dropped::FleetRemoved, Some(fleet))
 }
