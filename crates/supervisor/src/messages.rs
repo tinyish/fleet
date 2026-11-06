@@ -216,36 +216,12 @@ pub(crate) fn fleet_leaves(w: &mut Write<'_>, fleet: &Path) -> Result<(), StateE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, PoisonError};
+    use std::sync::Arc;
 
-    /// One delivery, as a tick does it: every session read once, then
-    /// delivered from that reading.
-    fn deliver_now(state: &Mutex<State>, tools: &Tools, tending: &Tending, now: i64) {
-        let rows = lock(state).sessions().unwrap_or_default();
-        if let Ok(observed) = crate::observe::observe(tools, &rows, now) {
-            deliver(state, tools, tending, &rows, &observed, now);
-        }
-    }
-
-    use fleet_core::agent::{Activity, Reading};
     use fleet_core::protocol::response;
-    use std::collections::BTreeMap;
 
-    use crate::adapters::Store;
     use crate::tending::{self, Tending};
-    use crate::testing::{FakeAgents, FakeMux, FakeNet, Shared, SharedMux, with_seat};
-
-    fn tools(mux: Arc<FakeMux>, agents: Arc<FakeAgents>) -> Tools {
-        Tools {
-            mux: Box::new(SharedMux(mux)),
-            agents: Box::new(Shared(agents)),
-            net: Box::new(FakeNet::default()),
-        }
-    }
-
-    fn store(root: &Path) -> Store {
-        Store::new(&root.join("st"), Some("https://r".into()))
-    }
+    use crate::testing::{FakeAgents, FakeMux, held, kill_all, steps, store, tools, with_seat};
 
     fn ask(directory: &Path, to: &str, text: &str) -> Send {
         Send {
@@ -256,34 +232,15 @@ mod tests {
         }
     }
 
-    fn steps(state: &Mutex<State>) -> Vec<String> {
-        lock(state).steps().unwrap_or_default()
-    }
-
-    fn held(state: &Mutex<State>) -> Vec<MessageRow> {
-        lock(state).held().unwrap_or_default()
-    }
-
-    fn kill_all(mux: &FakeMux) {
-        for p in mux
-            .panes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter_mut()
-        {
-            p.dead = true;
-        }
-    }
-
     /// A seated fleet filled by one tick at 1 000: its root, state, fleet
-    /// directory, tmux, and its seat's session id and pane.
-    fn filled(name: &str) -> (PathBuf, Mutex<State>, PathBuf, Arc<FakeMux>, String, String) {
+    /// directory, tmux, and its seat's session id.
+    fn filled(name: &str) -> (PathBuf, Mutex<State>, PathBuf, Arc<FakeMux>, String) {
         let (root, state, fleet) = with_seat(name);
         let mux = Arc::new(FakeMux::default());
         let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
         tending::tick(&state, &t, &store(&root), &Tending::new(), 1_000);
         let row = lock(&state).sessions().unwrap_or_default().remove(0);
-        (root, state, fleet.directory, mux, row.id, row.pane)
+        (root, state, fleet.directory, mux, row.id)
     }
 
     /// Who a send's reply says the message was queued for.
@@ -307,7 +264,7 @@ mod tests {
 
     #[test]
     fn a_seat_here_is_queued_for_and_recorded() {
-        let (_root, state, app, mux, _, _) = filled("msg-seat");
+        let (_root, state, app, mux, _) = filled("msg-seat");
         let t = tools(mux, Arc::new(FakeAgents::default()));
         let src = app.join("src");
         let _ = std::fs::create_dir_all(&src);
@@ -331,32 +288,27 @@ mod tests {
 
     #[test]
     fn an_id_reaches_a_session_from_outside_every_fleet() {
-        let (root, state, _, mux, id, _) = filled("msg-id");
+        let (root, state, _, mux, id) = filled("msg-id");
         let t = tools(mux, Arc::new(FakeAgents::default()));
         let to = queued(send(&state, &t, &ask(&root.join("wing"), &id, "hi")));
         assert_eq!(to, Some(Recipient::Session { session: id }));
     }
 
     #[test]
-    fn a_session_gone_or_ended_is_refused_as_ended() {
-        let (root, state, _, mux, id, _) = filled("msg-gone");
+    fn a_session_whose_pane_ended_is_refused_as_ended() {
+        let (root, state, _, mux, id) = filled("msg-gone");
         kill_all(&mux);
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        let ended = Some(
-            status::Message::SessionEnded {
-                session: id.clone(),
-            }
-            .into(),
+        let t = tools(mux, Arc::new(FakeAgents::default()));
+        assert_eq!(
+            refused(send(&state, &t, &ask(&root, &id, "hi"))),
+            Some(status::Message::SessionEnded { session: id }.into())
         );
-        assert_eq!(refused(send(&state, &t, &ask(&root, &id, "hi"))), ended);
-        assert!(crate::sessions::end(&state, &t, &root, &id).is_ok());
-        assert_eq!(refused(send(&state, &t, &ask(&root, &id, "hi"))), ended);
         assert_eq!(held(&state), []);
     }
 
     #[test]
     fn a_tmux_that_cannot_list_refuses_a_session_message() {
-        let (root, state, _, _, id, _) = filled("msg-notmux");
+        let (root, state, _, _, id) = filled("msg-notmux");
         let mux = Arc::new(FakeMux {
             missing: true,
             ..FakeMux::default()
@@ -372,7 +324,7 @@ mod tests {
 
     #[test]
     fn text_that_breaks_the_rules_queues_nothing() {
-        let (_root, state, app, mux, _, _) = filled("msg-text");
+        let (_root, state, app, mux, _) = filled("msg-text");
         let t = tools(mux, Arc::new(FakeAgents::default()));
         assert_eq!(
             refused(send(&state, &t, &ask(&app, "scribe", " \n"))),
@@ -384,292 +336,5 @@ mod tests {
             Some(Status::Message(status::Message::TooLong { .. }))
         ));
         assert_eq!(held(&state), []);
-    }
-
-    /// Adapters reading `session` of `/a/claude` as `activity`.
-    fn reading(session: &str, activity: Activity) -> Arc<FakeAgents> {
-        Arc::new(FakeAgents {
-            readings: Some(BTreeMap::from([(
-                PathBuf::from("/a/claude"),
-                vec![Reading {
-                    session: session.into(),
-                    activity,
-                    reason: None,
-                }],
-            )])),
-            ..FakeAgents::default()
-        })
-    }
-
-    fn typed(mux: &FakeMux) -> Vec<(String, String)> {
-        mux.typed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Queues `text` for `scribe`, sent from `app`.
-    fn sent(state: &Mutex<State>, mux: &Arc<FakeMux>, app: &Path, text: &str) {
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        assert!(queued(send(state, &t, &ask(app, "scribe", text))).is_some());
-    }
-
-    #[test]
-    fn an_idle_agent_gets_every_waiting_message_in_one_paste() {
-        let (_root, state, app, mux, id, pane) = filled("dlv-idle");
-        sent(&state, &mux, &app, "one\n");
-        sent(&state, &mux, &app, "two");
-        let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver_now(&state, &t, &Tending::new(), 60_000);
-        assert_eq!(typed(&mux), [(pane, "one\n\ntwo".to_owned())]);
-        assert_eq!(held(&state), []);
-        let delivered = steps(&state)
-            .iter()
-            .filter(|s| *s == "MESSAGE_DELIVERED")
-            .count();
-        assert_eq!(delivered, 2);
-    }
-
-    #[test]
-    fn nothing_is_typed_unless_the_agent_reads_idle() {
-        let (_root, state, app, mux, id, _) = filled("dlv-busy");
-        sent(&state, &mux, &app, "hi");
-        for activity in [
-            Activity::Working,
-            Activity::NeedsYou,
-            Activity::Starting,
-            Activity::Unknown,
-        ] {
-            let t = tools(mux.clone(), reading(&id, activity));
-            deliver_now(&state, &t, &Tending::new(), 2_000);
-        }
-        let unread = Arc::new(FakeAgents {
-            readings: Some(BTreeMap::new()),
-            ..FakeAgents::default()
-        });
-        deliver_now(&state, &tools(mux.clone(), unread), &Tending::new(), 2_000);
-        assert_eq!(typed(&mux), []);
-        assert_eq!(held(&state).len(), 1);
-    }
-
-    #[test]
-    fn after_a_paste_the_session_is_held_until_it_leaves_idle() {
-        let (_root, state, app, mux, id, _) = filled("dlv-hold");
-        let tending = Tending::new();
-        let idle = || tools(mux.clone(), reading(&id, Activity::Idle));
-        sent(&state, &mux, &app, "first");
-        deliver_now(&state, &idle(), &tending, 10_000);
-        sent(&state, &mux, &app, "second");
-        deliver_now(&state, &idle(), &tending, 12_000);
-        assert_eq!(typed(&mux).len(), 1, "still idle from before the paste");
-        let working = tools(mux.clone(), reading(&id, Activity::Working));
-        deliver_now(&state, &working, &tending, 14_000);
-        assert_eq!(typed(&mux).len(), 1, "working: nothing typed");
-        deliver_now(&state, &idle(), &tending, 16_000);
-        assert_eq!(typed(&mux).last().map(|t| t.1.as_str()), Some("second"));
-    }
-
-    #[test]
-    fn a_hold_ends_after_thirty_seconds_still_idle() {
-        let (_root, state, app, mux, id, _) = filled("dlv-expire");
-        let tending = Tending::new();
-        let idle = || tools(mux.clone(), reading(&id, Activity::Idle));
-        sent(&state, &mux, &app, "first");
-        deliver_now(&state, &idle(), &tending, 10_000);
-        sent(&state, &mux, &app, "second");
-        deliver_now(
-            &state,
-            &idle(),
-            &tending,
-            10_000 + messages::HOLD_MILLIS - 1,
-        );
-        assert_eq!(typed(&mux).len(), 1);
-        deliver_now(&state, &idle(), &tending, 10_000 + messages::HOLD_MILLIS);
-        assert_eq!(typed(&mux).len(), 2);
-    }
-
-    #[test]
-    fn held_messages_survive_a_restart() {
-        let (_root, state, app, mux, id, _) = filled("dlv-restart");
-        sent(&state, &mux, &app, "hi");
-        // A fresh Tending is a restarted supervisor: the same state.
-        let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver_now(&state, &t, &Tending::new(), 5_000);
-        assert_eq!(typed(&mux).len(), 1);
-    }
-
-    #[test]
-    fn a_seat_message_waits_for_the_revived_session() {
-        let (root, state, app, mux, old, _) = filled("dlv-revive");
-        kill_all(&mux);
-        sent(&state, &mux, &app, "hi");
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        deliver_now(&state, &t, &Tending::new(), 2_000);
-        assert_eq!(typed(&mux), [], "no live session: held");
-        assert_eq!(held(&state).len(), 1, "not dropped either");
-        // The next tick revives the seat, then delivers to the new session.
-        tending::tick(&state, &t, &store(&root), &Tending::new(), 3_000);
-        let new = lock(&state).sessions().unwrap_or_default().remove(0);
-        assert_ne!(new.id, old);
-        assert_eq!(typed(&mux), [(new.pane, "hi".to_owned())]);
-    }
-
-    #[test]
-    fn a_hold_starts_when_the_paste_goes_in_not_when_the_tick_began() {
-        let (root, state, app, _, _, _) = filled("dlv-late");
-        // The tick's revival takes 300 ms before delivery runs.
-        let mux = Arc::new(FakeMux {
-            launch_delay: std::time::Duration::from_millis(300),
-            ..FakeMux::default()
-        });
-        sent(&state, &mux, &app, "hi");
-        let tending = Tending::new();
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        tending::tick(&state, &t, &store(&root), &tending, 10_000);
-        assert_eq!(typed(&mux).len(), 1);
-        let since = tending.holds().values().next().map(|h| h.since_millis);
-        assert!(since.is_some_and(|s| s >= 10_300), "{since:?}");
-    }
-
-    #[test]
-    fn an_off_fleets_live_seat_still_gets_its_message() {
-        let (_root, state, app, mux, id, _) = filled("dlv-off");
-        assert!(lock(&state).write(|w| w.set_all_active(false)).is_ok());
-        sent(&state, &mux, &app, "hi");
-        let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver_now(&state, &t, &Tending::new(), 2_000);
-        assert_eq!(typed(&mux).len(), 1);
-    }
-
-    #[test]
-    fn a_paste_that_fails_keeps_the_messages_for_the_next_tick() {
-        let (_root, state, app, mux, id, _) = filled("dlv-fail");
-        sent(&state, &mux, &app, "hi");
-        let panes = mux
-            .panes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let failing = Arc::new(FakeMux {
-            panes: Mutex::new(panes),
-            fail_type: true,
-            ..FakeMux::default()
-        });
-        let tending = Tending::new();
-        deliver_now(
-            &state,
-            &tools(failing, reading(&id, Activity::Idle)),
-            &tending,
-            2_000,
-        );
-        assert_eq!(held(&state).len(), 1);
-        assert!(!steps(&state).iter().any(|s| s == "MESSAGE_DELIVERED"));
-        let t = tools(mux.clone(), reading(&id, Activity::Idle));
-        deliver_now(&state, &t, &tending, 2_100);
-        assert_eq!(typed(&mux).len(), 1, "no hold after a failed paste");
-    }
-
-    /// Queues a message for session `id`, sent from `from`.
-    fn sent_to(state: &Mutex<State>, mux: &Arc<FakeMux>, from: &Path, id: &str) {
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        assert!(queued(send(state, &t, &ask(from, id, "hi"))).is_some());
-    }
-
-    /// Whether `MESSAGE_DROPPED` was recorded after the last `after`.
-    fn dropped_after(state: &Mutex<State>, after: &str) -> bool {
-        let s = steps(state);
-        let at = s.iter().rposition(|x| x == after);
-        let dropped = s.iter().rposition(|x| x == "MESSAGE_DROPPED");
-        at.is_some() && dropped > at
-    }
-
-    #[test]
-    fn ending_a_session_drops_its_messages() {
-        let (root, state, _, mux, id, _) = filled("drop-stop");
-        sent_to(&state, &mux, &root, &id);
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        assert!(crate::sessions::end(&state, &t, &root, &id).is_ok());
-        assert_eq!(held(&state), []);
-        assert!(
-            dropped_after(&state, "SESSION_ENDED"),
-            "{:?}",
-            steps(&state)
-        );
-    }
-
-    #[test]
-    fn ending_a_seats_session_keeps_the_seats_messages() {
-        let (_root, state, app, mux, id, _) = filled("end-keeps-seat");
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        assert!(queued(send(&state, &t, &ask(&app, "scribe", "for the seat"))).is_some());
-        assert!(queued(send(&state, &t, &ask(&app, &id, "for the session"))).is_some());
-        assert!(crate::sessions::end(&state, &t, &app, "scribe").is_ok());
-        let left: Vec<String> = held(&state).into_iter().map(|m| m.text).collect();
-        assert_eq!(left, ["for the seat"]);
-    }
-
-    #[test]
-    fn a_gone_seat_sessions_messages_drop_at_its_revival() {
-        let (root, state, _, mux, id, _) = filled("drop-gone");
-        sent_to(&state, &mux, &root, &id);
-        kill_all(&mux);
-        let t = tools(mux.clone(), Arc::new(FakeAgents::default()));
-        tending::tick(&state, &t, &store(&root), &Tending::new(), 3_000);
-        assert_eq!(held(&state), []);
-        assert!(dropped_after(&state, "SESSION_GONE"), "{:?}", steps(&state));
-        assert_eq!(
-            typed(&mux),
-            [],
-            "a message to a session never follows its seat"
-        );
-    }
-
-    #[test]
-    fn a_seat_taken_out_drops_its_messages() {
-        let (_root, state, app, mux, _, _) = filled("drop-seat");
-        sent(&state, &mux, &app, "hi");
-        let old = lock(&state).roster(&app).unwrap_or_default();
-        let new = fleet_core::seats::Roster {
-            seats: vec![],
-            ..old.clone()
-        };
-        let moved = fleet_core::seats::diff(&old, &new);
-        let written = lock(&state).write(|w| crate::projects::set_roster(w, &app, &new, &moved));
-        assert!(written.is_ok());
-        assert_eq!(held(&state), []);
-        assert!(dropped_after(&state, "SEAT_REMOVED"), "{:?}", steps(&state));
-    }
-
-    #[test]
-    fn removing_the_fleet_drops_its_seats_messages() {
-        let (_root, state, app, mux, _, _) = filled("drop-remove");
-        sent(&state, &mux, &app, "hi");
-        let removed = crate::remove::remove(
-            &state,
-            &app,
-            &[],
-            fleet_core::protocol::request::ConfigChoice::Keep,
-        );
-        assert!(removed.is_ok(), "{removed:?}");
-        assert_eq!(held(&state), []);
-        assert!(
-            dropped_after(&state, "FLEET_REMOVED"),
-            "{:?}",
-            steps(&state)
-        );
-    }
-
-    #[test]
-    fn a_forgotten_fleet_drops_its_seats_messages() {
-        let (_root, state, app, mux, _, _) = filled("drop-forget");
-        sent(&state, &mux, &app, "hi");
-        let _ = std::fs::remove_dir_all(&app);
-        assert!(crate::projects::all_on(&state).is_ok());
-        assert_eq!(held(&state), []);
-        assert!(
-            dropped_after(&state, "FLEET_FORGOTTEN"),
-            "{:?}",
-            steps(&state)
-        );
     }
 }

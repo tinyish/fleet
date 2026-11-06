@@ -3,14 +3,18 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use fleet_core::agent::{
     self, Activity, AdapterFault, Launched, Reading, Readings, SessionRef, Speaks,
 };
 use fleet_core::tools::{AgentAdapters, Multiplexer, Pane, ToolError};
 
-use state::State;
+use state::{MessageRow, State};
+
+use crate::Tools;
+use crate::adapters::Store;
 
 /// A temp tree with repositories `names` under `code/`, a `wing/`
 /// directory, and a state file under `st/`, all canonical.
@@ -137,7 +141,7 @@ pub(crate) struct FakeMux {
     /// Each paste: the pane and the text.
     pub(crate) typed: Mutex<Vec<(String, String)>>,
     /// Whether typing in fails.
-    pub(crate) fail_type: bool,
+    pub(crate) fail_type: AtomicBool,
     /// What each launch ran, in order.
     pub(crate) launched: Mutex<Vec<Launched>>,
     /// How long each launch takes.
@@ -208,7 +212,7 @@ impl Multiplexer for FakeMux {
         if self.missing {
             return Err(not_installed());
         }
-        if self.fail_type {
+        if self.fail_type.load(Ordering::Relaxed) {
             return Err(ToolError::Failed {
                 command: "tmux paste-buffer".into(),
                 said: "no".into(),
@@ -222,8 +226,9 @@ impl Multiplexer for FakeMux {
     }
 }
 
-/// Agent adapters in memory: a launch runs `/bin/agent`, and a read finds
-/// every asked session idle, unless told otherwise.
+/// Agent adapters in memory: a launch runs `/bin/agent`, a read finds
+/// every asked session idle, and each speaks protocol 1, unless told
+/// otherwise.
 #[derive(Default)]
 pub(crate) struct FakeAgents {
     /// The adapter of each launch, in order.
@@ -235,8 +240,21 @@ pub(crate) struct FakeAgents {
     /// How every read fails, if it does.
     pub(crate) read_fault: Option<AdapterFault>,
     /// Each adapter's answer to a read, verbatim; one it does not hold
-    /// answers with no readings. Unset, every asked session is idle.
+    /// answers with no readings. Unset, every asked session reads
+    /// `activity`.
     pub(crate) readings: Option<BTreeMap<PathBuf, Vec<Reading>>>,
+    /// What every asked session reads while `readings` is unset; idle
+    /// until set.
+    pub(crate) activity: Mutex<Option<Activity>>,
+    /// What every adapter says it speaks; unset, protocol 1.
+    pub(crate) speaks: Option<Result<u32, AdapterFault>>,
+}
+
+impl FakeAgents {
+    /// Every asked session reads `activity` from now on.
+    pub(crate) fn read_as(&self, activity: Activity) {
+        *self.activity.lock().unwrap_or_else(PoisonError::into_inner) = Some(activity);
+    }
 }
 
 impl AgentAdapters for FakeAgents {
@@ -267,13 +285,18 @@ impl AgentAdapters for FakeAgents {
                 sessions: readings.get(adapter).cloned().unwrap_or_default(),
             });
         }
+        let activity = self
+            .activity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or(Activity::Idle);
         Ok(Readings {
             sessions: request
                 .sessions
                 .iter()
                 .map(|s| Reading {
                     session: s.session.clone(),
-                    activity: Activity::Idle,
+                    activity,
                     reason: None,
                 })
                 .collect(),
@@ -281,12 +304,15 @@ impl AgentAdapters for FakeAgents {
     }
 
     fn protocol(&self, _: &Path) -> Result<Speaks, AdapterFault> {
-        Ok(Speaks { protocol: 1 })
+        self.speaks
+            .clone()
+            .unwrap_or(Ok(1))
+            .map(|protocol| Speaks { protocol })
     }
 }
 
 /// Agent adapters a test keeps a handle on, to see what was asked of them.
-pub(crate) struct Shared(pub(crate) std::sync::Arc<FakeAgents>);
+pub(crate) struct Shared(pub(crate) Arc<FakeAgents>);
 impl AgentAdapters for Shared {
     fn launch(&self, a: &Path, r: &agent::Launch) -> Result<Launched, AdapterFault> {
         self.0.launch(a, r)
@@ -300,7 +326,7 @@ impl AgentAdapters for Shared {
 }
 
 /// tmux a test keeps a handle on, to see and change its panes.
-pub(crate) struct SharedMux(pub(crate) std::sync::Arc<FakeMux>);
+pub(crate) struct SharedMux(pub(crate) Arc<FakeMux>);
 impl Multiplexer for SharedMux {
     fn launch(&self, s: &str, d: &Path, l: &Launched) -> Result<String, ToolError> {
         self.0.launch(s, d, l)
@@ -314,6 +340,63 @@ impl Multiplexer for SharedMux {
     fn type_in(&self, p: &str, t: &str) -> Result<(), ToolError> {
         self.0.type_in(p, t)
     }
+}
+
+/// A network a test keeps a handle on, to see what was fetched.
+pub(crate) struct SharedNet(pub(crate) Arc<FakeNet>);
+impl fleet_core::tools::Network for SharedNet {
+    fn download(&self, u: &str, to: &Path) -> Result<fleet_core::tools::Fetched, ToolError> {
+        self.0.download(u, to)
+    }
+    fn version(&self) -> Result<String, ToolError> {
+        self.0.version()
+    }
+}
+
+/// The supervisor's tools made of `mux` and `agents`, which the test keeps,
+/// and a network that serves nothing.
+pub(crate) fn tools(mux: Arc<FakeMux>, agents: Arc<FakeAgents>) -> Tools {
+    Tools {
+        mux: Box::new(SharedMux(mux)),
+        agents: Box::new(Shared(agents)),
+        net: Box::new(FakeNet::default()),
+    }
+}
+
+/// The adapter store of a `tree` rooted at `root`, fetching from a base no
+/// test serves.
+pub(crate) fn store(root: &Path) -> Store {
+    Store::new(&root.join("st"), Some("https://r".into()))
+}
+
+/// Every pane on `mux` ended, as when its agent exits.
+pub(crate) fn kill_all(mux: &FakeMux) {
+    for p in mux
+        .panes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter_mut()
+    {
+        p.dead = true;
+    }
+}
+
+/// Each paste on `mux`: the pane and the text.
+pub(crate) fn typed(mux: &FakeMux) -> Vec<(String, String)> {
+    mux.typed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// The kinds of the steps recorded, oldest first.
+pub(crate) fn steps(state: &Mutex<State>) -> Vec<String> {
+    crate::lock(state).steps().unwrap_or_default()
+}
+
+/// The messages held for delivery.
+pub(crate) fn held(state: &Mutex<State>) -> Vec<MessageRow> {
+    crate::lock(state).held().unwrap_or_default()
 }
 
 /// A `tree` with a default fleet in `code/app`, on, whose roster has one

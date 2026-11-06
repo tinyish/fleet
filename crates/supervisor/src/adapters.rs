@@ -230,56 +230,27 @@ mod tests {
     use std::time::Duration;
 
     use fleet_core::adapters::{self, RELEASE_LIST};
-    use fleet_core::agent::{self, AdapterFault, Launched, Readings, Speaks, Verb};
+    use fleet_core::agent::{AdapterFault, Verb};
     use fleet_core::protocol::Status;
-    use fleet_core::tools::{AgentAdapters, Multiplexer, Pane, ToolError};
 
     use crate::Tools;
-    use crate::testing::{BINARY, FakeNet};
+    use crate::testing::{BINARY, FakeAgents, FakeNet, SharedNet, store, tools};
 
     const BASE: &str = "https://r";
 
-    /// Agent adapters that all speak `protocol`, or fail to say.
-    struct Speaking(Result<u32, AdapterFault>);
-
-    impl AgentAdapters for Speaking {
-        fn launch(&self, _: &Path, _: &agent::Launch) -> Result<Launched, AdapterFault> {
-            Err(AdapterFault::BadAnswer {
-                error: "not here".into(),
-            })
-        }
-        fn read(&self, _: &Path, _: &agent::Read) -> Result<Readings, AdapterFault> {
-            Err(AdapterFault::BadAnswer {
-                error: "not here".into(),
-            })
-        }
-        fn protocol(&self, _: &Path) -> Result<Speaks, AdapterFault> {
-            self.0.clone().map(|protocol| Speaks { protocol })
-        }
-    }
-
-    struct NoMux;
-
-    impl Multiplexer for NoMux {
-        fn launch(&self, _: &str, _: &Path, _: &Launched) -> Result<String, ToolError> {
-            Ok("%0".into())
-        }
-        fn panes(&self) -> Result<Vec<Pane>, ToolError> {
-            Ok(vec![])
-        }
-        fn stop(&self, _: &str) -> Result<(), ToolError> {
-            Ok(())
-        }
-        fn type_in(&self, _: &str, _: &str) -> Result<(), ToolError> {
-            Ok(())
-        }
-    }
-
-    fn tools(net: FakeNet, speaks: Result<u32, AdapterFault>) -> Tools {
+    /// The shared tools, fetching through `net`, with adapters that all
+    /// speak `speaks`.
+    fn fetching(
+        net: impl fleet_core::tools::Network + Send + Sync + 'static,
+        speaks: Result<u32, AdapterFault>,
+    ) -> Tools {
+        let agents = FakeAgents {
+            speaks: Some(speaks),
+            ..FakeAgents::default()
+        };
         Tools {
-            mux: Box::new(NoMux),
-            agents: Box::new(Speaking(speaks)),
             net: Box::new(net),
+            ..tools(Arc::default(), Arc::new(agents))
         }
     }
 
@@ -309,12 +280,9 @@ mod tests {
         Dir(d)
     }
 
-    fn store(dir: &Dir) -> Store {
-        Store::new(&dir.0, Some(BASE.into()))
-    }
-
     fn kept(dir: &Dir) -> std::path::PathBuf {
-        dir.0.join("adapters/claude-code/2.1.285/fleet-claude-code")
+        dir.0
+            .join("st/adapters/claude-code/2.1.285/fleet-claude-code")
     }
 
     /// Files whose names start with `.`, left anywhere under the adapters.
@@ -330,7 +298,7 @@ mod tests {
             }
         }
         let mut out = vec![];
-        walk(&dir.0.join("adapters"), &mut out);
+        walk(&dir.0.join("st/adapters"), &mut out);
         out
     }
 
@@ -341,33 +309,23 @@ mod tests {
             files: good(),
             ..FakeNet::default()
         });
-        let t = Tools {
-            mux: Box::new(NoMux),
-            agents: Box::new(Speaking(Ok(1))),
-            net: Box::new(SharedNet(Arc::clone(&net))),
-        };
-        assert_eq!(resolve(&store(&d), &t, "claude-code@2.1.285"), Ok(kept(&d)));
+        let t = fetching(SharedNet(Arc::clone(&net)), Ok(1));
+        assert_eq!(
+            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
+            Ok(kept(&d))
+        );
         assert_eq!(fs::read(kept(&d)).ok().as_deref(), Some(BINARY));
         let mode = fs::metadata(kept(&d))
             .map(|m| m.permissions().mode() & 0o777)
             .ok();
         assert_eq!(mode, Some(0o755));
         assert_eq!(net.count(), 2);
-        assert_eq!(resolve(&store(&d), &t, "claude-code@2.1.285"), Ok(kept(&d)));
+        assert_eq!(
+            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
+            Ok(kept(&d))
+        );
         assert_eq!(net.count(), 2, "a kept adapter is not fetched again");
         assert_eq!(leftovers(&d), Vec::<String>::new());
-    }
-
-    /// A network a test keeps a handle on.
-    struct SharedNet(Arc<FakeNet>);
-
-    impl fleet_core::tools::Network for SharedNet {
-        fn download(&self, url: &str, to: &Path) -> Result<fleet_core::tools::Fetched, ToolError> {
-            self.0.download(url, to)
-        }
-        fn version(&self) -> Result<String, ToolError> {
-            self.0.version()
-        }
     }
 
     #[test]
@@ -375,8 +333,8 @@ mod tests {
         let d = state_dir("missing");
         assert_eq!(
             resolve(
-                &store(&d),
-                &tools(FakeNet::default(), Ok(1)),
+                &store(&d.0),
+                &fetching(FakeNet::default(), Ok(1)),
                 "claude-code@2.1.285"
             ),
             Err(Status::Adapter(status::Adapter::NoSuchRelease {
@@ -400,13 +358,9 @@ mod tests {
             files,
             ..FakeNet::default()
         });
-        let t = Tools {
-            mux: Box::new(NoMux),
-            agents: Box::new(Speaking(Ok(1))),
-            net: Box::new(SharedNet(Arc::clone(&net))),
-        };
+        let t = fetching(SharedNet(Arc::clone(&net)), Ok(1));
         assert!(matches!(
-            resolve(&store(&d), &t, "claude-code@2.1.285"),
+            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
             Err(Status::Adapter(status::Adapter::ReleaseMismatch {
                 what: fleet_core::status::Mismatch::OtherRelease { .. },
                 ..
@@ -427,8 +381,8 @@ mod tests {
         );
         assert!(matches!(
             resolve(
-                &store(&d),
-                &tools(
+                &store(&d.0),
+                &fetching(
                     FakeNet {
                         files,
                         ..FakeNet::default()
@@ -448,13 +402,9 @@ mod tests {
             files: release(2, &adapters::sha256_hex(BINARY)),
             ..FakeNet::default()
         });
-        let t = Tools {
-            mux: Box::new(NoMux),
-            agents: Box::new(Speaking(Ok(2))),
-            net: Box::new(SharedNet(Arc::clone(&net))),
-        };
+        let t = fetching(SharedNet(Arc::clone(&net)), Ok(2));
         assert_eq!(
-            resolve(&store(&d), &t, "claude-code@2.1.285"),
+            resolve(&store(&d.0), &t, "claude-code@2.1.285"),
             Err(Status::Adapter(status::Adapter::ProtocolMismatch {
                 adapter: "claude-code@2.1.285".into(),
                 speaks: 2,
@@ -469,8 +419,8 @@ mod tests {
         let d = state_dir("sha");
         let files = release(1, &"0".repeat(64));
         let got = resolve(
-            &store(&d),
-            &tools(
+            &store(&d.0),
+            &fetching(
                 FakeNet {
                     files,
                     ..FakeNet::default()
@@ -496,8 +446,8 @@ mod tests {
     fn a_binary_speaking_another_protocol_keeps_nothing() {
         let d = state_dir("binary");
         let got = resolve(
-            &store(&d),
-            &tools(
+            &store(&d.0),
+            &fetching(
                 FakeNet {
                     files: good(),
                     ..FakeNet::default()
@@ -527,8 +477,8 @@ mod tests {
         files.retain(|url, _| url.ends_with("manifest.json"));
         assert!(matches!(
             resolve(
-                &store(&d),
-                &tools(
+                &store(&d.0),
+                &fetching(
                     FakeNet {
                         files,
                         ..FakeNet::default()
@@ -554,20 +504,20 @@ mod tests {
             ..FakeNet::default()
         };
         assert_eq!(
-            resolve(&Store::new(&d.0, None), &tools(net, Ok(1)), "claude-code"),
+            resolve(
+                &Store::new(&d.0.join("st"), None),
+                &fetching(net, Ok(1)),
+                "claude-code"
+            ),
             Err(Status::Adapter(status::Adapter::AdapterUnpinned {
                 name: "claude-code".into(),
                 latest: Some("2.1.290".into())
             }))
         );
         let net = Arc::new(FakeNet::default());
-        let t = Tools {
-            mux: Box::new(NoMux),
-            agents: Box::new(Speaking(Ok(1))),
-            net: Box::new(SharedNet(Arc::clone(&net))),
-        };
+        let t = fetching(SharedNet(Arc::clone(&net)), Ok(1));
         assert_eq!(
-            resolve(&store(&d), &t, "claude-code"),
+            resolve(&store(&d.0), &t, "claude-code"),
             Err(Status::Adapter(status::Adapter::AdapterUnpinned {
                 name: "claude-code".into(),
                 latest: None
@@ -584,13 +534,13 @@ mod tests {
     #[test]
     fn a_path_adapter_is_asked_its_protocol() {
         let d = state_dir("path");
-        let s = store(&d);
+        let s = store(&d.0);
         assert_eq!(
-            resolve(&s, &tools(FakeNet::default(), Ok(1)), "/a/mine"),
+            resolve(&s, &fetching(FakeNet::default(), Ok(1)), "/a/mine"),
             Ok("/a/mine".into())
         );
         assert_eq!(
-            resolve(&s, &tools(FakeNet::default(), Ok(2)), "/a/mine"),
+            resolve(&s, &fetching(FakeNet::default(), Ok(2)), "/a/mine"),
             Err(Status::Adapter(status::Adapter::ProtocolMismatch {
                 adapter: "/a/mine".into(),
                 speaks: 2,
@@ -604,7 +554,7 @@ mod tests {
         assert_eq!(
             resolve(
                 &s,
-                &tools(FakeNet::default(), Err(fault.clone())),
+                &fetching(FakeNet::default(), Err(fault.clone())),
                 "/a/mine"
             ),
             Err(Status::Session(status::Session::AdapterFailed {
@@ -628,8 +578,8 @@ mod tests {
         };
         assert_eq!(
             resolve(
-                &store(&d),
-                &tools(net, Err(fault.clone())),
+                &store(&d.0),
+                &fetching(net, Err(fault.clone())),
                 "claude-code@2.1.285"
             ),
             Err(Status::Session(status::Session::AdapterFailed {
@@ -646,8 +596,8 @@ mod tests {
         let d = state_dir("readonly");
         let _ = fs::set_permissions(&d.0, fs::Permissions::from_mode(0o500));
         let got = resolve(
-            &store(&d),
-            &tools(
+            &store(&d.0),
+            &fetching(
                 FakeNet {
                     files: good(),
                     ..FakeNet::default()
@@ -668,7 +618,7 @@ mod tests {
     #[test]
     fn two_fetches_of_one_adapter_both_keep_it() {
         let d = state_dir("race");
-        let t = Arc::new(tools(
+        let t = Arc::new(fetching(
             FakeNet {
                 files: good(),
                 delay: Duration::from_millis(50),
@@ -676,7 +626,7 @@ mod tests {
             },
             Ok(1),
         ));
-        let s = Arc::new(store(&d));
+        let s = Arc::new(store(&d.0));
         let racers: Vec<_> = (0..2)
             .map(|_| {
                 let (t, s) = (Arc::clone(&t), Arc::clone(&s));
@@ -695,8 +645,8 @@ mod tests {
         let d = state_dir("nocurl");
         assert!(matches!(
             resolve(
-                &store(&d),
-                &tools(
+                &store(&d.0),
+                &fetching(
                     FakeNet {
                         no_curl: true,
                         ..FakeNet::default()

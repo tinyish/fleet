@@ -131,7 +131,7 @@ mod tests {
     use state::SessionRow;
 
     use crate::Tools;
-    use crate::testing::{FakeAgents, FakeMux, FakeNet, Shared};
+    use crate::testing::{FakeAgents, FakeMux, tools};
 
     fn row(id: &str, adapter: &str, pane: &str) -> SessionRow {
         SessionRow {
@@ -165,15 +165,13 @@ mod tests {
         }
     }
 
-    fn tools(panes: Vec<Pane>, agents: Arc<FakeAgents>) -> Tools {
-        Tools {
-            mux: Box::new(FakeMux {
-                panes: Mutex::new(panes),
-                ..FakeMux::default()
-            }),
-            agents: Box::new(Shared(agents)),
-            net: Box::new(FakeNet::default()),
-        }
+    /// The shared tools, on tmux holding `panes`.
+    fn on_panes(panes: Vec<Pane>, agents: Arc<FakeAgents>) -> Tools {
+        let mux = FakeMux {
+            panes: Mutex::new(panes),
+            ..FakeMux::default()
+        };
+        tools(Arc::new(mux), agents)
     }
 
     /// The pids each read asked about, per adapter, in order.
@@ -200,7 +198,7 @@ mod tests {
             ..FakeAgents::default()
         });
         // The person's pane is listed last, as tmux lists a split.
-        let t = tools(
+        let t = on_panes(
             vec![pane("s1", "%4", 100, false), pane("s1", "%9", 900, false)],
             agents.clone(),
         );
@@ -216,7 +214,7 @@ mod tests {
     #[test]
     fn the_agents_pane_ended_reads_gone_though_a_split_off_pane_lives() {
         let agents = Arc::new(FakeAgents::default());
-        let t = tools(
+        let t = on_panes(
             vec![pane("s1", "%4", 100, true), pane("s1", "%9", 900, false)],
             agents.clone(),
         );
@@ -224,7 +222,7 @@ mod tests {
             .unwrap_or_else(|_| Observed::default());
         assert_eq!(seen.states.get("s1"), Some(&SessionState::Gone));
         assert_eq!(asked(&agents), vec![], "a gone session is not asked about");
-        let t = tools(vec![pane("s1", "%9", 900, false)], agents.clone());
+        let t = on_panes(vec![pane("s1", "%9", 900, false)], agents.clone());
         let seen = observe(&t, &[row("s1", "/a/claude", "%4")], NOW)
             .unwrap_or_else(|_| Observed::default());
         assert_eq!(seen.states.get("s1"), Some(&SessionState::Gone));
@@ -235,7 +233,7 @@ mod tests {
         // tmux numbers panes from %0 again after its server restarts: s1's
         // row is stale, and s2 now has the pane %0.
         let agents = Arc::new(FakeAgents::default());
-        let t = tools(vec![pane("s2", "%0", 200, false)], agents.clone());
+        let t = on_panes(vec![pane("s2", "%0", 200, false)], agents.clone());
         let seen = observe(&t, &[row("s1", "/a/claude", "%0")], NOW)
             .unwrap_or_else(|_| Observed::default());
         assert_eq!(seen.states.get("s1"), Some(&SessionState::Gone));
@@ -245,7 +243,7 @@ mod tests {
     #[test]
     fn one_read_per_adapter_for_its_live_sessions_only() {
         let agents = Arc::new(FakeAgents::default());
-        let t = tools(
+        let t = on_panes(
             vec![
                 pane("s1", "%1", 101, false),
                 pane("s2", "%2", 102, true),
@@ -281,7 +279,7 @@ mod tests {
             )])),
             ..FakeAgents::default()
         });
-        let t = tools(
+        let t = on_panes(
             vec![pane("s1", "%1", 101, false), pane("s2", "%2", 102, false)],
             agents,
         );
@@ -305,7 +303,7 @@ mod tests {
             read_fault: Some(fault.clone()),
             ..FakeAgents::default()
         });
-        let t = tools(vec![pane("s1", "%1", 101, false)], agents);
+        let t = on_panes(vec![pane("s1", "%1", 101, false)], agents);
         let seen = observe(&t, &[row("s1", "/a/claude", "%1")], NOW)
             .unwrap_or_else(|_| Observed::default());
         assert_eq!(seen.states.get("s1"), Some(&SessionState::Unknown));
@@ -320,14 +318,11 @@ mod tests {
 
     #[test]
     fn tmux_failing_is_the_error() {
-        let t = Tools {
-            mux: Box::new(FakeMux {
-                missing: true,
-                ..FakeMux::default()
-            }),
-            agents: Box::new(FakeAgents::default()),
-            net: Box::new(FakeNet::default()),
+        let mux = FakeMux {
+            missing: true,
+            ..FakeMux::default()
         };
+        let t = tools(Arc::new(mux), Arc::default());
         assert!(matches!(
             observe(&t, &[row("s1", "/a/claude", "%1")], NOW),
             Err(ToolError::CouldNotRun { .. })
@@ -337,7 +332,7 @@ mod tests {
     #[test]
     fn alive_asks_tmux_alone_and_matches_id_and_session() {
         let agents = Arc::new(FakeAgents::default());
-        let t = tools(
+        let t = on_panes(
             vec![
                 pane("s1", "%1", 100, false),
                 pane("s2", "%2", 200, true),

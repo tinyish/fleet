@@ -389,20 +389,7 @@ pub(crate) fn project_off(state: &Mutex<State>, project: &Path) -> Result<Reply,
 mod tests {
     use super::*;
 
-    /// A temp tree with repositories `names` under `code/`, and a state
-    /// file under `st/`.
-    fn tree(name: &str, names: &[&str]) -> (PathBuf, Mutex<State>) {
-        let root = std::env::temp_dir().join(format!("fleet-sup-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        for repo in names {
-            let _ = fs::create_dir_all(root.join("code").join(repo).join(".git"));
-        }
-        let _ = fs::create_dir_all(root.join("st"));
-        let root = fs::canonicalize(&root).unwrap_or(root);
-        let state = State::open(&root.join("st")).ok();
-        assert!(state.is_some());
-        (root, Mutex::new(state.unwrap_or_else(|| unreachable!())))
-    }
+    use crate::testing::{steps, tree};
 
     fn wingman(root: &Path, state: &Mutex<State>, projects: &[&str]) -> Fleet {
         let fleet = Fleet {
@@ -524,10 +511,6 @@ mod tests {
         roster.seats.into_iter().map(|s| s.name).collect()
     }
 
-    fn steps_of(state: &Mutex<State>) -> Vec<String> {
-        lock(state).steps().unwrap_or_default()
-    }
-
     #[test]
     fn start_keeps_each_fleets_roster_and_records_what_moved() {
         let (root, state) = tree("roster-start", &["api"]);
@@ -535,7 +518,7 @@ mod tests {
         write_config_with(&root, &["api"], SEAT);
         assert!(all_on(&state).is_ok());
         assert_eq!(seats_of(&state, &fleet.directory), ["scribe"]);
-        assert!(steps_of(&state).contains(&"SEAT_ADDED".to_owned()));
+        assert!(steps(&state).contains(&"SEAT_ADDED".to_owned()));
         write_config_with(
             &root,
             &["api"],
@@ -543,25 +526,25 @@ mod tests {
         );
         assert!(all_on(&state).is_ok());
         assert_eq!(seats_of(&state, &fleet.directory), ["critic"]);
-        let steps = steps_of(&state);
+        let seen = steps(&state);
         for want in ["SEAT_REMOVED", "ROLE_CHANGED"] {
-            assert!(steps.iter().any(|s| s == want), "{want}: {steps:?}");
+            assert!(seen.iter().any(|s| s == want), "{want}: {seen:?}");
         }
-        assert_eq!(steps.iter().filter(|s| *s == "SEAT_ADDED").count(), 2);
+        assert_eq!(seen.iter().filter(|s| *s == "SEAT_ADDED").count(), 2);
         write_config_with(
             &root,
             &["api"],
             "[roles.k]\nadapter = \"/a/other\"\n[seats.critic]\nrole = \"k\"\n",
         );
         assert!(all_on(&state).is_ok());
-        let steps = steps_of(&state);
+        let seen = steps(&state);
         for want in ["SEAT_CHANGED", "ROLE_ADDED", "ROLE_REMOVED"] {
-            assert!(steps.iter().any(|s| s == want), "{want}: {steps:?}");
+            assert!(seen.iter().any(|s| s == want), "{want}: {seen:?}");
         }
         // Read again unchanged, nothing moved.
-        let before = steps.len();
+        let before = seen.len();
         assert!(all_on(&state).is_ok());
-        let after = steps_of(&state);
+        let after = steps(&state);
         assert!(
             after[before..]
                 .iter()

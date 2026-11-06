@@ -1,6 +1,8 @@
 //! The rule of a wait (core.md § Primitives, States): what a run of
-//! recorded steps means for a wait on a seat, a session or a message.
-//! Pure: the supervisor reads the steps and holds the poll.
+//! recorded steps, or the states already recorded as it starts, mean for a
+//! wait on a seat, a session or a message, and when a message's wait turns
+//! into its session's. Pure: the supervisor reads the record and holds the
+//! poll.
 
 use std::path::Path;
 
@@ -19,7 +21,8 @@ pub enum Verdict {
         /// Its state.
         state: SessionState,
     },
-    /// The message was typed into `session`.
+    /// The message was typed into `session`, and no state was wanted of
+    /// it.
     Delivered {
         /// The session.
         session: String,
@@ -31,23 +34,69 @@ pub enum Verdict {
 }
 
 /// What `steps`, oldest first, mean for a wait on `on` for `states`: the
-/// first step that decides it, or `Keep`.
+/// first step that decides it, or `Keep`; and what is waited on after
+/// them. A message waited on for a state turns, once delivered, into the
+/// session it was typed into, judged from the delivery on.
 #[must_use]
-pub fn judge(on: &Waited, states: &[StateName], steps: &[Event]) -> Verdict {
-    steps
-        .iter()
-        .find_map(|e| match on {
+pub fn judge(on: &Waited, states: &[StateName], steps: &[Event]) -> (Waited, Verdict) {
+    let mut on = on.clone();
+    for e in steps {
+        let verdict = match &on {
             Waited::Seat { fleet, seat } => for_seat(fleet, seat, states, &e.step),
             Waited::Session { session } => for_session(session, states, &e.step),
             Waited::Message { message } => for_message(message, &e.step),
+        };
+        match verdict {
+            Some(Verdict::Delivered { session }) if !states.is_empty() => {
+                on = Waited::Session { session };
+            }
+            Some(decided) => return (on, decided),
+            None => {}
+        }
+    }
+    (on, Verdict::Keep)
+}
+
+/// What a wait on `on` for `states` finds already there as it starts, from
+/// the state last recorded of each of its sessions (`recorded`: a seat's,
+/// or the one session's), each judged as the step that recorded it would
+/// be. A message's own steps say where it is: it has no state.
+#[must_use]
+pub fn already(on: &Waited, states: &[StateName], recorded: &[(String, SessionState)]) -> Verdict {
+    recorded
+        .iter()
+        .find_map(|(session, state)| match on {
+            Waited::Seat { .. } => seat_state(session, states, *state),
+            Waited::Session { .. } => session_state(session, states, *state),
+            Waited::Message { .. } => None,
         })
         .unwrap_or(Verdict::Keep)
+}
+
+/// A seat's session reading `state`: reached when it is wanted.
+fn seat_state(session: &str, states: &[StateName], state: SessionState) -> Option<Verdict> {
+    states
+        .contains(&state.name())
+        .then(|| reached(session, state))
+}
+
+/// The one session reading `state`: reached when it is wanted; never once
+/// it is gone, unless gone is wanted.
+fn session_state(session: &str, states: &[StateName], state: SessionState) -> Option<Verdict> {
+    if states.contains(&state.name()) {
+        Some(reached(session, state))
+    } else if state == SessionState::Gone {
+        Some(Verdict::Never(status::Wait::Gone {
+            session: session.to_owned(),
+        }))
+    } else {
+        None
+    }
 }
 
 /// A seat: any of its sessions reading a wanted state, or gone when gone
 /// is wanted; never once it is taken out or its fleet goes.
 fn for_seat(fleet: &Path, seat: &str, states: &[StateName], step: &Step) -> Option<Verdict> {
-    let wanted = |s: SessionState| states.contains(&s.name());
     let mine = |f: &str, s: &str| Path::new(f) == fleet && s == seat;
     match step {
         Step::SessionStateChanged {
@@ -55,12 +104,12 @@ fn for_seat(fleet: &Path, seat: &str, states: &[StateName], step: &Step) -> Opti
             fleet: Some(f),
             seat: Some(s),
             state,
-        } if mine(f, s) && wanted(*state) => Some(reached(session, *state)),
+        } if mine(f, s) => seat_state(session, states, *state),
         Step::SessionGone {
             session,
             fleet: f,
             seat: s,
-        } if mine(f, s) && wanted(SessionState::Gone) => Some(reached(session, SessionState::Gone)),
+        } if mine(f, s) => seat_state(session, states, SessionState::Gone),
         Step::SeatRemoved { fleet: f, seat: s } if mine(f, s) => {
             Some(Verdict::Never(status::Wait::SeatRemoved {
                 fleet: fleet.to_path_buf(),
@@ -81,29 +130,13 @@ fn for_seat(fleet: &Path, seat: &str, states: &[StateName], step: &Step) -> Opti
 /// One session: a wanted state; never once it is gone (unless gone is
 /// wanted) or ended.
 fn for_session(session: &str, states: &[StateName], step: &Step) -> Option<Verdict> {
-    let wanted = |s: SessionState| states.contains(&s.name());
-    let gone = || {
-        Some(if wanted(SessionState::Gone) {
-            reached(session, SessionState::Gone)
-        } else {
-            Verdict::Never(status::Wait::Gone {
-                session: session.to_owned(),
-            })
-        })
-    };
     match step {
         Step::SessionStateChanged {
             session: s, state, ..
-        } if s == session => {
-            if *state == SessionState::Gone {
-                gone()
-            } else if wanted(*state) {
-                Some(reached(session, *state))
-            } else {
-                None
-            }
+        } if s == session => session_state(session, states, *state),
+        Step::SessionGone { session: s, .. } if s == session => {
+            session_state(session, states, SessionState::Gone)
         }
-        Step::SessionGone { session: s, .. } if s == session => gone(),
         Step::SessionEnded { session: s, .. } if s == session => {
             Some(Verdict::Never(status::Wait::Ended {
                 session: session.to_owned(),
@@ -146,6 +179,11 @@ mod tests {
     use crate::agent::Reason;
     use crate::messages::Dropped;
     use std::path::PathBuf;
+
+    /// What `steps` decide, whatever is waited on after them.
+    fn verdict(on: &Waited, states: &[StateName], steps: &[Event]) -> Verdict {
+        judge(on, states, steps).1
+    }
 
     fn ev(id: i64, step: Step) -> Event {
         Event {
@@ -192,10 +230,13 @@ mod tests {
             ev(2, changed("s1", None, SessionState::Idle)),
         ];
         assert_eq!(
-            judge(&s1(), &[StateName::Idle], &steps),
+            verdict(&s1(), &[StateName::Idle], &steps),
             reached("s1", SessionState::Idle)
         );
-        assert_eq!(judge(&s1(), &[StateName::Gone], &steps[..1]), Verdict::Keep);
+        assert_eq!(
+            verdict(&s1(), &[StateName::Gone], &steps[..1]),
+            Verdict::Keep
+        );
     }
 
     #[test]
@@ -204,7 +245,7 @@ mod tests {
             reason: Some(Reason::Question),
         };
         assert_eq!(
-            judge(
+            verdict(
                 &s1(),
                 &[StateName::NeedsYou],
                 &[ev(1, changed("s1", None, needs))]
@@ -222,7 +263,7 @@ mod tests {
             ev(4, changed("s2", Some("scribe"), SessionState::Idle)),
         ];
         assert_eq!(
-            judge(&scribe(), &[StateName::Idle], &steps),
+            verdict(&scribe(), &[StateName::Idle], &steps),
             reached("s2", SessionState::Idle)
         );
     }
@@ -231,17 +272,17 @@ mod tests {
     fn a_seats_gone_session_is_gone_reached_only_when_gone_is_wanted() {
         let gone = [ev(1, gone_seat("s1"))];
         assert_eq!(
-            judge(&scribe(), &[StateName::Gone], &gone),
+            verdict(&scribe(), &[StateName::Gone], &gone),
             reached("s1", SessionState::Gone)
         );
-        assert_eq!(judge(&scribe(), &[StateName::Idle], &gone), Verdict::Keep);
+        assert_eq!(verdict(&scribe(), &[StateName::Idle], &gone), Verdict::Keep);
     }
 
     #[test]
     fn a_session_gone_or_ended_can_never_reach_another_state() {
         let gone = [ev(1, changed("s1", None, SessionState::Gone))];
         assert_eq!(
-            judge(&s1(), &[StateName::Idle], &gone),
+            verdict(&s1(), &[StateName::Idle], &gone),
             Verdict::Never(status::Wait::Gone {
                 session: "s1".into()
             })
@@ -255,7 +296,7 @@ mod tests {
             },
         )];
         assert_eq!(
-            judge(&s1(), &[StateName::Gone], &ended),
+            verdict(&s1(), &[StateName::Gone], &ended),
             Verdict::Never(status::Wait::Ended {
                 session: "s1".into()
             })
@@ -272,7 +313,7 @@ mod tests {
             },
         )];
         assert_eq!(
-            judge(&scribe(), &[StateName::Idle], &removed),
+            verdict(&scribe(), &[StateName::Idle], &removed),
             Verdict::Never(status::Wait::SeatRemoved {
                 fleet: "/c/app".into(),
                 seat: "scribe".into()
@@ -285,7 +326,7 @@ mod tests {
             },
         )];
         assert_eq!(
-            judge(&scribe(), &[StateName::Idle], &gone),
+            verdict(&scribe(), &[StateName::Idle], &gone),
             Verdict::Never(status::Wait::FleetRemoved {
                 fleet: "/c/app".into()
             })
@@ -301,7 +342,7 @@ mod tests {
             state: SessionState::Idle,
         };
         assert_eq!(
-            judge(&scribe(), &[StateName::Idle], &[ev(1, other)]),
+            verdict(&scribe(), &[StateName::Idle], &[ev(1, other)]),
             Verdict::Keep
         );
     }
@@ -320,7 +361,7 @@ mod tests {
             },
         )];
         assert_eq!(
-            judge(&m1, &[], &delivered),
+            verdict(&m1, &[], &delivered),
             Verdict::Delivered {
                 session: "s1".into()
             }
@@ -334,7 +375,7 @@ mod tests {
             },
         )];
         assert_eq!(
-            judge(&m1, &[], &dropped),
+            verdict(&m1, &[], &dropped),
             Verdict::Never(status::Wait::Dropped {
                 message: "m1".into(),
                 why: Dropped::SeatRemoved
@@ -356,8 +397,75 @@ mod tests {
             ),
         ];
         assert_eq!(
-            judge(&s1(), &[StateName::Idle], &steps),
+            verdict(&s1(), &[StateName::Idle], &steps),
             reached("s1", SessionState::Idle)
         );
+    }
+
+    fn m1() -> Waited {
+        Waited::Message {
+            message: "m1".into(),
+        }
+    }
+
+    fn delivered(id: i64) -> Event {
+        ev(
+            id,
+            Step::MessageDelivered {
+                message: "m1".into(),
+                session: "s1".into(),
+                fleet: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_message_waited_on_for_a_state_turns_into_its_session_once_delivered() {
+        // Idle before the delivery is not the answer; after it, it is.
+        let before = [ev(1, changed("s1", None, SessionState::Idle)), delivered(2)];
+        assert_eq!(
+            judge(&m1(), &[StateName::Idle], &before),
+            (s1(), Verdict::Keep)
+        );
+        let after = [
+            delivered(1),
+            ev(2, changed("s1", None, SessionState::Working)),
+            ev(3, changed("s1", None, SessionState::Idle)),
+        ];
+        assert_eq!(
+            judge(&m1(), &[StateName::Idle], &after),
+            (s1(), reached("s1", SessionState::Idle))
+        );
+        assert_eq!(
+            judge(&m1(), &[], &after[..1]),
+            (
+                m1(),
+                Verdict::Delivered {
+                    session: "s1".into()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn what_is_recorded_already_is_judged_as_the_step_that_recorded_it() {
+        let recorded = [
+            ("s1".to_owned(), SessionState::Gone),
+            ("s2".to_owned(), SessionState::Idle),
+        ];
+        assert_eq!(
+            already(&scribe(), &[StateName::Idle], &recorded),
+            reached("s2", SessionState::Idle),
+            "a seat's gone session is not the end of it"
+        );
+        assert_eq!(
+            already(&s1(), &[StateName::Idle], &recorded[..1]),
+            Verdict::Never(status::Wait::Gone {
+                session: "s1".into()
+            })
+        );
+        let working = [("s1".to_owned(), SessionState::Working)];
+        assert_eq!(already(&s1(), &[StateName::Idle], &working), Verdict::Keep);
+        assert_eq!(already(&m1(), &[], &working), Verdict::Keep);
     }
 }

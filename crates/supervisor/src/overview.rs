@@ -191,21 +191,8 @@ mod tests {
     use fleet_core::protocol::Response;
     use fleet_core::seats::Roster;
 
-    use crate::adapters::Store;
     use crate::tending::{self, Tending};
-    use crate::testing::{FakeAgents, FakeMux, FakeNet, Shared, SharedMux, with_seat};
-
-    fn tools(mux: Arc<FakeMux>, agents: Arc<FakeAgents>) -> Tools {
-        Tools {
-            mux: Box::new(SharedMux(mux)),
-            agents: Box::new(Shared(agents)),
-            net: Box::new(FakeNet::default()),
-        }
-    }
-
-    fn store(root: &Path) -> Store {
-        Store::new(&root.join("st"), Some("https://r".into()))
-    }
+    use crate::testing::{FakeAgents, FakeMux, kill_all, store, tools, with_seat};
 
     fn answer(
         state: &Mutex<State>,
@@ -424,14 +411,7 @@ mod tests {
     #[test]
     fn a_seat_whose_session_lives_is_not_down() {
         let (root, state, mux, t, tending) = filled("ov-up");
-        for p in mux
-            .panes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter_mut()
-        {
-            p.dead = true;
-        }
+        kill_all(&mux);
         // Revived at once after one quick end: up again, its backoff kept.
         tending::tick(&state, &t, &store(&root), &tending, 2_000);
         assert!(!tending.down().is_empty());

@@ -9,6 +9,8 @@ mod observe;
 mod overview;
 mod projects;
 mod remove;
+#[cfg(test)]
+mod scenarios;
 mod sessions;
 mod tending;
 #[cfg(test)]
@@ -145,32 +147,27 @@ fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
         pid: std::process::id(),
     };
     state.write(|w| w.record(&started))?;
-    let state = Arc::new(Mutex::new(state));
-    let tools = Arc::new(tools);
-    let store = Arc::new(adapters::Store::new(
+    let store = adapters::Store::new(
         state_dir,
         std::env::var(fleet_core::adapters::BASE_VAR).ok(),
-    ));
-    let tending = Arc::new(tending::Tending::new());
+    );
+    let supervisor = Arc::new(Supervisor::new(state, tools, store));
     {
-        let (state, tools, store, tending) = (
-            Arc::clone(&state),
-            Arc::clone(&tools),
-            Arc::clone(&store),
-            Arc::clone(&tending),
-        );
-        thread::spawn(move || tending::run(&state, &tools, &store, &tending));
+        let supervisor = Arc::clone(&supervisor);
+        thread::spawn(move || {
+            loop {
+                supervisor.tick(state::now_millis());
+                supervisor.tending.wait();
+            }
+        });
     }
 
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                let state = Arc::clone(&state);
-                let tools = Arc::clone(&tools);
-                let store = Arc::clone(&store);
-                let tending = Arc::clone(&tending);
+                let supervisor = Arc::clone(&supervisor);
                 thread::spawn(move || {
-                    if let Err(e) = answer(&state, &tools, &store, &tending, &stream) {
+                    if let Err(e) = answer(&supervisor, &stream) {
                         log(&words::request_failed(&e));
                     }
                 });
@@ -182,13 +179,8 @@ fn serve(state_dir: &Path, tools: Tools) -> Result<(), Error> {
     Ok(())
 }
 
-fn answer(
-    state: &Mutex<State>,
-    tools: &Tools,
-    store: &adapters::Store,
-    tending: &tending::Tending,
-    stream: &UnixStream,
-) -> Result<(), Error> {
+/// Answers the one request on `stream`.
+fn answer(supervisor: &Supervisor, stream: &UnixStream) -> Result<(), Error> {
     stream
         .set_read_timeout(Some(TIMEOUT))
         .map_err(|e| Error::Io(Doing::SettingTimeout, e))?;
@@ -196,76 +188,120 @@ fn answer(
         .set_write_timeout(Some(TIMEOUT))
         .map_err(|e| Error::Io(Doing::SettingTimeout, e))?;
     let reply = match protocol::read_request(&mut BufReader::new(stream)) {
-        Ok(Request::Hello) => Reply::Response(Response::Hello(response::Hello {
-            version: VERSION.to_owned(),
-            schema_version: Some(state::SCHEMA_VERSION),
-        })),
-        Ok(Request::Start(request::Start::All)) => projects::all_on(state)?,
-        Ok(Request::Start(request::Start::Project { project })) => {
-            projects::project_on(state, &project)?
-        }
-        Ok(Request::Stop(request::Stop::All)) => projects::all_off(state)?,
-        Ok(Request::Stop(request::Stop::Project { project })) => {
-            projects::project_off(state, &project)?
-        }
-        Ok(Request::Create(request::Create::Fleet {
-            directory,
-            projects,
-        })) => create::create(state, &directory, &projects)?,
-        Ok(Request::Remove(request::Remove::Fleet {
-            directory,
-            projects,
-            config,
-        })) => remove::remove(state, &directory, &projects, config)?,
-        Ok(Request::Spawn(request::Spawn::Session {
-            directory,
-            role,
-            working_directory,
-        })) => sessions::spawn(
-            state,
-            tools,
-            store,
-            &directory,
-            &role,
-            working_directory.as_deref(),
-        )?,
-        Ok(Request::Overview { directory }) => {
-            overview::overview(state, tools, tending, &directory)?
-        }
-        Ok(Request::End(request::End::Session { directory, name })) => {
-            sessions::end(state, tools, &directory, &name)?
-        }
-        Ok(Request::Message(request::Message::Send {
-            directory,
-            to,
-            text,
-            sender,
-        })) => messages::send(
-            state,
-            tools,
-            &messages::Send {
-                directory,
-                to,
-                text,
-                sender,
-            },
-        )?,
-        Ok(Request::Events(request::Events::Follow {
-            directory,
-            from,
-            hold_millis,
-        })) => watch::events(state, &directory, from, watch::hold(hold_millis))?,
-        Ok(Request::Wait(ask)) => watch::wait(state, &ask)?,
+        Ok(request) => supervisor.ask(request)?,
         // The parser's own detail; any other failure means no reply could
         // reach the other side, so it is only logged.
         Err(ProtocolError::Malformed(error)) => Reply::Status(Status::Malformed { error }),
         Err(e) => return Err(Error::Protocol(e)),
     };
-    if wakes_tending(&reply) {
-        tending.poke();
-    }
     let mut writer = stream;
     protocol::write_reply(&mut writer, &reply).map_err(Error::Protocol)
+}
+
+/// The supervisor in process: its state, the tools it drives, its kept
+/// adapters and its tending loop's memory. It answers a request, and runs a
+/// tick at the time it is given; the socket and the clock are the caller's.
+struct Supervisor {
+    state: Mutex<State>,
+    tools: Tools,
+    store: adapters::Store,
+    tending: tending::Tending,
+}
+
+impl Supervisor {
+    /// A supervisor on `state`, as it starts: nothing backing off, no
+    /// session held after a paste.
+    fn new(state: State, tools: Tools, store: adapters::Store) -> Supervisor {
+        Supervisor {
+            state: Mutex::new(state),
+            tools,
+            store,
+            tending: tending::Tending::new(),
+        }
+    }
+
+    /// The reply to `request`. A reply that may leave work for the tending
+    /// loop wakes it.
+    fn ask(&self, request: Request) -> Result<Reply, Error> {
+        let (state, tools) = (&self.state, &self.tools);
+        let reply = match request {
+            Request::Hello => Reply::Response(Response::Hello(response::Hello {
+                version: VERSION.to_owned(),
+                schema_version: Some(state::SCHEMA_VERSION),
+            })),
+            Request::Start(request::Start::All) => projects::all_on(state)?,
+            Request::Start(request::Start::Project { project }) => {
+                projects::project_on(state, &project)?
+            }
+            Request::Stop(request::Stop::All) => projects::all_off(state)?,
+            Request::Stop(request::Stop::Project { project }) => {
+                projects::project_off(state, &project)?
+            }
+            Request::Create(request::Create::Fleet {
+                directory,
+                projects,
+            }) => create::create(state, &directory, &projects)?,
+            Request::Remove(request::Remove::Fleet {
+                directory,
+                projects,
+                config,
+            }) => remove::remove(state, &directory, &projects, config)?,
+            Request::Spawn(request::Spawn::Session {
+                directory,
+                role,
+                working_directory,
+            }) => sessions::spawn(
+                state,
+                tools,
+                &self.store,
+                &directory,
+                &role,
+                working_directory.as_deref(),
+            )?,
+            Request::Overview { directory } => {
+                overview::overview(state, tools, &self.tending, &directory)?
+            }
+            Request::End(request::End::Session { directory, name }) => {
+                sessions::end(state, tools, &directory, &name)?
+            }
+            Request::Message(request::Message::Send {
+                directory,
+                to,
+                text,
+                sender,
+            }) => messages::send(
+                state,
+                tools,
+                &messages::Send {
+                    directory,
+                    to,
+                    text,
+                    sender,
+                },
+            )?,
+            Request::Events(request::Events::Follow {
+                directory,
+                from,
+                hold_millis,
+            }) => watch::events(state, &directory, from, watch::hold(hold_millis))?,
+            Request::Wait(ask) => watch::wait(state, &ask)?,
+        };
+        if wakes_tending(&reply) {
+            self.tending.poke();
+        }
+        Ok(reply)
+    }
+
+    /// One tick of the tending loop at `now_millis`.
+    fn tick(&self, now_millis: i64) {
+        tending::tick(
+            &self.state,
+            &self.tools,
+            &self.store,
+            &self.tending,
+            now_millis,
+        );
+    }
 }
 
 /// Whether `reply` may leave work for the tending loop, so it should tend

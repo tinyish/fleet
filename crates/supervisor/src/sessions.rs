@@ -436,20 +436,7 @@ mod tests {
     use fleet_core::tools::{AgentAdapters, Pane};
 
     use crate::Tools;
-    use crate::testing::{FakeAgents, FakeMux, FakeNet, Shared, SharedMux, code, crew};
-
-    fn tools(mux: FakeMux, adapters: FakeAgents) -> Tools {
-        Tools {
-            mux: Box::new(mux),
-            agents: Box::new(adapters),
-            net: Box::new(FakeNet::default()),
-        }
-    }
-
-    /// The tree's adapter store, fetching from a base no test serves.
-    fn store(root: &Path) -> crate::adapters::Store {
-        crate::adapters::Store::new(&root.join("st"), Some("https://r".into()))
-    }
+    use crate::testing::{FakeAgents, FakeMux, FakeNet, code, crew, kill_all, store, tools};
 
     /// Spawns role `role` from `from`, with the tree's store.
     fn spawn_in(
@@ -496,30 +483,10 @@ mod tests {
         }
     }
 
-    /// Tools whose tmux a test keeps a handle on.
-    fn watched(mux: &Arc<FakeMux>) -> Tools {
-        Tools {
-            mux: Box::new(SharedMux(mux.clone())),
-            agents: Box::new(FakeAgents::default()),
-            net: Box::new(FakeNet::default()),
-        }
-    }
-
-    fn kill_all(mux: &FakeMux) {
-        for p in mux
-            .panes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter_mut()
-        {
-            p.dead = true;
-        }
-    }
-
     #[test]
     fn a_spawned_session_lists_with_the_adapters_reading() {
         let (root, state, wing) = crew("sess-list", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         let id = spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker"));
         assert!(id.starts_with('s') && id.len() == 11, "{id}");
         let (sessions, faults) = spawned_of(&state, &tools, &wing);
@@ -534,7 +501,7 @@ mod tests {
     #[test]
     fn a_session_whose_pane_ended_is_gone_without_asking_the_adapter() {
         let (root, state, wing) = crew("sess-gone", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         assert_ne!(
             spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker")),
             ""
@@ -545,18 +512,17 @@ mod tests {
             .into_iter()
             .map(|p| Pane { dead: true, ..p })
             .collect();
-        let tools = Tools {
-            mux: Box::new(FakeMux {
+        let tools = crate::testing::tools(
+            Arc::new(FakeMux {
                 panes: Mutex::new(dead),
                 ..FakeMux::default()
             }),
             // Asked at all, it would fail, and say so in `faults`.
-            agents: Box::new(FakeAgents {
+            Arc::new(FakeAgents {
                 read_fault: Some(AdapterFault::TimedOut { after_millis: 1 }),
                 ..FakeAgents::default()
             }),
-            net: Box::new(FakeNet::default()),
-        };
+        );
         let (sessions, faults) = spawned_of(&state, &tools, &wing);
         assert_eq!(sessions[0].state, SessionState::Gone);
         assert_eq!(faults, []);
@@ -569,11 +535,11 @@ mod tests {
             after_millis: 20_000,
         };
         let tools = tools(
-            FakeMux::default(),
-            FakeAgents {
+            Arc::default(),
+            Arc::new(FakeAgents {
                 read_fault: Some(fault.clone()),
                 ..FakeAgents::default()
-            },
+            }),
         );
         assert_ne!(
             spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker")),
@@ -594,11 +560,11 @@ mod tests {
     fn a_failed_tmux_launch_leaves_no_session_and_no_record() {
         let (root, state, wing) = crew("sess-tmux-fails", &[("worker", "/a/claude")]);
         let tools = tools(
-            FakeMux {
+            Arc::new(FakeMux {
                 fail_launch: true,
                 ..FakeMux::default()
-            },
-            FakeAgents::default(),
+            }),
+            Arc::default(),
         );
         let reply = spawn_in(&state, &tools, &root, &wing, "worker");
         assert!(
@@ -615,11 +581,11 @@ mod tests {
     fn a_tmux_that_is_not_installed_is_said_so() {
         let (root, state, wing) = crew("sess-no-tmux", &[("worker", "/a/claude")]);
         let tools = tools(
-            FakeMux {
+            Arc::new(FakeMux {
                 missing: true,
                 ..FakeMux::default()
-            },
-            FakeAgents::default(),
+            }),
+            Arc::default(),
         );
         assert_eq!(
             spawn_in(&state, &tools, &root, &wing, "worker"),
@@ -642,11 +608,7 @@ mod tests {
                 .is_ok()
         );
         let agents = Arc::new(FakeAgents::default());
-        let tools = Tools {
-            mux: Box::new(FakeMux::default()),
-            agents: Box::new(Shared(agents.clone())),
-            net: Box::new(FakeNet::default()),
-        };
+        let tools = tools(Arc::default(), agents.clone());
         assert_eq!(
             spawn_in(&state, &tools, &root, &wing, "worker"),
             Reply::Status(Status::File(status::File::Missing { path: nope }))
@@ -668,11 +630,11 @@ mod tests {
             said: "claude: not found".into(),
         };
         let tools = tools(
-            FakeMux::default(),
-            FakeAgents {
+            Arc::default(),
+            Arc::new(FakeAgents {
                 launch_fault: Some(fault.clone()),
                 ..FakeAgents::default()
-            },
+            }),
         );
         assert_eq!(
             spawn_in(&state, &tools, &root, &wing, "worker"),
@@ -696,7 +658,7 @@ mod tests {
     #[test]
     fn a_spawned_session_ends_by_its_id_and_a_second_end_changes_nothing() {
         let (root, state, wing) = crew("end-spawned", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         let id = spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker"));
         assert_eq!(
             end_in(&state, &tools, &root, &id),
@@ -721,7 +683,7 @@ mod tests {
     fn a_gone_session_ends_and_is_cleared() {
         let (root, state, wing) = crew("end-gone", &[("worker", "/a/claude")]);
         let mux = Arc::new(FakeMux::default());
-        let tools = watched(&mux);
+        let tools = tools(mux.clone(), Arc::default());
         let id = spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker"));
         kill_all(&mux);
         assert!(matches!(
@@ -729,36 +691,6 @@ mod tests {
             Reply::Response(Response::End(_))
         ));
         assert_eq!(spawned_of(&state, &tools, &wing).0, []);
-    }
-
-    #[test]
-    fn ending_a_seat_revives_it_fresh_without_backing_off() {
-        let (root, state, fleet) = crate::testing::with_seat("end-seat");
-        let app = fleet.directory;
-        let mux = Arc::new(FakeMux::default());
-        let tools = watched(&mux);
-        let tending = crate::tending::Tending::new();
-        crate::tending::tick(&state, &tools, &store(&root), &tending, 1_000);
-        for (n, now) in [(1_i64, 2_000), (2, 3_000)] {
-            let first = crate::lock(&state)
-                .sessions()
-                .unwrap_or_default()
-                .remove(0)
-                .id;
-            assert_eq!(
-                end_in(&state, &tools, &app, "scribe"),
-                Reply::Response(Response::End(response::End::Ended {
-                    session: first.clone(),
-                    seat: Some("scribe".into()),
-                })),
-                "end {n}"
-            );
-            crate::tending::tick(&state, &tools, &store(&root), &tending, now);
-            let rows = crate::lock(&state).sessions().unwrap_or_default();
-            assert_eq!(rows.len(), 1, "end {n}");
-            assert_ne!(rows[0].id, first, "end {n}: a fresh session");
-            assert!(tending.down().is_empty(), "end {n}: no backoff");
-        }
     }
 
     #[test]
@@ -772,7 +704,7 @@ mod tests {
         for (what, change) in changes {
             let (root, state, fleet) =
                 crate::testing::with_seat(&format!("end-unrevived-{}", what.len()));
-            let tools = watched(&Arc::new(FakeMux::default()));
+            let tools = tools(Arc::default(), Arc::default());
             crate::tending::tick(
                 &state,
                 &tools,
@@ -804,7 +736,7 @@ mod tests {
     #[test]
     fn a_seat_with_no_live_session_is_refused() {
         let (_root, state, fleet) = crate::testing::with_seat("end-not-running");
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         assert_eq!(
             end_in(&state, &tools, &fleet.directory, "scribe"),
             Reply::Status(Status::Session(status::Session::SeatNotRunning {
@@ -818,19 +750,25 @@ mod tests {
     fn a_tmux_that_fails_to_end_changes_nothing() {
         let (root, state, wing) = crew("end-tmux", &[("worker", "/a/claude")]);
         let mux = Arc::new(FakeMux::default());
-        let id = spawned_id(&spawn_in(&state, &watched(&mux), &root, &wing, "worker"));
+        let id = spawned_id(&spawn_in(
+            &state,
+            &tools(mux.clone(), Arc::default()),
+            &root,
+            &wing,
+            "worker",
+        ));
         let panes = mux
             .panes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let failing = tools(
-            FakeMux {
+            Arc::new(FakeMux {
                 panes: Mutex::new(panes),
                 stop_fails: Some("no"),
                 ..FakeMux::default()
-            },
-            FakeAgents::default(),
+            }),
+            Arc::default(),
         );
         assert!(matches!(
             end_in(&state, &failing, &wing, &id),
@@ -846,12 +784,11 @@ mod tests {
         let (root, state, wing) = crew("sess-named", &[("worker", "claude-code@2.1.285")]);
         let adapters = Arc::new(FakeAgents::default());
         let tools = Tools {
-            mux: Box::new(FakeMux::default()),
-            agents: Box::new(Shared(adapters.clone())),
             net: Box::new(FakeNet {
                 files: crate::testing::good_release("https://r"),
                 ..FakeNet::default()
             }),
+            ..tools(Arc::default(), adapters.clone())
         };
         let reply = spawn_in(&state, &tools, &root, &wing, "worker");
         assert_ne!(spawned_id(&reply), "", "{reply:?}");
@@ -878,11 +815,7 @@ mod tests {
         // not read, but resolving refuses it here too.
         let (root, state, wing) = crew("sess-bare", &[("worker", "claude-code")]);
         let adapters = Arc::new(FakeAgents::default());
-        let tools = Tools {
-            mux: Box::new(FakeMux::default()),
-            agents: Box::new(Shared(adapters.clone())),
-            net: Box::new(FakeNet::default()),
-        };
+        let tools = tools(Arc::default(), adapters.clone());
         assert_eq!(
             spawn_in(&state, &tools, &root, &wing, "worker"),
             Reply::Status(Status::Adapter(status::Adapter::AdapterUnpinned {
@@ -903,11 +836,7 @@ mod tests {
     fn sessions_of_two_adapters_are_read_one_call_each() {
         let (root, state, wing) = crew("sess-two", &[("one", "/a/one"), ("two", "/a/two")]);
         let adapters = Arc::new(FakeAgents::default());
-        let tools = Tools {
-            mux: Box::new(FakeMux::default()),
-            agents: Box::new(Shared(adapters.clone())),
-            net: Box::new(FakeNet::default()),
-        };
+        let tools = tools(Arc::default(), adapters.clone());
         for role in ["one", "two", "one"] {
             assert_ne!(
                 spawned_id(&spawn_in(&state, &tools, &root, &wing, role)),
@@ -947,7 +876,7 @@ mod tests {
     fn a_spawned_agent_is_told_its_session_id() {
         let (root, state, wing) = crew("sess-env", &[("worker", "/a/claude")]);
         let mux = Arc::new(FakeMux::default());
-        let tools = watched(&mux);
+        let tools = tools(mux.clone(), Arc::default());
         let id = spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker"));
         let env = mux
             .launched
@@ -963,7 +892,7 @@ mod tests {
     #[test]
     fn a_spawn_runs_in_the_roles_directory_and_records_its_fleet_and_role() {
         let (root, state, wing) = crew("spawn-role", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         let from = code(&root, "app").join("src");
         let _ = std::fs::create_dir_all(&from);
         let reply = spawn_in(&state, &tools, &root, &from, "worker");
@@ -1004,7 +933,7 @@ mod tests {
     #[test]
     fn a_spawn_may_name_one_of_the_fleets_projects() {
         let (root, state, wing) = crew("spawn-named", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         let lib = code(&root, "lib");
         let reply = spawn(&state, &tools, &store(&root), &wing, "worker", Some(&lib)).ok();
         assert!(
@@ -1016,7 +945,7 @@ mod tests {
     #[test]
     fn a_named_project_is_matched_after_canonicalizing() {
         let (root, state, wing) = crew("spawn-canon", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         let long_way = code(&root, "app").join("../lib");
         let lib = code(&root, "lib");
         let reply = spawn(
@@ -1037,7 +966,7 @@ mod tests {
     #[test]
     fn a_directory_that_is_no_project_root_is_refused() {
         let (root, state, wing) = crew("spawn-not-project", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         let src = code(&root, "app").join("src");
         let _ = std::fs::create_dir_all(&src);
         for named in [src, wing.clone()] {
@@ -1059,7 +988,7 @@ mod tests {
     #[test]
     fn a_spawn_outside_every_fleet_or_of_no_such_role_is_refused() {
         let (root, state, wing) = crew("spawn-nowhere", &[("worker", "/a/claude")]);
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         assert_eq!(
             spawn_in(&state, &tools, &root, &root, "worker"),
             Reply::Status(Status::Session(status::Session::NoFleetHere {
@@ -1101,12 +1030,11 @@ mod tests {
         let (root, state, wing) = crew("spawn-race", &[("worker", "/a/claude")]);
         let state = Arc::new(state);
         let tools = Tools {
-            mux: Box::new(FakeMux::default()),
             agents: Box::new(RemovesFleet {
                 state: state.clone(),
                 fleet: wing.clone(),
             }),
-            net: Box::new(FakeNet::default()),
+            ..tools(Arc::default(), Arc::default())
         };
         assert_eq!(
             spawn_in(&state, &tools, &root, &wing, "worker"),
@@ -1128,50 +1056,10 @@ mod tests {
                 .write(|w| w.set_all_active(false))
                 .is_ok()
         );
-        let tools = tools(FakeMux::default(), FakeAgents::default());
+        let tools = tools(Arc::default(), Arc::default());
         assert_ne!(
             spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker")),
             ""
-        );
-    }
-
-    #[test]
-    fn tending_never_revives_or_adopts_a_spawned_session() {
-        let (root, state, wing) = crew("spawn-gone", &[("worker", "/a/claude")]);
-        let mux = Arc::new(FakeMux::default());
-        let tools = watched(&mux);
-        let id = spawned_id(&spawn_in(&state, &tools, &root, &wing, "worker"));
-        kill_all(&mux);
-        // A tick, then a restarted supervisor's first tick.
-        crate::tending::tick(
-            &state,
-            &tools,
-            &store(&root),
-            &crate::tending::Tending::new(),
-            1_000,
-        );
-        crate::tending::tick(
-            &state,
-            &tools,
-            &store(&root),
-            &crate::tending::Tending::new(),
-            2_000,
-        );
-        assert_eq!(
-            mux.launched
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .len(),
-            1,
-            "launched once, by the spawn"
-        );
-        let (sessions, _) = spawned_of(&state, &tools, &wing);
-        assert_eq!(
-            sessions
-                .iter()
-                .map(|s| (s.session.clone(), s.state))
-                .collect::<Vec<_>>(),
-            [(id, SessionState::Gone)]
         );
     }
 
@@ -1245,13 +1133,13 @@ mod tests {
                     .write(|w| change(w, &fleet.directory))
                     .is_ok()
             );
-            let t = tools(FakeMux::default(), FakeAgents::default());
+            let t = tools(Arc::default(), Arc::default());
             assert!(!started_anything(&state, &t, &root, &ask), "{what}");
         }
         // Still wanted, it launches.
         let (root, state, fleet) = crate::testing::with_seat("sess-wanted");
         let ask = seat_ask(&state, &fleet.directory);
-        let t = tools(FakeMux::default(), FakeAgents::default());
+        let t = tools(Arc::default(), Arc::default());
         assert!(started_anything(&state, &t, &root, &ask));
     }
 

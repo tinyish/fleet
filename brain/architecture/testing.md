@@ -11,6 +11,15 @@ code can be thrown away, the evals are kept.
 - **Unit tests:** part of the code. They test one implementation and may be
   regenerated with it. A unit test earns its place only for pure logic no
   eval reaches cheaply, such as a parser. They live inline, beside the code.
+- **The in-process supervisor:** scenarios across the supervisor's modules,
+  such as a message sent, typed in at a tick and waited on until delivered.
+  One supervisor value holds the state, the tools and the tending loop's
+  memory; a test asks it protocol requests and runs each tick at a time of
+  its own, with tmux and the agents faked, so the step one module records is
+  the one another judges. They live in the supervisor's `scenarios` module,
+  and a scenario covered there is not tested again module by module. Like
+  unit tests, they test this implementation; Delivery's CLI evals still come
+  once its milestone is built.
 - **Fitness tests:** check `core.md`'s invariants and dependency rules by
   reading the workspace's dependency graph; a dependency or placement
   `core.md` does not allow fails them.
